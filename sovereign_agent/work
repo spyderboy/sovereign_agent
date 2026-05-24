@@ -1,0 +1,6 @@
+#!/bin/bash
+# Wrapper — activates the venv and runs work.py
+# Usage: ./work --project ~/Code/astro_flux
+DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$DIR/.venv/bin/activate"
+python "$DIR/work.py" "$@"

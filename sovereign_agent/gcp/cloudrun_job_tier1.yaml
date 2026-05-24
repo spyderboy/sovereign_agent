@@ -1,0 +1,82 @@
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: sovereign-worker-tier1
+  # Update this to match your GCP project / region
+  annotations:
+    run.googleapis.com/launch-stage: BETA
+spec:
+  template:
+    metadata:
+      annotations:
+        # ── GPU: NVIDIA T4 (pay-per-second, zero idle cost) ──────────────────
+        # T4 has 16 GB VRAM — plenty for a 7B Q4 model (~4.5 GB)
+        run.googleapis.com/accelerator: nvidia-tesla-t4
+        run.googleapis.com/accelerator-count: "1"
+
+        # Keep the container alive up to 60 min per task
+        run.googleapis.com/execution-environment: gen2
+
+    spec:
+      # How many parallel task instances to run in one job execution.
+      # Each instance pulls one Pub/Sub message. Scale this up to drain
+      # the queue faster (e.g. parallelism: 8 runs 8 workers at once).
+      parallelism: 4
+      taskCount: 4          # must equal parallelism for concurrent pulls
+      template:
+        spec:
+          timeoutSeconds: 3600   # max 1 hour per task
+          maxRetries: 1          # retry once on infra failure
+
+          containers:
+            - image: gcr.io/YOUR_PROJECT_ID/sovereign-worker:latest
+              # ── Environment variables ────────────────────────────────────
+              env:
+                - name: WORKER_TIER
+                  value: "1"
+
+                # Ollama is started inside the container by the entrypoint;
+                # point to localhost.
+                - name: OLLAMA_URL
+                  value: "http://localhost:11434"
+
+                - name: TIER1_MODEL
+                  value: "qwen2.5-coder:7b-instruct-q4_K_M"
+
+                # Your project repo — workers clone fresh each run
+                - name: PROJECT_REPO
+                  value: "https://github.com/YOU/YOUR_REPO.git"
+
+                - name: PROJECT_BRANCH
+                  value: "main"
+
+                - name: FIRESTORE_PROJECT_ID
+                  value: "YOUR_GCP_PROJECT_ID"
+
+                - name: GCP_PROJECT
+                  value: "YOUR_GCP_PROJECT_ID"
+
+                # Pull at most 10 minutes before giving up (queue may be
+                # empty if all tasks are in-flight on other workers)
+                - name: PULL_TIMEOUT_S
+                  value: "600"
+
+                # Anthropic key — only needed if Claude escalation is
+                # triggered (tier-1 workers don't call Claude, but it
+                # doesn't hurt to set it here for consistency)
+                - name: ANTHROPIC_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: anthropic-api-key
+                      key: latest
+
+              # ── Resources ─────────────────────────────────────────────────
+              resources:
+                limits:
+                  cpu: "8"
+                  memory: "32Gi"
+                  # GPU is declared in the pod annotation above; no
+                  # explicit resource limit needed in the container spec.
+
+          # ── Service account with Pub/Sub + Firestore + Secret access ──────
+          serviceAccountName: sovereign-worker@YOUR_PROJECT_ID.iam.gserviceaccount.com

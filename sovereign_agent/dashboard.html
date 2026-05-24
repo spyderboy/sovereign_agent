@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sprint Worker Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f0f11; color: #e4e4e7; min-height: 100vh; padding: 24px; }
+  h1 { font-size: 20px; font-weight: 500; color: #fafafa; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #71717a; margin-bottom: 24px; }
+  .section-label { font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.08em; color: #52525b; margin-bottom: 10px; }
+  .card { background: #18181b; border: 0.5px solid #27272a; border-radius: 10px; padding: 16px 20px; }
+
+  /* Metric cards */
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  .metric { background: #18181b; border: 0.5px solid #27272a; border-radius: 10px; padding: 16px; }
+  .metric-label { font-size: 11px; color: #71717a; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .metric-value { font-size: 28px; font-weight: 500; line-height: 1; }
+  .metric-sub { font-size: 12px; color: #52525b; margin-top: 4px; }
+  .done   { color: #4ade80; }
+  .skip   { color: #facc15; }
+  .fail   { color: #f87171; }
+  .info   { color: #60a5fa; }
+  .dim    { color: #71717a; }
+
+  /* Progress bar */
+  .progress-wrap { margin-bottom: 20px; }
+  .progress-bar-bg { background: #27272a; border-radius: 999px; height: 8px; overflow: hidden; }
+  .progress-bar-fill { height: 100%; background: linear-gradient(90deg, #22c55e, #4ade80); border-radius: 999px; transition: width 0.4s ease; }
+  .progress-label { display: flex; justify-content: space-between; font-size: 12px; color: #71717a; margin-bottom: 6px; }
+
+  /* Chart */
+  .chart-wrap { background: #18181b; border: 0.5px solid #27272a; border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+  .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+
+  /* Feed */
+  .feed { background: #18181b; border: 0.5px solid #27272a; border-radius: 10px; overflow: hidden; margin-bottom: 20px; }
+  .feed-header { padding: 12px 16px; border-bottom: 0.5px solid #27272a; font-size: 12px; font-weight: 500; color: #a1a1aa; display: flex; justify-content: space-between; align-items: center; }
+  .feed-row { display: grid; grid-template-columns: 24px 1fr 80px 60px 60px; gap: 8px; align-items: center; padding: 10px 16px; border-bottom: 0.5px solid #1a1a1d; font-size: 12px; }
+  .feed-row:last-child { border-bottom: none; }
+  .feed-row:hover { background: #1e1e21; }
+  .task-text { color: #d4d4d8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .badge { display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 500; padding: 2px 7px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .badge-done   { background: #14532d; color: #4ade80; }
+  .badge-skip   { background: #422006; color: #facc15; }
+  .badge-fail   { background: #450a0a; color: #f87171; }
+  .badge-budget { background: #312e81; color: #818cf8; }
+  .attempts { color: #52525b; text-align: right; }
+  .duration { color: #52525b; text-align: right; }
+
+  /* Error table */
+  .error-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .error-table th { text-align: left; padding: 8px 10px; color: #52525b; font-weight: 400; font-size: 11px; text-transform: uppercase; border-bottom: 0.5px solid #27272a; }
+  .error-table td { padding: 8px 10px; border-bottom: 0.5px solid #1a1a1d; color: #a1a1aa; vertical-align: top; }
+  .error-code { color: #f87171; font-family: 'SF Mono', monospace; font-size: 11px; }
+  .error-bar { height: 4px; background: #27272a; border-radius: 2px; margin-top: 4px; }
+  .error-bar-fill { height: 100%; background: #ef4444; border-radius: 2px; }
+
+  /* Model stats table */
+  .model-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .model-table th { text-align: left; padding: 8px 10px; color: #52525b; font-weight: 400; font-size: 11px; text-transform: uppercase; border-bottom: 0.5px solid #27272a; }
+  .model-table td { padding: 10px 10px; border-bottom: 0.5px solid #1a1a1d; color: #a1a1aa; }
+  .model-table tr:last-child td { border-bottom: none; }
+  .model-name { font-family: 'SF Mono', monospace; font-size: 11px; color: #e4e4e7; }
+  .model-bar { height: 4px; background: #27272a; border-radius: 2px; margin-top: 4px; width: 100%; }
+  .model-bar-fill { height: 100%; border-radius: 2px; }
+  .cost-note { font-size: 10px; color: #3f3f46; margin-top: 2px; }
+
+  /* Drop zone */
+  .dropzone { border: 1.5px dashed #27272a; border-radius: 10px; padding: 32px; text-align: center; color: #52525b; font-size: 13px; margin-bottom: 20px; cursor: pointer; transition: border-color 0.2s, background 0.2s; }
+  .dropzone:hover, .dropzone.drag-over { border-color: #3f3f46; background: #1c1c1f; color: #a1a1aa; }
+  .dropzone input { display: none; }
+  kbd { display: inline-block; background: #27272a; color: #a1a1aa; padding: 1px 5px; border-radius: 3px; font-size: 11px; font-family: inherit; }
+
+  /* Firestore config */
+  .config-panel { background: #18181b; border: 0.5px solid #27272a; border-radius: 10px; padding: 16px 20px; margin-bottom: 20px; font-size: 13px; }
+  .config-panel summary { cursor: pointer; color: #71717a; font-size: 12px; font-weight: 500; user-select: none; }
+  .config-panel summary:hover { color: #a1a1aa; }
+  .config-fields { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .config-fields input { background: #09090b; border: 0.5px solid #27272a; color: #e4e4e7; border-radius: 6px; padding: 7px 10px; font-size: 12px; width: 100%; outline: none; font-family: 'SF Mono', monospace; }
+  .config-fields input:focus { border-color: #3f3f46; }
+  .config-fields input::placeholder { color: #3f3f46; }
+  .btn { background: #27272a; color: #a1a1aa; border: 0.5px solid #3f3f46; border-radius: 6px; padding: 7px 14px; font-size: 12px; cursor: pointer; font-family: inherit; }
+  .btn:hover { background: #3f3f46; color: #e4e4e7; }
+  .btn-connect { background: #14532d; color: #4ade80; border-color: #166534; margin-top: 10px; }
+  .btn-connect:hover { background: #166534; }
+
+  /* Refresh */
+  .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .refresh-info { font-size: 11px; color: #3f3f46; }
+  #refresh-btn { font-size: 11px; }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <div>
+    <h1>Sprint Worker Dashboard</h1>
+    <div class="subtitle" id="subtitle">Drop a velocity.jsonl to load run data — or connect to Firestore for live cloud updates</div>
+  </div>
+  <div style="display:flex;gap:8px;align-items:center;">
+    <span class="refresh-info" id="last-update"></span>
+    <button class="btn" id="refresh-btn" onclick="refreshFirestore()">↻ Refresh</button>
+  </div>
+</div>
+
+<!-- Drop zone -->
+<div class="dropzone" id="dropzone" onclick="document.getElementById('file-input').click()">
+  <input type="file" id="file-input" accept=".jsonl,.log,text/plain">
+  <div>Drop <kbd>velocity.jsonl</kbd> here — or click to browse</div>
+  <div style="font-size:11px;margin-top:6px;color:#3f3f46">Also accepts any work.log file</div>
+</div>
+
+<!-- Firestore config -->
+<details class="config-panel" id="fs-config">
+  <summary>☁ Connect to Firestore for live cloud worker updates</summary>
+  <div class="config-fields">
+    <input id="fs-project"  placeholder="GCP project ID (e.g. my-project-123)" />
+    <input id="fs-apikey"   placeholder="Firebase API key" />
+    <input id="fs-appid"    placeholder="Firebase App ID" type="password" />
+    <input id="fs-interval" placeholder="Poll interval (seconds, default 30)" type="number" min="5" />
+  </div>
+  <div style="margin-top:8px;display:flex;gap:8px;align-items:center;">
+    <button class="btn btn-connect" onclick="connectFirestore()">Connect</button>
+    <span id="fs-status" style="font-size:11px;color:#52525b;"></span>
+  </div>
+</details>
+
+<!-- Metrics -->
+<div id="metrics-section" style="display:none;">
+  <div class="metrics">
+    <div class="metric">
+      <div class="metric-label">Completed</div>
+      <div class="metric-value done" id="m-done">—</div>
+      <div class="metric-sub" id="m-done-pct"></div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Skipped / Timed out</div>
+      <div class="metric-value skip" id="m-skip">—</div>
+      <div class="metric-sub" id="m-skip-pct"></div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Failed</div>
+      <div class="metric-value fail" id="m-fail">—</div>
+      <div class="metric-sub" id="m-fail-pct"></div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Avg time (done)</div>
+      <div class="metric-value info" id="m-avg">—</div>
+      <div class="metric-sub" id="m-claude">— Claude rescues</div>
+    </div>
+  </div>
+
+  <!-- Progress bar -->
+  <div class="progress-wrap">
+    <div class="progress-label"><span id="progress-text">Progress</span><span id="progress-pct">0%</span></div>
+    <div class="progress-bar-bg"><div class="progress-bar-fill" id="progress-fill" style="width:0%"></div></div>
+  </div>
+
+  <div class="chart-row">
+    <!-- Outcome over time chart -->
+    <div class="chart-wrap">
+      <div class="section-label">Tasks completed by date</div>
+      <div style="position:relative;height:180px;">
+        <canvas id="chart-time" role="img" aria-label="Tasks completed per day">No data loaded</canvas>
+      </div>
+    </div>
+
+    <!-- Attempts distribution chart -->
+    <div class="chart-wrap">
+      <div class="section-label">Attempt count distribution</div>
+      <div style="position:relative;height:180px;">
+        <canvas id="chart-attempts" role="img" aria-label="Distribution of attempt counts">No data loaded</canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- Model performance -->
+  <div class="card" style="margin-bottom:20px;">
+    <div class="section-label">Model performance</div>
+    <table class="model-table">
+      <thead><tr><th>Model</th><th>Solved</th><th>Avg time</th><th>Est. cost</th><th>Share</th></tr></thead>
+      <tbody id="model-tbody"></tbody>
+    </table>
+    <div style="font-size:10px;color:#3f3f46;margin-top:10px;">
+      Cost estimates: 7B on GCP T4 ~$0.35/hr · 32B on L4 ~$0.54/hr · Claude Sonnet ~$0.021/task · Chronic bypass saves wasted local compute.
+    </div>
+  </div>
+
+  <!-- Error patterns -->
+  <div class="card" style="margin-bottom:20px;">
+    <div class="section-label">Top error patterns</div>
+    <table class="error-table">
+      <thead><tr><th>Error code</th><th>Hits</th><th>Frequency</th></tr></thead>
+      <tbody id="error-tbody"></tbody>
+    </table>
+  </div>
+
+  <!-- Activity feed -->
+  <div class="feed">
+    <div class="feed-header">
+      <span>Recent task activity</span>
+      <span id="feed-count" style="color:#3f3f46;font-size:11px;"></span>
+    </div>
+    <div class="feed-row" style="color:#3f3f46;font-size:11px;border-bottom:0.5px solid #27272a;padding:8px 16px;">
+      <div></div><div>Task</div><div style="text-align:right">Outcome</div><div style="text-align:right">Tries</div><div style="text-align:right">Duration</div>
+    </div>
+    <div id="feed-body"></div>
+  </div>
+</div>
+
+<script>
+let allRecords = [];
+let chartTime = null;
+let chartAttempts = null;
+let fsIntervalId = null;
+
+const OUTCOME_ICONS = { done: '✓', skipped: '⏭', failed: '✗', budget: '⏱' };
+const BADGE_CLASS   = { done: 'badge-done', skipped: 'badge-skip', failed: 'badge-fail', budget: 'badge-budget' };
+
+function fmtDuration(s) {
+  if (s < 60) return Math.round(s) + 's';
+  return (s / 60).toFixed(1) + 'm';
+}
+
+function parseVelocityText(text) {
+  const records = [];
+  for (const line of text.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    try { records.push(JSON.parse(t)); } catch {}
+  }
+  return records;
+}
+
+function computeErrorFrequency(records) {
+  const counts = {};
+  for (const r of records) {
+    const types = r.error_types || [];
+    for (const e of types) {
+      const t = e.trim();
+      if (!t || t.length < 3) continue;
+      if (/^qwen:/.test(t)) {
+        const codes = t.replace('qwen:', '').split(',');
+        for (const c of codes) {
+          if (c.trim()) counts[c.trim()] = (counts[c.trim()] || 0) + 1;
+        }
+      } else if (/^[a-z_]{4,}$/.test(t)) {
+        counts[t] = (counts[t] || 0) + 1;
+      }
+    }
+  }
+  return Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .filter(([k]) => !['error','method','defined','type','name','existing','correcting','defining','named','game','dart','find','expected'].includes(k))
+    .slice(0, 10);
+}
+
+function renderDashboard(records) {
+  allRecords = records;
+  const done    = records.filter(r => r.outcome === 'done');
+  const skipped = records.filter(r => ['skipped', 'budget'].includes(r.outcome));
+  const failed  = records.filter(r => r.outcome === 'failed');
+  const total   = records.length;
+  const claudeRescues = records.filter(r => r.claude_rescued).length;
+  const avgDone = done.length ? done.reduce((s, r) => s + (r.duration_s || 0), 0) / done.length : 0;
+  const pct = v => total ? Math.round(v / total * 100) + '%' : '0%';
+
+  document.getElementById('metrics-section').style.display = 'block';
+  document.getElementById('m-done').textContent  = done.length;
+  document.getElementById('m-done-pct').textContent = pct(done.length) + ' of total';
+  document.getElementById('m-skip').textContent  = skipped.length;
+  document.getElementById('m-skip-pct').textContent = pct(skipped.length) + ' of total';
+  document.getElementById('m-fail').textContent  = failed.length;
+  document.getElementById('m-fail-pct').textContent = pct(failed.length) + ' of total';
+  document.getElementById('m-avg').textContent   = fmtDuration(avgDone);
+  document.getElementById('m-claude').textContent = claudeRescues + ' Claude rescue' + (claudeRescues !== 1 ? 's' : '');
+  document.getElementById('progress-fill').style.width = pct(done.length);
+  document.getElementById('progress-pct').textContent  = pct(done.length);
+  document.getElementById('progress-text').textContent = `${done.length} / ${total} tasks`;
+  document.getElementById('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
+
+  // Chart — tasks per day stacked by outcome
+  const byDate = {};
+  for (const r of records) {
+    const d = r.date || 'unknown';
+    if (!byDate[d]) byDate[d] = { done: 0, skipped: 0, failed: 0 };
+    if (r.outcome === 'done') byDate[d].done++;
+    else if (['skipped', 'budget'].includes(r.outcome)) byDate[d].skipped++;
+    else byDate[d].failed++;
+  }
+  const dates = Object.keys(byDate).sort();
+  const doneArr    = dates.map(d => byDate[d].done);
+  const skippedArr = dates.map(d => byDate[d].skipped);
+  const failedArr  = dates.map(d => byDate[d].failed);
+
+  if (chartTime) chartTime.destroy();
+  chartTime = new Chart(document.getElementById('chart-time'), {
+    type: 'bar',
+    data: {
+      labels: dates.map(d => d.slice(5)),
+      datasets: [
+        { label: 'Done',    data: doneArr,    backgroundColor: '#22c55e', stack: 's' },
+        { label: 'Skipped', data: skippedArr, backgroundColor: '#eab308', stack: 's' },
+        { label: 'Failed',  data: failedArr,  backgroundColor: '#ef4444', stack: 's' },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { color: '#1a1a1d' }, ticks: { color: '#52525b', font: { size: 11 } } },
+        y: { grid: { color: '#1a1a1d' }, ticks: { color: '#52525b', font: { size: 11 }, stepSize: 1 } },
+      }
+    }
+  });
+
+  // Chart — attempt distribution
+  const attemptBuckets = { '1': 0, '2': 0, '3-5': 0, '6-10': 0, '11+': 0 };
+  for (const r of records) {
+    const a = r.attempts || 1;
+    if (a === 1) attemptBuckets['1']++;
+    else if (a === 2) attemptBuckets['2']++;
+    else if (a <= 5) attemptBuckets['3-5']++;
+    else if (a <= 10) attemptBuckets['6-10']++;
+    else attemptBuckets['11+']++;
+  }
+  if (chartAttempts) chartAttempts.destroy();
+  chartAttempts = new Chart(document.getElementById('chart-attempts'), {
+    type: 'bar',
+    data: {
+      labels: Object.keys(attemptBuckets),
+      datasets: [{ label: 'Tasks', data: Object.values(attemptBuckets), backgroundColor: '#3b82f6' }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { color: '#1a1a1d' }, ticks: { color: '#52525b', font: { size: 11 } } },
+        y: { grid: { color: '#1a1a1d' }, ticks: { color: '#52525b', font: { size: 11 }, stepSize: 1 } },
+      }
+    }
+  });
+
+  // Model performance stats
+  // Group done tasks by model field. Infer tier label from model name.
+  const modelStats = {};
+  const MODEL_COLORS = {};
+  function modelLabel(m) {
+    if (!m) return 'unknown';
+    if (/claude/i.test(m)) return 'Claude';
+    if (/32b|30b|35b/i.test(m)) return '32B';
+    if (/7b|8b/i.test(m)) return '7B';
+    if (/4b|3b/i.test(m)) return '4B';
+    return m.split(':')[0].slice(-12);
+  }
+  function modelColor(label) {
+    if (label === 'Claude') return '#a78bfa';
+    if (label === '32B')   return '#60a5fa';
+    if (label === '7B')    return '#4ade80';
+    return '#71717a';
+  }
+  // Cost estimates per solved task (GCP Cloud Run / Sonnet pricing)
+  function estCostPerTask(label, avgDurS) {
+    const hrs = avgDurS / 3600;
+    if (label === 'Claude') return 0.021;          // Sonnet: ~$0.021/task (2K in + 1K out)
+    if (label === '32B')   return hrs * 0.54;      // L4 GPU preemptible: ~$0.54/hr
+    if (label === '7B')    return hrs * 0.35;      // T4 GPU Cloud Run: ~$0.35/hr
+    return hrs * 0.35;
+  }
+
+  for (const r of records) {
+    if (r.outcome !== 'done') continue;
+    const raw = r.model || (r.claude_rescued ? 'claude' : null);
+    const label = modelLabel(raw);
+    if (!modelStats[label]) modelStats[label] = { count: 0, totalDur: 0, chronic: 0 };
+    modelStats[label].count++;
+    modelStats[label].totalDur += (r.duration_s || 0);
+    if (r.chronic_bypass) modelStats[label].chronic++;
+  }
+  const totalDone = done.length || 1;
+  const modelTbody = document.getElementById('model-tbody');
+  modelTbody.innerHTML = '';
+  const modelOrder = ['Claude', '32B', '7B', '4B'].filter(l => modelStats[l]);
+  const otherKeys = Object.keys(modelStats).filter(l => !['Claude','32B','7B','4B'].includes(l));
+  for (const label of [...modelOrder, ...otherKeys]) {
+    const s = modelStats[label];
+    const avgDur = s.count ? s.totalDur / s.count : 0;
+    const costPer = estCostPerTask(label, avgDur);
+    const totalCost = (costPer * s.count).toFixed(2);
+    const pct = Math.round(s.count / totalDone * 100);
+    const color = modelColor(label);
+    modelTbody.innerHTML += `<tr>
+      <td><span class="model-name">${label}</span>${s.chronic ? `<div style="font-size:10px;color:#71717a;margin-top:2px">${s.chronic} chronic bypass</div>` : ''}</td>
+      <td style="color:#e4e4e7">${s.count}</td>
+      <td style="color:#a1a1aa">${fmtDuration(avgDur)}</td>
+      <td style="color:${color}">$${totalCost} <span style="color:#3f3f46;font-size:10px">~$${costPer.toFixed(3)}/task</span></td>
+      <td style="width:80px"><div class="model-bar"><div class="model-bar-fill" style="width:${pct}%;background:${color}"></div></div><div style="font-size:10px;color:#52525b">${pct}%</div></td>
+    </tr>`;
+  }
+  if (!modelOrder.length && !otherKeys.length) {
+    modelTbody.innerHTML = '<tr><td colspan="5" style="color:#3f3f46;padding:16px 10px">No model data yet — upgrade to a recent run to see per-model stats</td></tr>';
+  }
+
+  // Error patterns
+  const errors = computeErrorFrequency(records);
+  const maxErr = errors.length ? errors[0][1] : 1;
+  const tbody = document.getElementById('error-tbody');
+  tbody.innerHTML = '';
+  if (errors.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="3" style="color:#3f3f46;padding:16px 10px">No error data yet</td></tr>';
+  } else {
+    for (const [code, count] of errors) {
+      const pctBar = Math.round(count / maxErr * 100);
+      tbody.innerHTML += `<tr>
+        <td><span class="error-code">${code}</span></td>
+        <td style="color:#a1a1aa">${count}</td>
+        <td style="width:120px"><div class="error-bar"><div class="error-bar-fill" style="width:${pctBar}%"></div></div></td>
+      </tr>`;
+    }
+  }
+
+  // Activity feed (last 30 records, most recent first)
+  const feedBody = document.getElementById('feed-body');
+  const recent = [...records].reverse().slice(0, 30);
+  document.getElementById('feed-count').textContent = `${recent.length} of ${records.length}`;
+  feedBody.innerHTML = '';
+  for (const r of recent) {
+    const outcome = r.outcome || 'unknown';
+    const badge = BADGE_CLASS[outcome] || 'badge-skip';
+    const icon = outcome === 'done' ? '✓' : outcome === 'skipped' ? '⏭' : outcome === 'budget' ? '⏱' : '✗';
+    const task = (r.task || '—').slice(0, 80);
+    const dur = r.duration_s ? fmtDuration(r.duration_s) : '—';
+    const tries = r.attempts || 1;
+    feedBody.innerHTML += `<div class="feed-row">
+      <div style="font-size:13px;${outcome==='done'?'color:#4ade80':outcome==='failed'?'color:#f87171':'color:#facc15'}">${icon}</div>
+      <div class="task-text" title="${r.task || ''}">${task}</div>
+      <div style="text-align:right"><span class="badge ${badge}">${outcome}</span></div>
+      <div class="attempts">${tries}×</div>
+      <div class="duration">${dur}</div>
+    </div>`;
+  }
+}
+
+// File drop/pick
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('file-input');
+
+dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('drag-over'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag-over'));
+dropzone.addEventListener('drop', e => {
+  e.preventDefault(); dropzone.classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file) loadFile(file);
+});
+fileInput.addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
+
+function loadFile(file) {
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const records = parseVelocityText(ev.target.result);
+    if (!records.length) { alert('No JSON records found — make sure this is velocity.jsonl'); return; }
+    document.getElementById('subtitle').textContent = `${file.name} · ${records.length} records`;
+    dropzone.style.display = 'none';
+    renderDashboard(records);
+  };
+  reader.readAsText(file);
+}
+
+// Firestore connection (Firebase JS SDK v9 compat)
+function connectFirestore() {
+  const projectId = document.getElementById('fs-project').value.trim();
+  const apiKey    = document.getElementById('fs-apikey').value.trim();
+  const appId     = document.getElementById('fs-appid').value.trim();
+  const intervalS = parseInt(document.getElementById('fs-interval').value || '30', 10);
+
+  if (!projectId || !apiKey) {
+    document.getElementById('fs-status').textContent = '✗ Project ID and API key required';
+    document.getElementById('fs-status').style.color = '#f87171';
+    return;
+  }
+
+  document.getElementById('fs-status').textContent = 'Connecting…';
+  document.getElementById('fs-status').style.color = '#facc15';
+
+  // Dynamically load Firebase compat SDK
+  const script = document.createElement('script');
+  script.src = 'https://cdnjs.cloudflare.com/ajax/libs/firebase/10.12.2/firebase-app-compat.min.js';
+  script.onload = () => {
+    const script2 = document.createElement('script');
+    script2.src = 'https://cdnjs.cloudflare.com/ajax/libs/firebase/10.12.2/firebase-firestore-compat.min.js';
+    script2.onload = () => {
+      try {
+        if (!firebase.apps.length) {
+          firebase.initializeApp({ apiKey, projectId, appId: appId || `1:0:web:0` });
+        }
+        const db = firebase.firestore();
+        document.getElementById('subtitle').textContent = `Live: ${projectId} · polling every ${intervalS}s`;
+        document.getElementById('fs-status').textContent = '✓ Connected';
+        document.getElementById('fs-status').style.color = '#4ade80';
+        dropzone.style.display = 'none';
+
+        const pollFirestore = async () => {
+          try {
+            // Try cloud architecture first: sprint_tasks/{run_id}/tasks
+            // Run ID format: {project}_{YYYY-MM-DD} — try today and yesterday
+            const today = new Date().toISOString().slice(0, 10);
+            const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+            const runIds = [`astro_flux_${today}`, `astro_flux_${yesterday}`];
+            let records = [];
+            for (const runId of runIds) {
+              const snap = await db.collection('sprint_tasks').doc(runId).collection('tasks').get();
+              if (!snap.empty) {
+                const statusMap = { done: 'done', blocked: 'failed', tier1_failed: 'failed', tier2_failed: 'failed', pending: null, tier1_running: null, tier2_running: null };
+                const tierMap = { 1: 'qwen2.5-coder:7b', 2: 'qwen2.5-coder:32b' };
+                snap.docs.forEach(d => {
+                  const t = d.data();
+                  const outcome = statusMap[t.status] || null;
+                  if (!outcome) return; // skip in-progress
+                  records.push({
+                    date: (t.completed_at || t.dispatched_at || today).slice(0, 10),
+                    task: t.task || t.short || d.id,
+                    outcome,
+                    duration_s: t.duration_s || 0,
+                    attempts: t.attempts || 1,
+                    model: tierMap[t.completed_tier] || tierMap[t.tier] || 'unknown',
+                    claude_rescued: t.completed_tier === 3 || false,
+                  });
+                });
+                break;
+              }
+            }
+            // Fallback to task_velocity if sprint_tasks is empty
+            if (records.length === 0) {
+              const snap = await db.collection('task_velocity').get();
+              records = snap.docs.map(d => d.data());
+            }
+            records.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+            renderDashboard(records);
+          } catch (err) {
+            console.error('Firestore poll error:', err);
+            document.getElementById('fs-status').textContent = '⚠ Poll error: ' + err.message;
+            document.getElementById('fs-status').style.color = '#f87171';
+          }
+        };
+
+        pollFirestore();
+        if (fsIntervalId) clearInterval(fsIntervalId);
+        fsIntervalId = setInterval(pollFirestore, intervalS * 1000);
+
+      } catch (err) {
+        document.getElementById('fs-status').textContent = '✗ ' + err.message;
+        document.getElementById('fs-status').style.color = '#f87171';
+      }
+    };
+    document.head.appendChild(script2);
+  };
+  document.head.appendChild(script);
+}
+
+function refreshFirestore() {
+  if (!fsIntervalId) { document.getElementById('last-update').textContent = 'Not connected to Firestore'; return; }
+}
+
+// Keyboard shortcut: R to refresh when connected
+document.addEventListener('keydown', e => { if (e.key === 'r' && !e.target.matches('input')) refreshFirestore(); });
+</script>
+</body>
+</html>

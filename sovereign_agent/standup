@@ -1,0 +1,6 @@
+#!/bin/bash
+# Wrapper — activates the venv and runs standup.py
+# Usage: ./standup --project ~/Code/myproject
+DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$DIR/.venv/bin/activate"
+python "$DIR/standup.py" "$@"

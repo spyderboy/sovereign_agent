@@ -9,8 +9,8 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 # ─── Model config ─────────────────────────────────────────────────────────────
 OLLAMA_URL      = os.getenv("LOCAL_MODEL_URL",  "http://localhost:11434")
-ARCHITECT_MODEL = os.getenv("ARCHITECT_MODEL", "qwen2.5-coder:32b")  # planning / structured JSON
-EXECUTOR_MODEL  = os.getenv("EXECUTOR_MODEL",  "qwen2.5-coder:32b")  # code generation
+ARCHITECT_MODEL = os.getenv("ARCHITECT_MODEL", "qwen3.6:35b-a3b")    # planning / structured JSON
+EXECUTOR_MODEL  = os.getenv("EXECUTOR_MODEL",  "qwen3.6:35b-a3b")    # code generation
 VALIDATOR_MODEL = os.getenv("VALIDATOR_MODEL", "qwen3:4b")                       # fast pass/fail checks
 
 

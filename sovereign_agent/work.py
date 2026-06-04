@@ -55,9 +55,43 @@ class PromptTooLargeError(Exception):
 
 
 OLLAMA_URL      = os.getenv("LOCAL_MODEL_URL",  "http://localhost:11434")
-TIER1_MODEL     = os.getenv("TIER1_MODEL",      "qwen2.5-coder:7b-instruct-q4_K_M")  # 7B — fast, strong on Dart
-TIER2_MODEL     = os.getenv("TIER2_MODEL",      "qwen2.5-coder:32b")                  # 32B — second opinion
-TIER_MODELS     = [TIER1_MODEL, TIER2_MODEL]   # Claude handles final escalation
+TIER1_MODEL     = os.getenv("TIER1_MODEL",      "qwen2.5-coder:7b-instruct-q4_K_M")  # 7B dense  — fast, strong on Dart
+TIER2_MODEL     = os.getenv("TIER2_MODEL",      "gemma4:26b")                          # 26B MoE (4B active) — quick second opinion
+TIER3_MODEL     = os.getenv("TIER3_MODEL",      "qwen3.6:35b-a3b")                    # 35B MoE (3B active) — third opinion
+TIER4_MODEL     = os.getenv("TIER4_MODEL",      "qwen2.5-coder:32b")                  # 32B dense — heavy hitter before Claude
+TIER_MODELS     = [TIER1_MODEL, TIER2_MODEL, TIER3_MODEL, TIER4_MODEL]   # Claude handles final escalation
+
+# ── Quick-mode parameter gate ─────────────────────────────────────────────────
+# POLICY: --quick must only use models whose total parameter count is < 30B.
+# This is enforced at runtime by QUICK_MAX_TIER_IDX, derived from MODEL_PARAMS.
+# When adding or swapping a model, update MODEL_PARAMS with its total param count
+# (in billions, as a float). Unknown models default to float('inf') → excluded.
+# Override individual entries via env: MODEL_PARAMS_TIER1=7 etc.
+QUICK_PARAM_LIMIT_B: float = float(os.getenv("QUICK_PARAM_LIMIT_B", "30"))
+
+MODEL_PARAMS: dict[str, float] = {
+    TIER1_MODEL:   float(os.getenv("MODEL_PARAMS_TIER1",   "7")),    #  7B dense
+    TIER2_MODEL:   float(os.getenv("MODEL_PARAMS_TIER2",   "26")),   # 26B MoE
+    TIER3_MODEL:   float(os.getenv("MODEL_PARAMS_TIER3",   "35")),   # 35B MoE
+    TIER4_MODEL:   float(os.getenv("MODEL_PARAMS_TIER4",   "32")),   # 32B dense
+}
+
+def _quick_max_tier_idx(models: list[str], params: dict[str, float], limit_b: float) -> int:
+    """Return the exclusive upper bound for --quick mode.
+
+    Scans TIER_MODELS in order and stops at the first model whose total param
+    count meets or exceeds limit_b.  The returned index is exclusive, so:
+        QUICK_MAX_TIER_IDX = 2  →  tiers 0 and 1 are allowed (tier indices < 2)
+
+    If all models are under the limit, returns len(models) (all tiers allowed).
+    Unknown models (not in params dict) are treated as float('inf') — excluded.
+    """
+    for i, model in enumerate(models):
+        if params.get(model, float("inf")) >= limit_b:
+            return i
+    return len(models)
+
+QUICK_MAX_TIER_IDX: int = _quick_max_tier_idx(TIER_MODELS, MODEL_PARAMS, QUICK_PARAM_LIMIT_B)
 RACE_MODEL      = os.getenv("RACE_MODEL",       "qwen2.5-coder:7b-instruct-q4_K_M")  # kept for future A/B experiments
 RACE_ENABLED    = os.getenv("RACE_ENABLED", "0") == "1"   # off by default; enable with RACE_ENABLED=1
 GIT_BRANCHES    = os.getenv("GIT_BRANCHES",  "1") == "1"  # branch-per-task; disable with GIT_BRANCHES=0
@@ -73,17 +107,20 @@ CLAUDE_ENABLED      = os.getenv("ANTHROPIC_API_KEY", "") != ""  # auto-enabled w
 # Sized for M4 32 GB: small models get more context since their weights are cheaper.
 # Override any entry via env vars (e.g. CTX_TIER1=16384).
 MODEL_CTX: dict[str, int] = {
-    TIER1_MODEL:   int(os.getenv("CTX_TIER1",   "32768")),  # 7B  ~4.7 GB weights → plenty of headroom
-    TIER2_MODEL:   int(os.getenv("CTX_TIER2",   "16384")),  # 32B ~19 GB weights — tight, keep context small
+    TIER1_MODEL:   int(os.getenv("CTX_TIER1",   "32768")),  # 7B dense  — plenty of headroom
+    TIER2_MODEL:   int(os.getenv("CTX_TIER2",   "16384")),  # 26B MoE   — keep small to preserve headroom
+    TIER3_MODEL:   int(os.getenv("CTX_TIER3",   "16384")),  # 35B MoE   — same reasoning
+    TIER4_MODEL:   int(os.getenv("CTX_TIER4",   "16384")),  # 32B dense — tight on 32GB Mac, keep small
     PLANNER_MODEL: int(os.getenv("CTX_PLANNER", "32768")),
     ADVISOR_MODEL: int(os.getenv("CTX_ADVISOR", "32768")),
 }
 
 # Strikes before advancing to the next tier (same error repeated)
-PHASE_STRIKE_LIMIT = 1
+PHASE_STRIKE_LIMIT = 2
 
 # Hard cap on total validation failures per tier — catches thrashing (all-different errors)
 PHASE_MAX_ATTEMPTS = 6
+TIER2_MAX_ATTEMPTS = 2
 
 # ── Time budget ────────────────────────────────────────────────────────────────
 # Max wall-clock seconds a single task may run before being skipped.
@@ -161,16 +198,17 @@ _LARGE_MODEL_THRESHOLD_GB = 15  # flush before loading anything this large
 # Rough VRAM footprint by model name fragment (GB).
 # Used to decide whether to flush before loading a tier3/4 model.
 _MODEL_SIZE_HINTS: dict[str, float] = {
-    "32b":  19.0,
-    "30b":  18.0,
-    "r1":   19.0,
-    "35b":  21.0,
-    "24b":  14.0,
-    "20b":  13.0,
-    "16b":   8.9,
-    "14b":   9.0,
-    "7b":    4.7,
-    "4b":    4.0,
+    "32b":   19.0,
+    "30b":   18.0,
+    "r1":    19.0,
+    "35b":   20.0,  # qwen3.6:35b-a3b — MoE, full model ~20GB in VRAM
+    "26b":   15.0,  # gemma4:26b       — MoE, full model ~15GB in VRAM
+    "24b":   14.0,
+    "20b":   13.0,
+    "16b":    8.9,
+    "14b":    9.0,
+    "7b":     4.7,
+    "4b":     4.0,
 }
 
 def _model_size_gb(model_name: str) -> float:
@@ -193,8 +231,8 @@ def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
         # 19 GB from scratch on every attempt.  With --workers 1 (required for
         # deep pass), this is safe; with --workers 2 the two 32B models still
         # won't coexist (19 GB each), so deep must always use a single worker.
-        print(f"  {DIM}Loading {size_gb:.0f}GB model ({model.split(':')[0]}) — keeping resident 10m...{RESET}")
-        keep_alive = "10m"
+        print(f"  {DIM}Loading {size_gb:.0f}GB model ({model.split(':')[0]}) — keeping resident 30m...{RESET}")
+        keep_alive = "30m"
 
     # ── Pre-flight prompt size check ──────────────────────────────────────────
     # Estimate token count before sending so we never pay for a full inference
@@ -247,6 +285,45 @@ def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
         raise PromptTooLargeError(prompt_tokens, ctx_limit)  # ctx_limit already model-specific
 
     return "".join(content)
+
+
+# ─── JSON extraction helper ───────────────────────────────────────────────────
+
+def _extract_first_json_object(text: str) -> dict:
+    """Extract the first complete, balanced JSON object from text.
+
+    Uses a brace-depth scan so trailing prose after the closing brace (or a
+    second JSON block) doesn't cause 'Extra data' errors.  Returns {} on any
+    parse failure.
+    """
+    start = text.find("{")
+    if start == -1:
+        return {}
+    depth = 0
+    in_str = False
+    escape = False
+    for i, ch in enumerate(text[start:], start):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_str:
+            escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start : i + 1])
+                except json.JSONDecodeError:
+                    return {}
+    return {}
 
 
 # ─── ROADMAP helpers ──────────────────────────────────────────────────────────
@@ -308,7 +385,7 @@ def mark_done(task_line: str):
 def all_source_files(project_root: str) -> list[str]:
     """Return all dart/py/js source files relative to project root."""
     exts = {".dart", ".py", ".js", ".ts"}
-    skip = {"build", ".dart_tool", ".git", "node_modules", ".fvm"}
+    skip = {"build", ".dart_tool", ".git", "node_modules", ".fvm", ".venv"}
     result = []
     for p in Path(project_root).rglob("*"):
         if p.suffix in exts and not any(s in p.parts for s in skip):
@@ -429,484 +506,22 @@ LOCKED_FILES: _LockedSet = _LockedSet()
 # If matched, the file is rejected and the hint is appended to errors
 # so the 35B gets a precise, actionable correction on the next attempt.
 import re as _re
-
-BAD_PATTERNS: list[tuple[str, str]] = [
-    # Offset / Vector2 confusion in Flutter widget parameters
-    (r'offset:\s*Vector2\b',
-     "OFFSET ERROR: Transform.translate/Positioned offset: needs Flutter Offset(x,y), NOT Vector2(x,y). "
-     "Flutter UI widgets use Offset; game objects use Vector2. Never pass Vector2 to a Flutter widget parameter."),
-
-    # lengthSquared doesn't exist on Flame's Vector2
-    (r'\.lengthSquared\b',
-     "API ERROR: Vector2 has no .lengthSquared. Use .length, or compute (v.x*v.x + v.y*v.y) manually."),
-
-    # Wrong Star constructor (factionId is a getter, not a named constructor)
-    (r'Star\.factionId\s*\(',
-     "CONSTRUCTOR ERROR: Star.factionId is a getter, NOT a constructor. "
-     "Use Star.forFaction(factionId, position: Vector2(x,y)) instead."),
-
-    # Flame Effect API (broken in this codebase — use plain Dart timers)
-    (r"import.*flame/effects\.dart",
-     "IMPORT ERROR: Do NOT import flame/effects.dart. Use plain Dart timer classes for animation "
-     "(see _FusionAnimation in astro_game.dart for the pattern)."),
-    (r'\bMoveEffect\b|\bRotateEffect\b|\bScaleEffect\b|\bOpacityEffect\b',
-     "FLAME API ERROR: Don't use Flame Effect classes. Use plain Dart timer pattern instead."),
-
-    # Canvas draw calls with Vector2 instead of Offset.
-    # Allow: Offset(...), anyOffset, start.toOffset() — block bare Vector2 identifiers.
-    # Old regex [^O][^f] was too broad: it also fired on correct code like
-    # canvas.drawLine(start.toOffset(), ...) and canvas.drawLine(startOffset, ...).
-    (r'canvas\.drawLine\s*\(\s*(?!\w*[Oo]ffset)(?!\w+\.toOffset\b)[A-Za-z_]',
-     "CANVAS ERROR: canvas.drawLine() takes Offset args, not Vector2. "
-     "Store fields as Vector2; convert only at the render call site: "
-     "canvas.drawLine(start.toOffset(), end.toOffset(), paint)  "
-     "or canvas.drawLine(Offset(start.x, start.y), Offset(end.x, end.y), paint)."),
-    (r'canvas\.drawCircle\s*\(\s*\w+\.position\b',
-     "CANVAS ERROR: canvas.drawCircle() takes Offset, not Vector2. "
-     "Wrap: Offset(pos.x, pos.y)."),
-
-    # Unqualified generateId
-    (r'(?<!\.)generateId\(\)',
-     "STATIC METHOD ERROR: generateId() must be qualified as BaseUnit.generateId(). "
-     "Dart does not inherit static members."),
-
-    # .normalized() — unreliable on older vector_math
-    (r'\.normalized\(\)',
-     "API ERROR: Avoid .normalized() — use (diff / distance) pattern for safe normalization."),
-
-    # endPosition in _AnimatedMote or similar internal classes omitted
-    (r'required this\.endPosition',
-     "CONSTRUCTOR MISMATCH: If endPosition is required, every call site must pass it. "
-     "Consider making it optional or removing it."),
-
-    # flame/game.dart without hide Vector → ambiguous_import (vector_math also exports Vector)
-    (r"import 'package:flame/game\.dart'(?! hide Vector)",
-     "IMPORT ERROR: flame/game.dart re-exports vector_math's Vector type. "
-     "ALWAYS write: import 'package:flame/game.dart' hide Vector; "
-     "Omitting 'hide Vector' causes ambiguous_import at every use of our game unit Vector."),
-
-    # super.update(dt) inside a Flame Game subclass — Game.update is abstract
-    (r'super\.update\(dt\)',
-     "FLAME API ERROR: Game.update(double dt) is abstract — NEVER call super.update(dt). "
-     "Just override it: @override void update(double dt) { /* your logic */ }"),
-
-    # .notifier() called as a function — StateNotifierProvider.notifier is a getter, not a method
-    (r'\.notifier\s*\(\s*\)',
-     "RIVERPOD ERROR: .notifier is a getter on StateNotifierProvider, NOT a method. "
-     "Never call gameServiceProvider.notifier() with parentheses. "
-     "Correct usage: container.read(gameServiceProvider.notifier) — no parentheses."),
-
-    # fuseWith is game logic — must never be added to pure data models (Mote, Vector, Star)
-    (r'def fuseWith|void fuseWith|Vector\? fuseWith|fuseWith\(',
-     "MODEL PURITY ERROR: fuseWith() is game logic and must NOT be added to Mote, Vector, or Star. "
-     "These are pure data classes (id + toMap/fromMap only). "
-     "Fusion logic belongs in lib/game/ or lib/systems/, not in models/."),
-
-    # AudioPlayerEffect is an invented class
-    (r'\bAudioPlayerEffect\b',
-     "INVENTED CLASS ERROR: AudioPlayerEffect does not exist in flame_audio. "
-     "Use FlameAudio.play(filename) for one-shot effects. No wrapper class needed."),
-
-    # Bgm is not a public type — access via FlameAudio.bgm, never instantiate or type-annotate
-    (r'\bBgm\b',
-     "FLAME AUDIO ERROR: 'Bgm' is not a public type you can import or annotate. "
-     "Access the background music player via FlameAudio.bgm (no import needed). "
-     "Never write 'Bgm player' or 'late Bgm _bgm' — just call FlameAudio.bgm.play(...) directly."),
-
-    # FlameAudio.bgm.isPlaying is a getter, not a method
-    (r'FlameAudio\.bgm\.isPlaying\s*\(',
-     "FLAME AUDIO ERROR: FlameAudio.bgm.isPlaying is a bool getter, not a method. "
-     "Use 'if (FlameAudio.bgm.isPlaying)' not 'if (FlameAudio.bgm.isPlaying())'"),
-
-    # withOpacity is deprecated in Flutter 3.x — use withValues(alpha:)
-    (r'\.withOpacity\(',
-     "DEPRECATION ERROR: .withOpacity() is deprecated. "
-     "Use .withValues(alpha: x) instead."),
-
-    # Colors.magenta does not exist in Flutter — use Colors.purple
-    (r'Colors\.magenta\b',
-     "COLOR ERROR: Colors.magenta does not exist in Flutter. "
-     "Use Colors.purple (enemy faction color throughout this codebase)."),
-
-    # const Vector2(...) — Vector2 is not const-constructable (backed by Float64List)
-    (r'const\s+Vector2\s*\(',
-     "CONST ERROR: Vector2 is NOT const-constructable. "
-     "Remove 'const': use Vector2(x, y) not const Vector2(x, y)."),
-
-    # Non-const instance field in a class that has a const constructor
-    # e.g. class Foo { const Foo(); final List<...> items = [Bar()]; }  ← Bar() not const
-    (r'const\s+\w+\(\{[^}]*super\.key[^}]*\}\)[\s\S]{0,400}final\s+\w+[^=]+=\s*\[',
-     "CONST CONSTRUCTOR ERROR: A class with 'const MyWidget({super.key})' cannot have "
-     "non-const field initializers (e.g. 'final list = [SomeClass()]'). "
-     "Move the field initializer into the build() method as a local variable instead."),
-
-    # Hallucinated / typo'd package names — models invent these under pressure
-    (r"flutter_riverpod/flutter_river(?!pod\.dart)",
-     "IMPORT TYPO: The correct import is 'package:flutter_riverpod/flutter_riverpod.dart'. "
-     "Do NOT use flutter_riverpad, flutter_riverpost, or any other variant."),
-
-    (r"package:flame/(?:math_engine|geometry_engine|physics_engine|vector_engine|render_engine)\b",
-     "HALLUCINATED PACKAGE: flame/math_engine.dart (and similar) do not exist. "
-     "Use package:flame/components.dart for Vector2/Component, dart:math for math utilities."),
-
-    # Swift/Kotlin-style optional cast — not valid Dart
-    (r'\bas\?\s+\w',
-     "SYNTAX ERROR: Dart does not have 'as?' optional casting (that's Swift/Kotlin). "
-     "Use 'if (x is MyType)' or 'x is MyType ? x as MyType : null' instead."),
-
-    # Offset used as start/end for AttackLineComponent — which expects Vector2
-    (r'start:\s*Offset\s*\(|end:\s*Offset\s*\(',
-     "TYPE ERROR: AttackLineComponent.start and .end are Vector2, not Offset. "
-     "Use position.clone() or Vector2(x, y) — never Offset(x, y) for Flame component fields."),
-]
-
-# ─── Error → targeted hint mapping ───────────────────────────────────────────
-# When flutter analyze output matches a pattern, the hint is prepended to the
-# errors fed back to the 35B on the next retry, giving it precise guidance.
-ERROR_HINTS: list[tuple[str, str]] = [
-    (r"can.t be assigned to the parameter type 'int'|argument_type_not_assignable.*\bint\b",
-     "⚠️  STRING passed where INT expected. All model IDs are int, never String:\n"
-     "  Star.id → int,  Vector.id → int,  Star.ownerId → String (player label only).\n"
-     "  CaptureRules.tryPerformCapture(notifier, vectorId: int, starId: int) — no player string.\n"
-     "  CombatAttackEvent(sourceVectorId: int, targetStarId: int) — both int.\n"
-     "  Never pass ownerId/playerOwnerId where an id parameter is expected."),
-
-    (r'argument_type_not_assignable.*Offset|can.t be assigned.*Offset',
-     "⚠️  OFFSET vs VECTOR2: Flutter widget parameters (offset:, position:, etc.) "
-     "require Offset(x, y) — NEVER pass Vector2. "
-     "Offset has .dx/.dy; Vector2 has .x/.y. They are incompatible types."),
-
-    (r'undefined_getter.*lengthSquared|undefined_method.*lengthSquared',
-     "⚠️  Vector2 has NO .lengthSquared — use .length or compute v.x*v.x + v.y*v.y manually."),
-
-    (r'library_private_types_in_public_api',
-     "⚠️  Private types (names starting with _) cannot appear in public class fields/methods. "
-     "Either rename the private type to be public, or make the containing class private (_ClassName)."),
-
-    (r'undefined_function.*Vector2|undefined_method.*Vector2',
-     "⚠️  Vector2 is not imported. Add: import 'package:flame/components.dart' hide Vector;"),
-
-    (r'missing_required_argument',
-     "⚠️  A required constructor parameter is missing. Read the class definition carefully "
-     "and provide ALL required: named parameters."),
-
-    (r'extra_positional_arguments|2 positional arguments expected by .AsyncError|'
-     r'2 positional arguments expected by .error',
-     "⚠️  AsyncError requires TWO positional arguments: AsyncError(error, stackTrace). "
-     "Never call AsyncError(e) with one argument — Dart requires the stack trace too. "
-     "Pattern: catch (e, st) { return AsyncValue.error(e, st); } "
-     "or AsyncError(e, StackTrace.current) if outside a catch block."),
-
-    (r'extends_non_class|non_type_as_type_argument',
-     "⚠️  extends_non_class: you are extending something that is not a class. "
-     "Common Riverpod mistakes: do NOT write 'extends AsyncNotifier' without the generic "
-     "type parameter, do NOT extend a provider (e.g. 'extends FusionProvider'), "
-     "and do NOT extend abstract classes that require type args without providing them. "
-     "Correct patterns: 'class X extends StateNotifier<MyState>', "
-     "'class X extends AsyncNotifier<MyType>'."),
-
-    (r'undefined_method.*distanceTo|Offset.*distanceTo',
-     "⚠️  Offset has no distanceTo(). Use (o - Offset(v.x, v.y)).distance instead."),
-
-    (r'undefined_method.*normalized\b',
-     "⚠️  .normalized() is unreliable — use (diff / distance) pattern: "
-     "final n = diff / diff.length;"),
-
-    (r'argument_type_not_assignable.*List<Nova>|argument_type_not_assignable.*List<Vector>',
-     "⚠️  Type mismatch: use typed lists <Nova>[], <Vector>[] — not <dynamic>[]."),
-
-    (r'ambiguous_import.*Vector|Vector.*ambiguous_import',
-     "⚠️  ambiguous_import for 'Vector': flame/game.dart re-exports vector_math's Vector. "
-     "Fix: import 'package:flame/game.dart' hide Vector;"),
-
-    (r'abstract_super_member_reference.*update|update.*abstract_super_member_reference',
-     "⚠️  Game.update(double dt) is abstract — remove super.update(dt) from your override. "
-     "Just call your own logic directly."),
-
-    (r'deprecated_member_use.*withOpacity|withOpacity.*deprecated',
-     "⚠️  .withOpacity() is deprecated — use .withValues(alpha: x) instead."),
-
-    (r'const_with_non_const',
-     "⚠️  const_with_non_const: a widget class has 'const' constructor but a non-const "
-     "field initializer (e.g. 'final list = [SomeClass()]'). "
-     "Fix: move the field into build() as a local variable, NOT an instance field."),
-
-    (r'creation_with_non_type.*Vector2|Vector2.*creation_with_non_type',
-     "⚠️  Vector2 is not in scope. Add: import 'package:flame/components.dart'; "
-     "(use 'hide Vector' if also importing models/vector.dart). "
-     "Also: NEVER use 'const Vector2(...)' — Vector2 is not const-constructable."),
-
-    (r'annotate_overrides',
-     "⚠️  annotate_overrides: a method/getter overrides a parent but is missing '@override'. "
-     "Add @override on the line immediately before the method/getter declaration."),
-
-    (r"isn't defined.*Level1|Level1.*isn't defined",
-     "⚠️  Level API: there is NO 'Level1' class. The correct class is 'Level001' in "
-     "lib/levels/level_001.dart. Its definition is a static getter: Level001.definition "
-     "which returns a LevelDef — NOT stars/motes/vectors directly. "
-     "For tests, construct Star objects manually using Faction.player / Faction.enemy, "
-     "call game.initialize([star], [], [], []), set game.state.gameState = 'playing', "
-     "then call game.update(1.0) in a loop."),
-
-    (r'uri_does_not_exist',
-     "⚠️  uri_does_not_exist: a package import cannot be resolved. "
-     "This means the package is missing from pubspec.yaml OR flutter pub get has not been run. "
-     "Do NOT remove the import — the package is already in pubspec.yaml. "
-     "This error will clear on its own once 'flutter pub get' is run. "
-     "Rewrite the file with the same imports unchanged."),
-
-    (r"positional argument.*GameStateNotifier|GameStateNotifier.*positional argument",
-     "⚠️  GameStateNotifier requires ONE positional argument: a PersistenceService. "
-     "Correct pattern:\n"
-     "  import 'package:astro_flux/systems/local_persistence_service.dart';\n"
-     "  final notifier = GameStateNotifier(LocalPersistenceService());\n"
-     "NEVER call GameStateNotifier() with no arguments — it will not compile."),
-
-    (r"isn't defined for the type 'StarCaptureIndicator'|"
-     r"_progress.*StarCaptureIndicator|_captured.*StarCaptureIndicator",
-     "⚠️  StarCaptureIndicator private fields (_progress, _captured) cannot be accessed "
-     "directly from tests. Use the public @visibleForTesting getters instead:\n"
-     "  indicator.progress   (double, 0.0–1.0)\n"
-     "  indicator.captured   (bool)\n"
-     "Do NOT access _progress or _captured directly."),
-
-    (r"components/stars/star_capture_indicator|"
-     r"Target of URI doesn't exist.*star_capture_indicator",
-     "⚠️  StarCaptureIndicator import path: the file lives at "
-     "lib/components/star_capture_indicator.dart. "
-     "Import it as: import 'package:astro_flux/components/star_capture_indicator.dart';\n"
-     "The path components/stars/star_capture_indicator.dart is a re-export alias — "
-     "prefer the canonical path in new code."),
-
-    (r"Target of URI doesn't exist.*level_up_event_bus|"
-     r"level_up_event_bus.*doesn't exist",
-     "⚠️  level_up_event_bus.dart does not exist in this project. "
-     "Remove any import of 'package:astro_flux/game/level_up_event_bus.dart' — "
-     "it is an unused import generated in error. Do not create the file."),
-
-    (r"part of.*astro_flux\.|part of.*library",
-     "⚠️  Do NOT use 'part of' directives. This project does not use Dart part files. "
-     "Every .dart file must be a standalone library. "
-     "Remove any 'part of <library>;' line at the top of the file."),
-
-    (r"game_core\.dart|import.*game_core|GameCore.*isn't a function|isn't a function.*GameCore",
-     "⚠️  GameCore is NOT a class you can instantiate. Do not call GameCore(...). "
-     "The correct pattern for embedding the game in Flutter is Flame's built-in GameWidget:\n"
-     "  import 'package:flame/game.dart';\n"
-     "  import 'package:astro_flux/game/astro_game.dart';\n"
-     "  GameWidget<AstroGame>(\n"
-     "    game: AstroGame(),\n"
-     "    overlayBuilderMap: {'gameOver': (ctx, game) => GameOverOverlay()},\n"
-     "  )\n"
-     "Never use GameCore(...) — use GameWidget<AstroGame>(...) instead."),
-
-    (r"game_rules_engine\.dart|import.*game_rules_engine",
-     "⚠️  game_rules_engine.dart does not contain game logic — it is a re-export stub. "
-     "Game rules live in: lib/game/capture_rules.dart and lib/game/fusion_rules.dart. "
-     "Import those directly instead."),
-
-    (r"StateNotifier.*not found|StateNotifierProvider.*not found|"
-     r"Type 'StateNotifier' not found|Method not found: 'StateNotifierProvider'",
-     "⚠️  RIVERPOD 3.x: StateNotifier and StateNotifierProvider are REMOVED.\n"
-     "  Migrate to Notifier<T> + NotifierProvider:\n"
-     "  OLD (broken):\n"
-     "    class MyNotifier extends StateNotifier<MyState> {\n"
-     "      MyNotifier() : super(MyState.initial);\n"
-     "      void doSomething() { state = newState; }\n"
-     "    }\n"
-     "    final myProvider = StateNotifierProvider<MyNotifier, MyState>((ref) => MyNotifier());\n"
-     "  NEW (correct):\n"
-     "    class MyNotifier extends Notifier<MyState> {\n"
-     "      @override\n"
-     "      MyState build() => MyState.initial;  // replaces super(initialState)\n"
-     "      void doSomething() { state = newState; }  // state getter/setter unchanged\n"
-     "    }\n"
-     "    final myProvider = NotifierProvider<MyNotifier, MyState>(() => MyNotifier());\n"
-     "  ref.read(myProvider.notifier) still works. ref.watch(myProvider) still works.\n"
-     "  WidgetRef and Ref are SEPARATE types in Riverpod 3.x — do not pass WidgetRef as Ref."),
-
-    (r"argument type 'WidgetRef' can't be assigned to.*'Ref'|"
-     r"WidgetRef.*can't be assigned.*Ref",
-     "⚠️  RIVERPOD 3.x: WidgetRef and Ref are SEPARATE types — cannot pass WidgetRef as Ref.\n"
-     "  To give a long-lived object (e.g. AstroGame) a proper Ref, create it inside a Provider:\n"
-     "    final myGameProvider = Provider<AstroGame>((ref) => AstroGame(ref));\n"
-     "  Then read it in initState:\n"
-     "    _game = ref.read(myGameProvider);  // ref here is WidgetRef, but the game gets Ref\n"
-     "  Never pass the WidgetRef from ConsumerState.ref directly to a Ref parameter."),
-
-    (r"Classes can only extend other classes|extends.*Provider|extends.*Notifier(?!<)",
-     "⚠️  A class is trying to extend a provider or non-class type. "
-     "Riverpod providers are not classes you extend. Correct patterns:\n"
-     "  class MyNotifier extends Notifier<MyState> { ... }  // Riverpod 3.x\n"
-     "  final myProvider = NotifierProvider<MyNotifier, MyState>(() => MyNotifier());\n"
-     "Never write 'extends fusionProvider' or 'extends NotifierProvider'."),
-
-    (r"valueOrNull.*ConnectivityResult|ConnectivityResult.*valueOrNull",
-     "⚠️  AsyncValue<List<ConnectivityResult>> does not have valueOrNull in this Riverpod version. "
-     "Use .when() or .value instead:\n"
-     "  final result = ref.watch(connectivityProvider);\n"
-     "  final isOnline = result.value?.contains(ConnectivityResult.wifi) ?? false;\n"
-     "Or use connectivityProvider as a plain Provider<ConnectivityResult> if async is not needed."),
-
-    (r"game_events\.dart|VectorFusedEvent|LevelUpEventBus",
-     "⚠️  game_events.dart, VectorFusedEvent, and LevelUpEventBus do not exist in this project. "
-     "Do not import or reference them. For fusion events use canFuseProvider from "
-     "lib/game/fusion_provider.dart which reads mote count directly from gameServiceProvider."),
-
-    (r"toVector2.*isn't defined.*Vector2|Vector2.*toVector2.*isn't defined",
-     "⚠️  .toVector2() DOES NOT EXIST ON Vector2 — it's already a Vector2.\n"
-     "  In Flame's ScaleUpdateInfo:\n"
-     "    info.delta.global  → Vector2 (already)  — use it directly\n"
-     "    info.scale.global  → Vector2 (already)  — use .x or .y directly\n"
-     "  Only call .toVector2() on Offset or other non-Vector2 types.\n"
-     "  CORRECT: camera.viewfinder.position -= info.delta.global / zoom;\n"
-     "  WRONG:   camera.viewfinder.position -= info.delta.global.toVector2() / zoom;"),
-
-    (r"ScaleDetector.*can't be mixed|can't be mixed.*ScaleDetector"
-     r"|Classes can only mix in mixins.*gesture|Classes can only extend.*GestureHandler",
-     "⚠️  FLAME GESTURE MIXIN ERROR: ScaleDetector, TapDetector, DragCallbacks etc. can only be\n"
-     "  mixed onto FlameGame (or a Component that satisfies their 'on' constraint).\n"
-     "  NEVER create 'class GestureHandler extends PositionComponent with ScaleDetector' — invalid.\n"
-     "  CORRECT pattern — put gesture mixins on AstroGame (already done, file is LOCKED):\n"
-     "    class AstroGame extends FlameGame with ScaleDetector {\n"
-     "      @override void onScaleStart(ScaleStartInfo info) { ... }\n"
-     "      @override void onScaleUpdate(ScaleUpdateInfo info) {\n"
-     "        if (info.pointerCount >= 2) {\n"
-     "          camera.viewfinder.zoom = newZoom.clamp(0.4, 2.0);\n"
-     "          camera.viewfinder.position -= delta / camera.viewfinder.zoom;\n"
-     "        }\n"
-     "      }\n"
-     "    }\n"
-     "  AstroGame already has ScaleDetector wired — do NOT rewrite it.\n"
-     "  For tap handling on individual components use 'with TapCallbacks' on the COMPONENT."),
-
-    (r"CombatResultLabel.*isn't defined|capture_result_label|combat_result_label\.dart",
-     "⚠️  Do NOT create a new capture/combat label component or file. The infrastructure already exists:\n"
-     "  • lib/game/capture_event_notifier.dart — CaptureMessageNotifier (StateNotifier<String>)\n"
-     "  • captureMessageProvider — Provider<String> you can watch with Consumer or ref.watch()\n"
-     "  To display the message, add a Consumer widget that watches captureMessageProvider and\n"
-     "  shows an Overlay or AnimatedSwitcher. Do NOT create capture_result_label_component.dart\n"
-     "  or combat_result_label.dart — those files do not exist and should not be created.\n"
-     "  The locked CombatResultLabelComponent at lib/components/combat_result_label_component.dart\n"
-     "  is a Flame PositionComponent for in-world labels — use CaptureMessageNotifier for HUD toasts."),
-
-    (r"firebase_remote_config|firebase_core|cloud_firestore|firebase_auth",
-     "⚠️  Firebase packages are NOT in this project. Do not import any firebase_* package.\n"
-     "  This project uses LocalPersistenceService (in-memory) for persistence — no Firebase.\n"
-     "  Remove all firebase_remote_config, firebase_core, cloud_firestore imports immediately."),
-
-    (r"flutter_vector_math|package:vector_math/vector_math_64|vector_math\.dart",
-     "⚠️  Do NOT import flutter_vector_math or vector_math directly.\n"
-     "  Vector2 comes from Flame: 'import package:flame/components.dart' (or package:flame/game.dart).\n"
-     "  Both already re-export vector_math's Vector2. Never add a separate vector_math import."),
-
-    (r"Directives must appear before any declarations|directive.*before.*declaration",
-     "⚠️  IMPORT AFTER CLASS: All 'import' statements must appear at the TOP of the file,\n"
-     "  before any class, enum, or function declarations.\n"
-     "  Move every import to lines 1-N before the first 'class' or 'enum' keyword."),
-
-    (r"Target of URI doesn't exist.*'../game_state_provider|'../game_state_provider",
-     "⚠️  WRONG IMPORT PATH for game_state_provider.dart.\n"
-     "  The file is at lib/models/game_state_provider.dart.\n"
-     "  From lib/game/*.dart:    import '../models/game_state_provider.dart';\n"
-     "  From lib/game/ai/*.dart: import '../../models/game_state_provider.dart';\n"
-     "  ALWAYS SAFE: import 'package:astro_flux/models/game_state_provider.dart';\n"
-     "  NEVER write '../game_state_provider.dart' — there is no game_state_provider in lib/game/."),
-
-    (r"'Mote' isn't a function|Mote.*isn't a function",
-     "⚠️  'Mote' IS A CLASS, not a function. Never call it positionally.\n"
-     "  Correct constructor: Mote(id: someInt)\n"
-     "  Mote has NO position field — it only has: id (int), lifecycleState (MoteLifecycle).\n"
-     "  To check if active: mote.isActive  (getter, not a method call)\n"
-     "  Do NOT write: Mote(id, position), Mote(id), or state.motes.map(Mote).\n"
-     "  Lifecycle helpers return new instances: mote.setActive(), mote.setFused(), mote.setCreated()"),
-
-    (r"'text' can't be used as a setter.*final|final.*'text'.*setter",
-     "⚠️  CombatResultLabelComponent.text is final — you cannot mutate it after construction.\n"
-     "  To show a new label, remove the old component and add a new one:\n"
-     "    parent.remove(oldLabel);\n"
-     "    parent.add(CombatResultLabelComponent(text: 'Captured!', color: Colors.green));\n"
-     "  Do NOT write: label.text = 'something'; — that will always fail with a setter error."),
-
-    (r"Classes can only extend other classes.*capture|capture.*Classes can only extend",
-     "⚠️  CaptureEventNotifier / CaptureMessageNotifier must extend StateNotifier<String>, not a provider.\n"
-     "  CORRECT:\n"
-     "    class CaptureMessageNotifier extends StateNotifier<String> {\n"
-     "      CaptureMessageNotifier() : super('');\n"
-     "    }\n"
-     "  WRONG: extends captureMessageProvider, extends StateNotifierProvider, extends Provider.\n"
-     "  Providers are instances created by the framework — you never extend them."),
-
-    (r"isn't a valid override of.*PositionComponent|CombatResultLabelComponent.*position.*isn't",
-     "⚠️  Do NOT declare 'final Vector2 position' as an instance field in a PositionComponent subclass. "
-     "PositionComponent already has a 'position' property — re-declaring it causes an override conflict. "
-     "Instead, accept the initial position as a constructor parameter named 'initialPosition' and pass "
-     "it only to super():\n"
-     "  class MyComponent extends PositionComponent {\n"
-     "    MyComponent({Vector2? initialPosition}) : super(position: initialPosition ?? Vector2.zero());\n"
-     "    // Use 'position' (inherited) directly — never redeclare it as a field.\n"
-     "  }"),
-
-    (r"Target of URI doesn't exist.*audio_service|audio_service.*Target of URI"
-     r"|'../../audio_service\.dart'|'../audio_service\.dart'",
-     "⚠️  WRONG IMPORT PATH for audio_service.dart. The canonical file is at lib/services/audio_service.dart.\n"
-     "  From lib/game/ai/*.dart use:      import '../../services/audio_service.dart';\n"
-     "  From lib/game/*.dart use:         import '../services/audio_service.dart';\n"
-     "  From lib/game_ui/*.dart use:      import '../services/audio_service.dart';\n"
-     "  From lib/components/*.dart use:   import '../services/audio_service.dart';\n"
-     "  ALWAYS SAFE: import 'package:astro_flux/services/audio_service.dart';\n"
-     "  NEVER write: import '../audio_service.dart' or import '../../audio_service.dart' — "
-     "audio_service.dart lives in services/, not in game/ or game/ai/."),
-
-    (r"Target of URI doesn't exist.*capture_rules|capture_rules.*Target of URI",
-     "⚠️  WRONG IMPORT PATH for capture_rules.dart. The canonical file is at lib/game/capture_rules.dart.\n"
-     "  From lib/game/ai/*.dart use:      import '../capture_rules.dart';\n"
-     "  From lib/game_ui/*.dart use:      import '../game/capture_rules.dart';\n"
-     "  From lib/components/*.dart use:   import '../game/capture_rules.dart';\n"
-     "  Or always safe: import 'package:astro_flux/game/capture_rules.dart';"),
-
-    (r"body might complete normally.*'null'.*return type.*'bool'|non_nullable_return_type",
-     "⚠️  METHOD MISSING RETURN STATEMENT: A method declared to return 'bool' (or another non-nullable type) "
-     "has no return statement — the body completes without returning a value. Add an explicit return:\n"
-     "  static bool canAttack(...) {\n"
-     "    if (someCondition) return false;\n"
-     "    return true;  // ← must always return\n"
-     "  }"),
-
-    (r"package:particle_effects|Target of URI doesn't exist.*particle_effects\.dart'(?!.*astro_flux)",
-     "⚠️  'package:particle_effects' does NOT exist — it is a hallucinated external package.\n"
-     "  The particle system is internal to this project:\n"
-     "    import 'package:astro_flux/game/particle_effects.dart';   // ParticleEffects, CombatEffect\n"
-     "    import 'package:astro_flux/game/particle_system.dart';    // ParticleSystem\n"
-     "  API: ParticleEffects(ParticleSystem system).trigger(CombatEffect, Vector2, Color)\n"
-     "  CombatEffect values: attack, hit, destroy, heal\n"
-     "  NEVER import from 'package:particle_effects/...' — that package is not in pubspec.yaml."),
-
-    (r"'CombatAttackEvent' isn't a function|CombatAttackEvent.*isn't a function",
-     "⚠️  CombatAttackEvent IS a class — use its named constructor, never call it positionally.\n"
-     "  Correct: CombatAttackEvent(sourceVectorId: 1, targetStarId: 2)\n"
-     "  Import:  import 'package:astro_flux/game/combat_attack_event.dart';\n"
-     "  NEVER write: CombatAttackEvent(1, 2) — both parameters are named and required.\n"
-     "  The class has exactly two fields: sourceVectorId (int) and targetStarId (int)."),
-
-    (r"getter 'state' isn't defined.*GameStateNotifier|"
-     r"'state'.*isn't defined.*type 'GameStateNotifier'|"
-     r"_gameStateNotifier\.state",
-     "⚠️  GameStateNotifier does NOT expose a public 'state' getter — never access .state on it.\n"
-     "  To READ game state:    final state = ref.read(gameServiceProvider);\n"
-     "  To MUTATE game state:  ref.read(gameServiceProvider.notifier).someMethod();\n"
-     "  CombatAttackHandler and UnitCombatResolver both take a Ref, not a GameStateNotifier:\n"
-     "    class CombatAttackHandler { final Ref _ref; CombatAttackHandler(this._ref); }\n"
-     "  NEVER write: notifier.state  or  _gameStateNotifier.state"),
-]
+# ─── Bad patterns & error hints ────────────────────────────────────────────────
+# Extracted to hints.py — import from there so each can be edited independently.
+from hints import BAD_PATTERNS, ERROR_HINTS  # noqa: E402
 
 
 def apply_error_hints(error_output: str) -> str:
     """Prepend targeted hints for any recognised error patterns."""
     hints = []
     for pattern, hint in ERROR_HINTS:
-        if _re.search(pattern, error_output, _re.IGNORECASE):
-            hints.append(hint)
+        # re.search/re.match cannot take a flags argument if the pattern is already compiled.
+        if isinstance(pattern, _re.Pattern):
+            if pattern.search(error_output):
+                hints.append(hint)
+        else:
+            if _re.search(pattern, error_output, _re.IGNORECASE):
+                hints.append(hint)
     if hints:
         return "\n".join(hints) + "\n\n" + error_output
     return error_output
@@ -923,8 +538,12 @@ def check_bad_patterns(rel_path: str, content) -> list[str]:
         content = str(content)
     violations = []
     for pattern, msg in BAD_PATTERNS:
-        if _re.search(pattern, content):
-            violations.append(f"[{rel_path}] {msg}")
+        if isinstance(pattern, _re.Pattern):
+            if pattern.search(content):
+                violations.append(f"[{rel_path}] {msg}")
+        else:
+            if _re.search(pattern, content):
+                violations.append(f"[{rel_path}] {msg}")
     return violations
 
 
@@ -941,20 +560,23 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
         for path, content in editable.items()
     )
     vision = open("VISION.md").read() if os.path.exists("VISION.md") else ""
-    rules  = open(".roorules").read()  if os.path.exists(".roorules")  else ""
+    _project_rules = open(".roorules").read() if os.path.exists(".roorules") else ""
+    _global_rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "global_rules.md")
+    _global_rules = open(_global_rules_path).read() if os.path.exists(_global_rules_path) else ""
+    rules = (_global_rules + "\n\n---\n\n# Project-specific rules\n\n" + _project_rules).strip()
 
     # Inject API guide so the model knows what already exists before inventing new classes.
-    # Skip for T4 models (12 288-token context): the guide alone costs ~5 000 tokens
-    # and leaves too little room for file context.  T4 is the most capable model and
-    # least likely to hallucinate APIs; it gets the pitfalls block instead.
+    # Skip for tier-1 (7B): the guide alone costs ~5 000 tokens and leaves too little room
+    # for file context. Tier-2 and Tier-3 (MoE models) get a trimmed guide to save headroom.
+    # Claude (called separately via _escalate_to_claude) always receives the full guide.
     _api_guide_path = os.path.join(project_root, "docs", "API_GUIDE.md")
     api_guide_block = ""
-    _is_t4 = model == TIER1_MODEL
-    if os.path.exists(_api_guide_path) and not _is_t4:
+    _is_tier1 = model == TIER1_MODEL
+    _is_moe_tier = model in (TIER2_MODEL, TIER3_MODEL)  # T2/T3 are MoE — trim guide to save headroom
+    # T4 (32B dense) and Claude get the full guide; T1 gets none (too costly for 7B context)
+    if os.path.exists(_api_guide_path) and not _is_tier1:
         _guide = open(_api_guide_path).read()
-        # T3 gets a trimmed guide (first 6 000 chars ≈ 2 000 tokens) to save headroom.
-        _is_t3 = model == TIER3_MODEL
-        _guide = _guide[:6000] if _is_t3 else _guide
+        _guide = _guide[:6000] if _is_moe_tier else _guide
         api_guide_block = f"\n\nEXISTING API REFERENCE — read before creating any new class or file:\n{_guide}"
 
     # Inject top recurring error patterns as a "known pitfalls" block
@@ -1022,10 +644,12 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
         f"Current file contents:\n{context}"
         f"{error_block}"
     )
-    # Scale timeout with model size: large 32B models need 15+ min on a Mac Air
+    # Scale timeout with model size: large 32B models need up to 30 min on a
+    # memory-constrained Mac (macOS must evict cached files + swap before the
+    # model fits in unified memory — this can take 20+ min when RAM is tight).
     # (3-4 min to load + 10-12 min to generate a full file).
     size_gb = _model_size_gb(model)
-    coding_timeout = 900 if size_gb >= _LARGE_MODEL_THRESHOLD_GB else 600
+    coding_timeout = 1800 if size_gb >= _LARGE_MODEL_THRESHOLD_GB else 600
     raw = ollama(model, system_prompt, user_prompt, timeout=coding_timeout)
     call_info = {"system": system_prompt, "user": user_prompt, "raw": raw}
 
@@ -1055,12 +679,17 @@ def write_changes(changes: dict[str, str], project_root: str,
         if rel_path in LOCKED_FILES:
             print(f"  {DIM}(skipped locked file: {rel_path}){RESET}")
             continue
-        # Scope guard: test tasks must only write under test/
-        if test_only and not rel_path.startswith("test/"):
+        # Scope guard: test tasks must only write test files.
+        # Allowed: test/**  OR  lib/**/*_test.dart (Flame projects keep tests in lib/)
+        _is_test_file = (
+            rel_path.startswith("test/")
+            or (rel_path.startswith("lib/") and rel_path.endswith("_test.dart"))
+        )
+        if test_only and not _is_test_file:
             msg = (
                 f"SCOPE VIOLATION [{rel_path}]: This is a 'Write unit test' task — "
-                f"only files under test/ are permitted. '{rel_path}' is a source file "
-                f"and must NOT be modified here. "
+                f"only test files are permitted (test/**  or  lib/**/*_test.dart). "
+                f"'{rel_path}' is a source file and must NOT be modified here. "
                 f"If the feature under test is missing, write a skip-marked placeholder:\n"
                 f"  test('...', () {{}}, skip: 'feature not implemented — implement task required first');"
             )
@@ -1584,7 +1213,10 @@ def snapshot_baseline_errors(project_root: str) -> frozenset[str]:
         return frozenset()
 
 
-def validate(baseline_errors: frozenset[str] | None = None) -> tuple[bool, str]:
+def validate(
+    baseline_errors: frozenset[str] | None = None,
+    files_written: list[str] | None = None,
+) -> tuple[bool, str]:
     for cmd, label in [
         (["flutter", "analyze", "--no-fatal-infos", "--no-fatal-warnings"], "flutter analyze"),
         (["python", "-m", "pytest", "--tb=short", "-q"], "pytest"),
@@ -1595,16 +1227,26 @@ def validate(baseline_errors: frozenset[str] | None = None) -> tuple[bool, str]:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         output = (result.stdout + result.stderr).strip()
         if cmd[0] == "flutter":
-            # Flutter exits with code 1 even for plugin deprecation warnings
-            # (e.g. "This will become an error in a future version of Flutter").
+            # Flutter exits with code 1 even for plugin deprecation warnings.
             # We only fail if NEW error • lines appear that weren't in the
-            # pre-task baseline — pre-existing errors the model didn't cause
-            # must not block the task.
+            # pre-task baseline AND are in files the worker actually wrote.
+            # Errors in unrelated files (generated by other workers on other
+            # branches) must not block this task — they're not our responsibility.
             current_errors = _extract_flutter_errors(output)
             new_errors = current_errors - (baseline_errors or frozenset())
+            if files_written:
+                # Narrow new_errors to only those referencing written files.
+                # An error line looks like: "error • <msg> • lib/foo/bar.dart:10:5 • code"
+                # We match on the file path portion.
+                def _in_written(err_line: str) -> bool:
+                    return any(
+                        f.replace("\\", "/") in err_line.replace("\\", "/")
+                        for f in files_written
+                    )
+                new_errors = frozenset(e for e in new_errors if _in_written(e))
             if not new_errors:
                 return True, output[-3000:]
-            # Build an output that highlights only the new errors
+            # Build an output that highlights only the relevant errors
             new_err_text = "\n".join(sorted(new_errors))
             return False, new_err_text + "\n\n" + output[-2000:]
         return result.returncode == 0, output[-3000:]
@@ -1926,7 +1568,10 @@ def _escalate_to_claude(
         return {}, False
 
     vision = open("VISION.md").read() if os.path.exists("VISION.md") else ""
-    rules  = open(".roorules").read()  if os.path.exists(".roorules")  else ""
+    _project_rules = open(".roorules").read() if os.path.exists(".roorules") else ""
+    _global_rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "global_rules.md")
+    _global_rules = open(_global_rules_path).read() if os.path.exists(_global_rules_path) else ""
+    rules = (_global_rules + "\n\n---\n\n# Project-specific rules\n\n" + _project_rules).strip()
     context = "\n\n".join(f"=== {p} ===\n{c}" for p, c in file_contents.items()
                           if p not in LOCKED_FILES)
     locked_dirs: dict[str, list[str]] = {}
@@ -1962,11 +1607,13 @@ def _escalate_to_claude(
             system=system_prompt,
         )
         raw = msg.content[0].text if msg.content else ""
-        start, end = raw.find("{"), raw.rfind("}") + 1
-        if start == -1:
+        if "{" not in raw:
             print(f" {YELLOW}no JSON in response{RESET}")
             return {}, False
-        changes = json.loads(raw[start:end])
+        changes = _extract_first_json_object(raw)
+        if not changes:
+            print(f" {YELLOW}could not parse JSON from Claude response{RESET}")
+            return {}, False
         print(f" {DIM}done ({len(changes)} file(s)){RESET}")
         return changes, True
     except Exception as exc:
@@ -2023,7 +1670,10 @@ def _escalate_to_claude_chronic(
         return {}, False
 
     vision = open("VISION.md").read() if os.path.exists("VISION.md") else ""
-    rules  = open(".roorules").read()  if os.path.exists(".roorules")  else ""
+    _project_rules = open(".roorules").read() if os.path.exists(".roorules") else ""
+    _global_rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "global_rules.md")
+    _global_rules = open(_global_rules_path).read() if os.path.exists(_global_rules_path) else ""
+    rules = (_global_rules + "\n\n---\n\n# Project-specific rules\n\n" + _project_rules).strip()
     context = "\n\n".join(
         f"=== {p} ===\n{c}" for p, c in file_contents.items()
         if p not in LOCKED_FILES
@@ -2083,11 +1733,13 @@ def _escalate_to_claude_chronic(
             system=system_prompt,
         )
         raw = msg.content[0].text if msg.content else ""
-        start, end = raw.find("{"), raw.rfind("}") + 1
-        if start == -1:
+        if "{" not in raw:
             print(f" {YELLOW}no JSON in response{RESET}")
             return {}, False
-        parsed = json.loads(raw[start:end])
+        parsed = _extract_first_json_object(raw)
+        if not parsed:
+            print(f" {YELLOW}could not parse JSON from Claude response{RESET}")
+            return {}, False
         files = parsed.get("files", {})
         new_rule = parsed.get("new_rule", "").strip()
         print(f" {DIM}done ({len(files)} file(s)){RESET}")
@@ -2149,7 +1801,8 @@ def run_task(task: str, project_root: str, log_file: str,
              task_idx: int = 1,
              budget_s: float | None = None,
              max_tier_idx: int | None = None,
-             start_tier_idx: int = 0) -> bool | str:
+             start_tier_idx: int = 0,
+             skip_advisor: bool = False) -> bool | str:
     """Tiered execution: tier1 → tier2 → … → skip.
 
     max_tier_idx  — exclusive upper bound on TIER_MODELS (None = all tiers).
@@ -2177,8 +1830,9 @@ def run_task(task: str, project_root: str, log_file: str,
     # Tier state — honour start_tier_idx for deep/resume runs
     tier_idx: int  = min(start_tier_idx, _max_tier - 1)
     current_model  = TIER_MODELS[tier_idx]
-    phase_stale: int    = 0   # same-error streak within current tier
-    phase_attempts: int = 0   # total validation failures in current tier (catches thrashing)
+    phase_stale: int        = 0   # same-error streak within current tier
+    phase_attempts: int     = 0   # total validation failures in current tier (catches thrashing)
+    consecutive_bad_pattern: int = 0  # bad-pattern blocks in a row; escalate after limit
     last_err_sig   = ""
 
     is_test = _is_test_task(task)
@@ -2209,7 +1863,7 @@ def run_task(task: str, project_root: str, log_file: str,
                 written_c, pat_errs_c = write_changes(
                     claude_changes, project_root, test_only=is_test)
                 if not pat_errs_c:
-                    passed_c, output_c = validate(baseline_errors)
+                    passed_c, output_c = validate(baseline_errors, files_written=written_c)
                     if passed_c:
                         print(f"  {GREEN}✓ Chronic blocker solved by Claude{RESET}")
                         update_api_guide(written_c, claude_changes, project_root)
@@ -2288,7 +1942,7 @@ def run_task(task: str, project_root: str, log_file: str,
             errors_seen.append("timeout")
             print(f" {YELLOW}timeout — retrying{RESET}")
             phase_attempts += 1
-            if phase_attempts >= PHASE_MAX_ATTEMPTS:
+            if phase_attempts >= (TIER2_MAX_ATTEMPTS if tier_idx > 0 else PHASE_MAX_ATTEMPTS):
                 if not _advance_tier(attempt):
                     restore_files(backups, project_root)
                     _append_velocity(project_root, {
@@ -2307,7 +1961,7 @@ def run_task(task: str, project_root: str, log_file: str,
             errors_seen.append("ollama_500")
             time.sleep(5)
             phase_attempts += 1
-            if phase_attempts >= PHASE_MAX_ATTEMPTS:
+            if phase_attempts >= (TIER2_MAX_ATTEMPTS if tier_idx > 0 else PHASE_MAX_ATTEMPTS):
                 if not _advance_tier(attempt):
                     restore_files(backups, project_root)
                     _append_velocity(project_root, {
@@ -2378,14 +2032,36 @@ def run_task(task: str, project_root: str, log_file: str,
         if pattern_errs:
             errors = pattern_errs + ("\n\n" + errors if errors else "")
             errors_seen.append("bad_pattern")
+            consecutive_bad_pattern += 1
             print(f" {YELLOW}blocked by bad patterns — retrying{RESET}")
+            # After 3 consecutive bad-pattern blocks the model is stuck in a loop.
+            # Escalate to the next tier rather than spinning indefinitely.
+            if consecutive_bad_pattern >= 3:
+                print(
+                    f"  {YELLOW}⚡ bad-pattern loop ({consecutive_bad_pattern}×) — "
+                    f"escalating tier{RESET}"
+                )
+                consecutive_bad_pattern = 0
+                if not _advance_tier(attempt):
+                    restore_files(backups, project_root)
+                    _write_tier2_queue(project_root, task_idx, task, errors_seen)
+                    _append_velocity(project_root, {
+                        "date": date.today().isoformat(), "task": task[:120],
+                        "outcome": "skipped", "attempts": attempt,
+                        "duration_s": round(time.time() - task_start, 1),
+                        "error_types": list(dict.fromkeys(errors_seen)),
+                    })
+                    _log_task_summary(project_root, task_idx, task, "skipped",
+                                      attempt, current_model, task_start)
+                    return "skipped"
             continue
 
+        consecutive_bad_pattern = 0   # model wrote real code — reset bad-pattern streak
         changed_list = ", ".join(written)
         print(f" wrote {len(written)} file(s): {changed_list[:60]}")
 
         print(f"  {DIM}Validating...{RESET}", end="", flush=True)
-        passed, output = validate(baseline_errors)
+        passed, output = validate(baseline_errors, files_written=written)
 
         with open(log_file, "a") as log:
             log.write(f"\n### Attempt {attempt}\nFiles changed: {changed_list}\n")
@@ -2427,7 +2103,7 @@ def run_task(task: str, project_root: str, log_file: str,
             fix_count, _ = af.apply_mechanical_fixes(output, project_root)
             if fix_count > 0:
                 print(f"  {DIM}⚙  Auto-fixed {fix_count} issue(s) — re-validating...{RESET}", end="", flush=True)
-                passed2, output2 = validate(baseline_errors)
+                passed2, output2 = validate(baseline_errors, files_written=written)
                 if passed2:
                     print(f" {GREEN}✓ passed after autofix{RESET}")
                     errors_seen.append("autofix_resolved")
@@ -2451,21 +2127,24 @@ def run_task(task: str, project_root: str, log_file: str,
         except Exception as e:
             print(f"  {DIM}(autofix error: {e}){RESET}")
 
-        # Step 2: qwen advisor
+        # Step 2: qwen advisor (skipped with --no-advisor to avoid evicting
+        # the large model from GPU between retries in --deep mode)
         advisor_hint = ""
-        try:
-            adv = _get_advisor()
-            adv.log_error_pattern(output, task, attempt, task_idx, project_root, categories=[])
-            print(f"  {DIM}🤖 Asking qwen advisor...{RESET}", end="", flush=True)
-            advice = adv.advise(output, task, project_root, attempt=attempt)
-            print(f" {DIM}done{RESET}")
-            if advice.get("new_rule"):
-                adv.log_rule_draft(advice["new_rule"], task_idx, project_root)
-                print(f"  {DIM}📝 Rule draft logged{RESET}")
-            advisor_hint = advice.get("enriched_hint", "")
-            errors_seen.append(f"qwen:{','.join(advice.get('categories', []))}")
-        except Exception as e:
-            print(f"  {DIM}(advisor error: {e}){RESET}")
+        if not skip_advisor:
+            try:
+                adv = _get_advisor()
+                adv.log_error_pattern(output, task, attempt, task_idx, project_root, categories=[])
+                print(f"  {DIM}🤖 Asking qwen advisor...{RESET}", end="", flush=True)
+                advice = adv.advise(output, task, project_root, attempt=attempt)
+                print(f" {DIM}done{RESET}")
+                if advice.get("new_rule"):
+                    adv.log_rule_draft(advice["new_rule"], task_idx, project_root)
+                    print(f"  {DIM}📝 Rule draft logged{RESET}")
+                advisor_hint = advice.get("enriched_hint", "")
+                cats = advice.get("categories", [])
+                errors_seen.append(f"qwen:{','.join(str(c) for c in (cats if isinstance(cats, list) else []))}")
+            except Exception as e:
+                print(f"  {DIM}(advisor error: {e}){RESET}")
 
         # ── Log this attempt (validation failed) ─────────────────────────
         # Captured here so errors_fed_in reflects what the model saw this round
@@ -2520,7 +2199,7 @@ def run_task(task: str, project_root: str, log_file: str,
         if advisor_hint:
             errors = f"⚠️  Advisor note: {advisor_hint}\n\n{errors}"
 
-        thrashing = phase_attempts >= PHASE_MAX_ATTEMPTS
+        thrashing = phase_attempts >= (TIER2_MAX_ATTEMPTS if tier_idx > 0 else PHASE_MAX_ATTEMPTS)
         if thrashing and phase_stale < PHASE_STRIKE_LIMIT:
             print(
                 f"\n  {YELLOW}⚡ {current_model} thrashing — {phase_attempts} attempts, "
@@ -2545,7 +2224,7 @@ def run_task(task: str, project_root: str, log_file: str,
                         written_c, pat_errs_c = write_changes(
                             claude_changes, project_root, test_only=is_test)
                         if not pat_errs_c:
-                            passed_c, output_c = validate(baseline_errors)
+                            passed_c, output_c = validate(baseline_errors, files_written=written_c)
                             if passed_c:
                                 print(f"  {GREEN}✓ Claude solved it{RESET}")
                                 update_api_guide(written_c, claude_changes, project_root)
@@ -2675,13 +2354,18 @@ def main():
                              "logs/tier2_queue.jsonl for a --deep run instead "
                              "of escalating. --quick sets this to 1.")
     parser.add_argument("--quick", action="store_true",
-                        help="Tier-1-only pass: fast sweep using only the "
-                             "smallest model. Failures are queued in "
-                             "logs/tier2_queue.jsonl for a follow-up --deep run.")
+                        help="Fast sweep using tiers 1-3 (MoE models only). "
+                             "Failures are queued in logs/tier2_queue.jsonl "
+                             "for a follow-up --deep run (tier 4 + Claude).")
     parser.add_argument("--deep", action="store_true",
                         help="Process only tasks queued by a previous --quick "
                              "run (reads logs/tier2_queue.jsonl), starting at "
                              "tier 2. Clears the queue file when done.")
+    parser.add_argument("--no-advisor", action="store_true",
+                        help="Skip the qwen advisor call after each failed attempt. "
+                             "Recommended for --deep runs: the advisor loads the 7B "
+                             "model which evicts the 32B from GPU, adding 20-30s of "
+                             "reload overhead per retry.")
     parser.add_argument("--commit-sprint", action="store_true",
                         help="Commit and push sprint planning artifacts "
                              "(ROADMAP.md, task_graph.json, .roorules) before "
@@ -2767,23 +2451,23 @@ def main():
     today_str = date.today().isoformat()
 
     # ── Quick / Deep mode resolution ──────────────────────────────────────────
-    # --quick  → cap at tier 1; failures go into logs/tier2_queue.jsonl
-    # --deep   → only process tasks from tier2_queue.jsonl, starting at tier 2
+    # --quick  → tiers 1-2 only (<30B models); T3 35B and T4 32B are excluded
+    # --deep   → only process tasks from tier2_queue.jsonl, starting at tier 4 (32B dense + Claude)
     # --max-tier N → explicit cap (overrides --quick when both given)
     if args.quick and not args.max_tier:
-        args.max_tier = 1
+        args.max_tier = QUICK_MAX_TIER_IDX  # derived from MODEL_PARAMS; enforces <30B policy
     run_max_tier_idx: int | None = (
         min(args.max_tier, len(TIER_MODELS)) if args.max_tier else None
     )
-    run_start_tier_idx: int = 0
+    run_start_tier_idx: int = 1 if args.quick else 0   # quick skips T1
 
     tasks = parse_all_tasks()
 
     # ── Quick mode: skip tasks already queued for --deep ──────────────────────
-    # If tier2_queue.jsonl exists from a prior --quick run, those tasks already
-    # failed at tier1 and re-attempting them would just re-queue them.  Skip
-    # them so a restarted --quick run only touches genuinely untried tasks.
-    if args.quick or run_max_tier_idx is not None:
+    # If tier2_queue.jsonl exists from a prior T1 run, those tasks already
+    # failed at tier1. Only skip them if we're re-running from T1 (start=0) —
+    # if we're starting at T2+, those queued tasks ARE what we want to process.
+    if (args.quick or run_max_tier_idx is not None) and run_start_tier_idx == 0:
         _prior_queue_file = os.path.join(project_root, TIER2_QUEUE_FILE)
         if os.path.exists(_prior_queue_file):
             _already_queued: set[str] = set()
@@ -2820,22 +2504,25 @@ def main():
             # Clear stale queue file
             open(queue_file, "w").close()
             sys.exit(0)
-        run_start_tier_idx = 1   # start at tier2 (0-indexed)
+        run_start_tier_idx = 1   # start at tier2 — gemma4 (0-indexed)
+        if not args.max_tier:
+            args.max_tier = 3   # cap at tier3 — qwen3.6; T4 32B reserved for explicit --max-tier 4
         # Deep mode gets a generous budget by default (2× normal multiplier)
         if args.budget_multiplier is None:
             args.budget_multiplier = BUDGET_MULTIPLIER * 2
 
     # Apply stride: worker K handles tasks at positions K, K+stride, K+2×stride …
+    indexed_tasks = [(i + 1, t) for i, t in enumerate(tasks)]
     if args.stride > 1:
-        tasks = [t for i, t in enumerate(tasks) if i % args.stride == args.worker_id]
+        indexed_tasks = [it for it in indexed_tasks if (it[0] - 1) % args.stride == args.worker_id]
 
-    if not tasks:
+    if not indexed_tasks:
         print(f"{YELLOW}No unchecked tasks found anywhere in ROADMAP.md.{RESET}")
         print(f"Add tasks to ROADMAP.md or run plan_week.py first.")
         sys.exit(0)
 
-    mode_label = "  ⚡ QUICK (tier-1 only)" if args.quick else (
-                 "  🔬 DEEP (tier-2+)" if args.deep else "")
+    mode_label = f"  ⚡ QUICK (tiers 2–{QUICK_MAX_TIER_IDX}, <{QUICK_PARAM_LIMIT_B:.0f}B)" if args.quick else (
+                 "  🔬 DEEP (tiers 2–3 from queue)" if args.deep else "")
     worker_label = f" · worker {args.worker_id}/{args.stride}" if args.stride > 1 else ""
     tier_range = (f"tier{run_start_tier_idx + 1}–{run_max_tier_idx or len(TIER_MODELS)}"
                   if (run_start_tier_idx or run_max_tier_idx) else
@@ -2844,7 +2531,7 @@ def main():
     print(f"{BOLD}  🤖  Autonomous work loop — {today_str}{worker_label}{RESET}")
     if mode_label:
         print(f"{BOLD}{mode_label}{RESET}")
-    print(f"{BOLD}  {len(tasks)} tasks · {tier_range} · up to {PHASE_MAX_ATTEMPTS} attempts/tier · YOLO{RESET}")
+    print(f"{BOLD}  {len(indexed_tasks)} tasks · {tier_range} · up to {PHASE_MAX_ATTEMPTS} attempts/tier · YOLO{RESET}")
     print(f"{BOLD}{'━'*56}{RESET}\n")
 
     # ── Verify Model Availability ─────────────────────────────────────────────
@@ -2876,9 +2563,9 @@ def main():
     # of running against a broken or missing implementation.
     last_incomplete: int | None = None   # task index of last failed/skipped task
 
-    for i, task_line in enumerate(tasks, 1):
-        if i < args.start_at:
-            print(f"{DIM}[{i}/{len(tasks)}] Skipping: {task_text(task_line)[:60]}{RESET}")
+    for loop_idx, (task_idx, task_line) in enumerate(indexed_tasks, 1):
+        if loop_idx < args.start_at:
+            print(f"{DIM}[{loop_idx}/{len(indexed_tasks)}] Skipping: {task_text(task_line)[:60]}{RESET}")
             continue
 
         task = task_text(task_line)
@@ -2886,16 +2573,16 @@ def main():
 
         # ── Feature/Test filtering ───────────────────────────────────────────
         if args.features_only and is_test:
-            print(f"  {DIM}[deferred] Task {i} is a test task (features-only mode){RESET}")
+            print(f"  {DIM}[deferred] Task {task_idx} is a test task (features-only mode){RESET}")
             continue
         if args.tests_only and not is_test:
-            print(f"  {DIM}[skipping] Task {i} is a feature task (tests-only mode){RESET}")
+            print(f"  {DIM}[skipping] Task {task_idx} is a feature task (tests-only mode){RESET}")
             continue
 
-        print(f"\n{BOLD}[{i}/{len(tasks)}] {task[:70]}{'...' if len(task) > 70 else ''}{RESET}")
+        print(f"\n{BOLD}[{loop_idx}/{len(indexed_tasks)}] {task[:70]}{'...' if len(task) > 70 else ''}{RESET}")
 
         with open(log_file, "a") as f:
-            f.write(f"\n## Task {i}: {task}\n")
+            f.write(f"\n## Task {task_idx}: {task}\n")
 
         if args.dry_run:
             print(f"  {DIM}(dry-run){RESET}")
@@ -2904,7 +2591,7 @@ def main():
         # Dependency block: if the immediately preceding task did not complete
         # and this is a test task, skip it now and retry later (after the
         # implement task has had a chance to succeed in the retry pass).
-        if _is_test_task(task) and last_incomplete is not None and i == last_incomplete + 1:
+        if _is_test_task(task) and last_incomplete is not None and task_idx == last_incomplete + 1:
             print(
                 f"  {YELLOW}⏭  Dependency-blocked: task {last_incomplete} did not complete — "
                 f"test task deferred to retry pass{RESET}"
@@ -2912,23 +2599,24 @@ def main():
             with open(log_file, "a") as f:
                 f.write(f"Dependency-blocked: preceding task {last_incomplete} failed/skipped.\n")
             skipped_count += 1
-            skipped_tasks.append((i, task))
-            retry_queue.append((i, task_line, task))
-            last_incomplete = i   # chain: mark this task as incomplete too
+            skipped_tasks.append((task_idx, task))
+            retry_queue.append((task_idx, task_line, task))
+            last_incomplete = task_idx   # chain: mark this task as incomplete too
             continue
 
-        branch = _branch_start(project_root, i, task)
+        branch = _branch_start(project_root, task_idx, task)
         if branch:
             print(f"  {DIM}⎇  Branch: {branch}{RESET}")
 
-        result = run_task(task, project_root, log_file, task_idx=i,
+        result = run_task(task, project_root, log_file, task_idx=task_idx,
                          budget_s=get_first_pass_budget(),
                          max_tier_idx=run_max_tier_idx,
-                         start_tier_idx=run_start_tier_idx)
+                         start_tier_idx=run_start_tier_idx,
+                         skip_advisor=getattr(args, 'no_advisor', False))
 
         if result is True:
             if branch:
-                _branch_merge(project_root, branch, i, task)
+                _branch_merge(project_root, branch, task_idx, task)
                 print(f"  {DIM}⎇  Merged {branch} → main{RESET}")
             mark_done(task_line)
             print(f"  {GREEN}✓ Marked done in ROADMAP.md{RESET}")
@@ -2940,19 +2628,19 @@ def main():
             # In a capped run (--quick / --max-tier), write failures to the
             # tier2 queue so a follow-up --deep run can pick them up.
             if run_max_tier_idx is not None and run_max_tier_idx < len(TIER_MODELS):
-                _write_tier2_queue(project_root, i, task, [])
+                _write_tier2_queue(project_root, task_idx, task, [])
                 print(f"  {YELLOW}↳ queued for --deep run{RESET}")
             skipped_count += 1
-            skipped_tasks.append((i, task))
-            retry_queue.append((i, task_line, task))
-            last_incomplete = i
+            skipped_tasks.append((task_idx, task))
+            retry_queue.append((task_idx, task_line, task))
+            last_incomplete = task_idx
             print(f"  {YELLOW}⏭  Skipped — queued for retry pass{RESET}")
         else:
             if branch:
                 _branch_abandon(project_root, branch)
             failed_count += 1
-            retry_queue.append((i, task_line, task))
-            last_incomplete = i
+            retry_queue.append((task_idx, task_line, task))
+            last_incomplete = task_idx
             print(f"  {YELLOW}Continuing to next task...{RESET}")
 
     # ── End-of-run summary ────────────────────────────────────────────────────
@@ -2988,7 +2676,8 @@ def main():
                 lf.write(f"\n## Retry Task {task_idx}: {task}\n")
 
             result = run_task(task, project_root, log_file,
-                              task_idx=task_idx, budget_s=retry_budget)
+                              task_idx=task_idx, budget_s=retry_budget,
+                              skip_advisor=getattr(args, 'no_advisor', False))
             if result is True:
                 mark_done(task_line)
                 print(f"  {GREEN}✓ Marked done in ROADMAP.md{RESET}")

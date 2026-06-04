@@ -36,17 +36,20 @@ BOLD="\033[1m"; GREEN="\033[92m"; YELLOW="\033[93m"; RED="\033[91m"; DIM="\033[2
 
 mkdir -p "$LOGDIR"
 
-# ── ensure Python deps (no venv required) ────────────────────────────────────
+# ── resolve Python: prefer venv, fall back to system python3 ─────────────────
+VENV_PYTHON="$SOVEREIGN/.venv/bin/python"
+if [ -x "$VENV_PYTHON" ]; then
+    PYTHON="$VENV_PYTHON"
+else
+    PYTHON="python3"
+fi
+
+# ── ensure Python deps ────────────────────────────────────────────────────────
 REQS="$SOVEREIGN/requirements.txt"
 if [ -f "$REQS" ]; then
-    python3 -c "import dotenv, requests" 2>/dev/null || {
+    "$PYTHON" -c "import dotenv, requests, anthropic" 2>/dev/null || {
         echo -e "${YELLOW}Installing missing Python dependencies...${RESET}"
-        if command -v uv &>/dev/null; then
-            uv pip install --system -q -r "$REQS" 2>&1 | tail -5
-        else
-            pip3 install -q --break-system-packages -r "$REQS" 2>&1 | tail -5 || \
-            pip3 install -q -r "$REQS" 2>&1 | tail -5
-        fi
+        "$PYTHON" -m pip install -q -r "$REQS" 2>&1 | tail -5
     }
 fi
 
@@ -126,7 +129,7 @@ more_work_remains() {
 
 run_promote_rules() {
     log "Running promote_rules.py to apply learned rules..."
-    python3 "$SOVEREIGN/promote_rules.py" --project "$PROJECT" --threshold 2 \
+    "$PYTHON" "$SOVEREIGN/promote_rules.py" --project "$PROJECT" --threshold 2 \
         2>&1 | tee -a "$LOG" | grep -E "promoted|Nothing|candidate|rule" || true
 }
 
@@ -165,7 +168,7 @@ if [[ "$WORKERS" -gt 1 ]]; then
         # but cap at 6 — beyond that you're just letting stuck tasks run forever.
         BUDGET_MULT=$(( WORKERS < 6 ? WORKERS : 6 ))
         for ((w=0; w<WORKERS; w++)); do
-            PYTHONUNBUFFERED=1 python3 "$SOVEREIGN/work.py" \
+            PYTHONUNBUFFERED=1 "$PYTHON" "$SOVEREIGN/work.py" \
                 --project "$PROJECT" \
                 --worker-id "$w" \
                 --stride "$WORKERS" \
@@ -266,7 +269,7 @@ write_status "running:$START_AT"
 
 while true; do
     log "▶  work.py --start-at $START_AT ${PASS_ARGS[*]+"${PASS_ARGS[@]}"}"
-    python3 "$SOVEREIGN/work.py" --project "$PROJECT" --start-at "$START_AT" \
+    "$PYTHON" "$SOVEREIGN/work.py" --project "$PROJECT" --start-at "$START_AT" \
         "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}" &
     WORK_PIDS=($!)
     wait "${WORK_PIDS[0]}" || true

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # ── Sovereign Agent — Pub/Sub bootstrap ───────────────────────────────────────
-# Run once before starting a sprint. Creates the 4 topics and 4 subscriptions
-# that wire the orchestrator to the three worker tiers.
+# Run once before starting a sprint. Creates topics and subscriptions that wire
+# the orchestrator to the four worker tiers.
+#
+# Tier chain: 7B → gemma4:26b → qwen3.6:35b-a3b → qwen2.5-coder:32b → Claude
 #
 # Safe to re-run — existing topics/subscriptions are left untouched.
 #
@@ -58,11 +60,13 @@ create_sub() {
 
 # ── Topics ────────────────────────────────────────────────────────────────────
 # Note: no tasks-claude topic — Claude escalation is handled inline by
-# tier-2 workers (32B fails → same worker calls Claude, then reports back).
+# tier-4 workers (32B fails → same worker calls Claude, then reports back).
 echo ""
 echo "→ Topics"
 create_topic "tasks-tier1"   # orchestrator → 7B workers
-create_topic "tasks-tier2"   # orchestrator → 32B+Claude workers
+create_topic "tasks-tier2"   # orchestrator → gemma4:26b workers
+create_topic "tasks-tier3"   # orchestrator → qwen3.6:35b-a3b workers
+create_topic "tasks-tier4"   # orchestrator → qwen2.5-coder:32b+Claude workers
 create_topic "task-results"  # all workers  → orchestrator
 
 # ── Subscriptions ─────────────────────────────────────────────────────────────
@@ -73,6 +77,8 @@ echo ""
 echo "→ Subscriptions"
 create_sub "tasks-tier1-worker"        "tasks-tier1"
 create_sub "tasks-tier2-worker"        "tasks-tier2"
+create_sub "tasks-tier3-worker"        "tasks-tier3"
+create_sub "tasks-tier4-worker"        "tasks-tier4"
 create_sub "task-results-orchestrator" "task-results"
 
 # ── Done ──────────────────────────────────────────────────────────────────────
@@ -82,6 +88,8 @@ echo "  ✓ Pub/Sub ready. Start the sprint:"
 echo ""
 echo "  1. python make_graph.py --project <project>"
 echo "  2. python orchestrate.py --project <project>"
-echo "  3. docker run -e WORKER_TIER=1 ... sovereign-worker  # 7B, repeat N times"
-echo "  4. docker run -e WORKER_TIER=2 ... sovereign-worker  # 32B+Claude inline, repeat M times"
+echo "  3. docker run -e WORKER_TIER=1 ... sovereign-worker  # 7B       (N workers)"
+echo "  4. docker run -e WORKER_TIER=2 ... sovereign-worker  # gemma4   (N workers)"
+echo "  5. docker run -e WORKER_TIER=3 ... sovereign-worker  # qwen3.6  (N workers)"
+echo "  6. docker run -e WORKER_TIER=4 ... sovereign-worker  # 32B+Claude (1 worker — single GPU)"
 echo "═══════════════════════════════════════════════════"

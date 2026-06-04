@@ -1,0 +1,2 @@
+// Fix API mismatches in test/integration/game_state_provider_test.dart
+// (7 errors): fix wrong constructor arg count; fix type mismatch; remove void-result usage; fix miscellaneous error; +3 more in test/integration/game_state_provider_test.dart — done when: flutter analyze reports 0 errors for test/integration/game_state_provider_test.dart

@@ -1,2 +1,8 @@
 sovereign_agent/bin/
 sovereign_agent/.env
+sovereign_agent/.DS_Store
+sovereign_agent/.venv/
+sovereign_agent/__pycache__/
+sovereign_agent/logs/
+sovereign_agent/lib/
+

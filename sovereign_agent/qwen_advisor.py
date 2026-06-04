@@ -177,7 +177,10 @@ Classify each error and respond with ONLY valid JSON (no markdown, no explanatio
 
     # Prepend the deterministic import hint — it's more reliable than qwen's guess
     if det_hint:
+        # Guard: LLM occasionally returns enriched_hint as a list instead of str
         existing = result.get("enriched_hint", "")
+        if not isinstance(existing, str):
+            existing = " ".join(str(x) for x in existing) if isinstance(existing, list) else str(existing)
         result["enriched_hint"] = det_hint + ("\n\n" + existing if existing else "")
         if "missing_import" not in result.get("categories", []):
             result.setdefault("categories", []).append("missing_import")

@@ -2,15 +2,42 @@
 
 ## Code Environment Labels
 Every code snippet must be labelled with one of:
-- **[local]** — plain Mac terminal, no venv needed (e.g. git, gcloud, docker commands)
-- **[venv]** — terminal with sovereign_agent venv active (`source .venv/bin/activate` or use the `./work` / `./standup` wrappers which activate it automatically)
-- **[gcloud ssh: <vm-name>]** — SSH'd into a GCP VM (e.g. `gcloud compute ssh ollama-server --zone us-central1-a`)
+- **[Mac | local]** — plain Mac terminal, no venv needed (e.g. git, gcloud, docker commands)
+- **[Mac | venv]** — Mac terminal with sovereign_agent venv active: `cd ~/Code/Xanadu/sovereign_agent && source .venv/bin/activate`
+- **[PC | WSL | venv]** — Windows WSL terminal with sovereign_agent venv active: `cd ~/Code/sovereign_agent && source .venv/bin/activate`
+- **[L4 VM | ssh]** — SSH'd into sovereign-gpu-l4: `gcloud compute ssh sovereign-gpu-l4 --zone us-west1-a --project astro-flux-spyderboy`
+- **[L4 VM | venv]** — Inside the L4 VM with venv active: `cd ~/sovereign_agent/sovereign_agent && source ../.venv/bin/activate`
+
+**Formatting rule:** The environment label goes in plain text BEFORE the code block, never as a comment inside it. Code blocks must be clean and copy-pasteable with no inline comments added by Claude.
+
+---
+
+## Machine Map
+| Machine | Role | Tier | Model | Path |
+|---------|------|------|-------|------|
+| Mac | Orchestrator + tier-1 worker | 1 | qwen2.5-coder:7b | `~/Code/Xanadu/sovereign_agent` |
+| PC (WSL) | Tier-1 worker | 1 | qwen2.5-coder:7b | `~/Code/sovereign_agent` |
+| sovereign-gpu-l4 (us-west1-a) | Tier-2 worker | 2 | qwen2.5-coder:32b + Claude | `~/sovereign_agent/sovereign_agent` |
+
+**GPU quota**: 1 GPU globally → only sovereign-gpu-l4 can run. ollama-t4 cannot start while L4 is running.
 
 ---
 
 ## Project: Astro Flux
 
-A Flutter/Flame mobile game. Rules: 5 Motes fuse into a Vector, 5 Vectors fuse into a Nova. Stars are capturable nodes that produce Motes in 3 growth tiers. Aesthetic: dark background, high-saturation neon glows, additive blending in combat.
+**Vision doc**: `~/Code/astro_flux/VISION.md` — read this before planning or writing any task.
+
+A real-time strategy / idle game. Core loop:
+1. Stars produce Motes automatically (3 tiers, higher = faster)
+2. Player directs Motes toward Stars
+3. 10 Motes auto-fuse into 1 Vector
+4. Vectors capture Stars
+
+**v1.0 definition of done**: Stars produce Motes → player directs → 10 auto-fuse into Vector → Vectors capture Stars. Runs on iOS and Android.
+
+**What does NOT exist in v1**: Novas, deep combat system, leaderboards, GCP backend (future).
+
+Aesthetic (non-negotiable): dark background, high-saturation neon glows, additive blending (BlendMode.add), no flat Material widgets inside the game canvas.
 
 **Tech stack:** Flutter/Flame + GCP (Firestore, Pub/Sub, Cloud Run Jobs, GCE GPU VM)
 

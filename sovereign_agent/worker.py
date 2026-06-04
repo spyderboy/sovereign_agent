@@ -5,18 +5,23 @@ Subscribes to one Pub/Sub tier queue, pulls a task, executes it, then
 publishes the result back to task-results so the orchestrator can unlock
 dependents or mark the task blocked.
 
-Two worker tiers:
-  WORKER_TIER=1  →  tries the 7B model only
-  WORKER_TIER=2  →  tries the 32B model; if that fails, escalates to Claude
+Four worker tiers + Claude escalation:
+  WORKER_TIER=1  →  qwen2.5-coder:7b (fast, cheap)
+  WORKER_TIER=2  →  gemma4:26b MoE (4B active) — quick second opinion
+  WORKER_TIER=3  →  qwen3.6:35b-a3b MoE (3B active) — third opinion
+  WORKER_TIER=4  →  qwen2.5-coder:32b dense; if that fails, escalates to Claude
                     inline before reporting back (no separate Claude queue)
 
-Claude escalation is intentionally kept inside the tier-2 worker so the
-orchestrator stays simple — a "failed" result from tier-2 means BOTH 32B
-and Claude were tried and neither succeeded.
+T1–T3 are MoE and fast — most tasks resolve here. T4 (32B dense) is the heavy
+hitter for stubborn tasks. Claude escalation is kept inside the tier-4 worker so
+the orchestrator stays simple — a "failed" result from tier-4 means BOTH 32B
+and Claude were tried.
 
 Usage:
   WORKER_TIER=1 python worker.py --project ~/Code/astro_flux
   WORKER_TIER=2 python worker.py --project ~/Code/astro_flux
+  WORKER_TIER=3 python worker.py --project ~/Code/astro_flux
+  WORKER_TIER=4 python worker.py --project ~/Code/astro_flux
 
 The worker exits after completing one task. On GCP, the Cloud Run Job
 runner will restart it for the next task in the queue.
@@ -43,11 +48,11 @@ GCP_PROJECT = (
     or os.getenv("GCP_PROJECT", "")
 )
 
-WORKER_TIER = int(os.getenv("WORKER_TIER", "1"))   # 1 or 2
+WORKER_TIER = int(os.getenv("WORKER_TIER", "1"))   # 1, 2, 3, or 4
 
-TOPIC_MAP = {1: "tasks-tier1", 2: "tasks-tier2"}
+TOPIC_MAP = {1: "tasks-tier1", 2: "tasks-tier2", 3: "tasks-tier3", 4: "tasks-tier4"}
 TOPIC_RESULTS = "task-results"
-SUB_MAP   = {1: "tasks-tier1-worker", 2: "tasks-tier2-worker"}
+SUB_MAP   = {1: "tasks-tier1-worker", 2: "tasks-tier2-worker", 3: "tasks-tier3-worker", 4: "tasks-tier4-worker"}
 
 # How long to wait for a message before giving up (seconds)
 PULL_TIMEOUT = int(os.getenv("PULL_TIMEOUT_S", "300"))
@@ -137,43 +142,79 @@ def write_result(project: str, run_id: str, task_id: int,
     print(f"  ✓ Result written to Firestore ({status})")
 
 
+# ─── TaskRunner adapter ───────────────────────────────────────────────────────
+from lib.runner.flutter import FlutterTaskRunner
+runner = FlutterTaskRunner()
+
 # ─── Tier execution ────────────────────────────────────────────────────────────
 
 def _run_7b(task_desc: str, project_root: str) -> tuple[bool, str]:
     """Try the 7B model. Returns (success, error_summary)."""
-    import work
     log_fd, log_path = tempfile.mkstemp(suffix=".log", prefix="sovereign_t1_")
     os.close(log_fd)
     try:
-        result = work.run_task(
+        success, error = runner.run_task(
             task           = task_desc,
             project_root   = project_root,
             log_file       = log_path,
             max_tier_idx   = 1,   # tier 1 only
             start_tier_idx = 0,
         )
-        success = result is True
-        return success, "" if success else str(result)
+        return success, "" if success else error
+    finally:
+        if os.path.exists(log_path):
+            os.unlink(log_path)
+
+
+def _run_gemma4(task_desc: str, project_root: str) -> tuple[bool, str]:
+    """Try the gemma4:26b model (tier 2). Returns (success, error_summary)."""
+    log_fd, log_path = tempfile.mkstemp(suffix=".log", prefix="sovereign_t2_")
+    os.close(log_fd)
+    try:
+        success, error = runner.run_task(
+            task           = task_desc,
+            project_root   = project_root,
+            log_file       = log_path,
+            max_tier_idx   = 2,
+            start_tier_idx = 1,   # skip 7B, start at gemma4
+        )
+        return success, "" if success else error
+    finally:
+        if os.path.exists(log_path):
+            os.unlink(log_path)
+
+
+def _run_qwen3(task_desc: str, project_root: str) -> tuple[bool, str]:
+    """Try the qwen3.6:35b-a3b model (tier 3). Returns (success, error_summary)."""
+    log_fd, log_path = tempfile.mkstemp(suffix=".log", prefix="sovereign_t3_")
+    os.close(log_fd)
+    try:
+        success, error = runner.run_task(
+            task           = task_desc,
+            project_root   = project_root,
+            log_file       = log_path,
+            max_tier_idx   = 3,
+            start_tier_idx = 2,   # skip T1+T2, start at qwen3.6
+        )
+        return success, "" if success else error
     finally:
         if os.path.exists(log_path):
             os.unlink(log_path)
 
 
 def _run_32b(task_desc: str, project_root: str) -> tuple[bool, str]:
-    """Try the 32B model. Returns (success, error_summary)."""
-    import work
-    log_fd, log_path = tempfile.mkstemp(suffix=".log", prefix="sovereign_t2_")
+    """Try the qwen2.5-coder:32b dense model (tier 4). Returns (success, error_summary)."""
+    log_fd, log_path = tempfile.mkstemp(suffix=".log", prefix="sovereign_t4_")
     os.close(log_fd)
     try:
-        result = work.run_task(
+        success, error = runner.run_task(
             task           = task_desc,
             project_root   = project_root,
             log_file       = log_path,
-            max_tier_idx   = 2,
-            start_tier_idx = 1,   # skip 7B, start at 32B
+            max_tier_idx   = 4,
+            start_tier_idx = 3,   # skip T1–T3, start at 32B dense
         )
-        success = result is True
-        return success, "" if success else str(result)
+        return success, "" if success else error
     finally:
         if os.path.exists(log_path):
             os.unlink(log_path)
@@ -184,9 +225,9 @@ def _run_claude(task_desc: str, project_root: str, files: list[str]) -> tuple[bo
     Inline Claude escalation — called by the tier-2 worker when 32B fails.
     Returns (success, error_summary).
     """
-    import work
     try:
-        file_contents = work.read_files(files, project_root)
+        file_contents = runner.read_files(files, project_root)
+        import work
         changes, ok = work._escalate_to_claude(
             task          = task_desc,
             file_contents = file_contents,
@@ -197,11 +238,11 @@ def _run_claude(task_desc: str, project_root: str, files: list[str]) -> tuple[bo
         if not changes:
             return False, "Claude returned no changes"
 
-        written, pat_errs = work.write_changes(changes, project_root, test_only=False)
+        written, pat_errs = runner.write_changes(changes, project_root, test_only=False)
         if pat_errs:
             return False, f"Pattern errors: {pat_errs}"
 
-        passed, output = work.validate()
+        passed, output = runner.validate()
         if not passed:
             # Restore the files we just wrote so the repo stays clean
             originals = {}
@@ -209,7 +250,7 @@ def _run_claude(task_desc: str, project_root: str, files: list[str]) -> tuple[bo
                 fpath = os.path.join(project_root, f)
                 if os.path.exists(fpath):
                     originals[f] = open(fpath).read()
-            work.restore_files(originals, project_root)
+            runner.restore_files(originals, project_root)
             return False, output[:300]
 
         return True, ""
@@ -223,14 +264,33 @@ def run_tier1(task_desc: str, project_root: str, files: list[str]) -> tuple[bool
 
 
 def run_tier2(task_desc: str, project_root: str, files: list[str]) -> tuple[bool, str]:
-    """
-    Entry point for tier-2 workers.
+    """Tier-2 worker: gemma4:26b MoE. Reports failed if unsolved; orchestrator queues for T3."""
+    print("  → Attempting gemma4:26b (Tier 2)...")
+    success, error = _run_gemma4(task_desc, project_root)
+    if success:
+        return True, ""
+    print(f"  ✗ gemma4 failed ({error[:120]}). Reporting failed → tier-3 will retry.")
+    return False, f"gemma4:26b failed. Last error: {error}"
 
-    Tries 32B first.  If that fails, escalates to Claude inline so the
-    orchestrator never needs to dispatch a separate Claude queue entry.
-    A "failed" result from this function means BOTH models were tried.
+
+def run_tier3(task_desc: str, project_root: str, files: list[str]) -> tuple[bool, str]:
+    """Tier-3 worker: qwen3.6:35b-a3b MoE. Reports failed if unsolved; orchestrator queues for T4."""
+    print("  → Attempting qwen3.6:35b-a3b (Tier 3)...")
+    success, error = _run_qwen3(task_desc, project_root)
+    if success:
+        return True, ""
+    print(f"  ✗ qwen3.6 failed ({error[:120]}). Reporting failed → tier-4 will retry.")
+    return False, f"qwen3.6:35b-a3b failed. Last error: {error}"
+
+
+def run_tier4(task_desc: str, project_root: str, files: list[str]) -> tuple[bool, str]:
     """
-    print("  → Attempting 32B model...")
+    Tier-4 worker: qwen2.5-coder:32b dense.
+
+    Tries 32B first. If that fails, escalates to Claude inline — no separate
+    Claude queue needed. A "failed" result means BOTH 32B and Claude were tried.
+    """
+    print("  → Attempting qwen2.5-coder:32b dense (Tier 4)...")
     success, error = _run_32b(task_desc, project_root)
     if success:
         return True, ""
@@ -256,9 +316,9 @@ def main():
     args = parser.parse_args()
 
     tier = args.tier or WORKER_TIER
-    if tier not in (1, 2):
-        print(f"ERROR: Invalid tier {tier}. Must be 1 or 2.")
-        print("  (Claude escalation is now inline within tier-2 workers.)")
+    if tier not in (1, 2, 3, 4):
+        print(f"ERROR: Invalid tier {tier}. Must be 1, 2, 3, or 4.")
+        print("  (Claude escalation is inline within tier-4 workers.)")
         sys.exit(1)
 
     project_root = (
@@ -273,11 +333,15 @@ def main():
     topic_name = TOPIC_MAP[tier]
     sub_name   = SUB_MAP[tier]
 
-    print(f"Worker  : tier {tier}  ({topic_name})")
+    tier_desc = {
+        1: "qwen2.5-coder:7b",
+        2: "gemma4:26b",
+        3: "qwen3.6:35b-a3b",
+        4: "qwen2.5-coder:32b → Claude inline escalation",
+    }
+    print(f"Worker  : tier {tier}  ({topic_name})  [{tier_desc.get(tier, '?')}]")
     print(f"Project : {project_root}")
     print(f"GCP     : {GCP_PROJECT}")
-    if tier == 2:
-        print("          (32B → Claude inline escalation enabled)")
 
     # Ensure subscription exists
     ensure_subscription(GCP_PROJECT, topic_name, sub_name)
@@ -302,8 +366,12 @@ def main():
     try:
         if tier == 1:
             success, error = run_tier1(task_desc, project_root, files)
-        else:
+        elif tier == 2:
             success, error = run_tier2(task_desc, project_root, files)
+        elif tier == 3:
+            success, error = run_tier3(task_desc, project_root, files)
+        else:
+            success, error = run_tier4(task_desc, project_root, files)
     except Exception as exc:
         success = False
         error   = str(exc)

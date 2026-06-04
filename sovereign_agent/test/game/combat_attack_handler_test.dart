@@ -1,0 +1,2 @@
+// Fix API mismatches in test/game/combat_attack_handler_test.dart
+// (33 errors): complete stub method bodies in test/game/combat_attack_handler_test.dart — done when: flutter analyze reports 0 errors for test/game/combat_attack_handler_test.dart

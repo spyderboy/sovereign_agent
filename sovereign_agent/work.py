@@ -2521,6 +2521,12 @@ def main():
         print(f"Add tasks to ROADMAP.md or run plan_week.py first.")
         sys.exit(0)
 
+    # Disable Claude escalation in --quick and --deep runs to save API costs
+    # and keep these passes purely local-model based.
+    if args.quick or args.deep:
+        global CLAUDE_ENABLED
+        CLAUDE_ENABLED = False
+
     mode_label = f"  ⚡ QUICK (tiers 2–{QUICK_MAX_TIER_IDX}, <{QUICK_PARAM_LIMIT_B:.0f}B)" if args.quick else (
                  "  🔬 DEEP (tiers 2–3 from queue)" if args.deep else "")
     worker_label = f" · worker {args.worker_id}/{args.stride}" if args.stride > 1 else ""

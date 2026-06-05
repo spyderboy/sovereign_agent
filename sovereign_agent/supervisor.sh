@@ -73,12 +73,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ── deep pass must run single-worker: two 19 GB models can't coexist in RAM ──
+# ── deep pass: limit workers on Apple Silicon (VRAM thrash); allow on Linux ──
 IS_DEEP=false
 for arg in "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"; do
     [[ "$arg" == "--deep" ]] && IS_DEEP=true
 done
-if $IS_DEEP && [[ "$WORKERS" -gt 1 ]]; then
+# On macOS (Apple Silicon unified memory) multiple deep workers thrash VRAM.
+# On Linux (GCP A100/L4) OLLAMA_NUM_PARALLEL handles concurrency — allow it.
+if $IS_DEEP && [[ "$WORKERS" -gt 1 ]] && [[ "$(uname)" == "Darwin" ]]; then
     echo -e "${YELLOW}⚠  --deep with multiple workers causes VRAM thrashing on Apple Silicon."
     echo -e "   Forcing --workers 1 for the deep pass.${RESET}"
     WORKERS=1

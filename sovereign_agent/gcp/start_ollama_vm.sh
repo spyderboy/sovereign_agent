@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# ── Provision the persistent Ollama GPU VM on GCP ─────────────────────────────
+# ── Provision the Ollama GPU VM on GCP (A100 40 GB Spot) ──────────────────────
 #
 # Run this ONCE from your local machine.  It:
-#   1. Creates an L4 GPU VM in GCP
+#   1. Creates an A100 40GB Spot VM in GCP (~$1.10/hr)
 #   2. SSHes in, installs Ollama + CUDA drivers
-#   3. Pulls the 7B and 32B models
+#   3. Pulls the 7B coder and 35B MoE models
 #   4. Installs a systemd service so Ollama survives reboots
 #   5. Opens the Ollama port on the internal VPC (NOT the public internet)
+#
+# Spot note: VM may be preempted. The supervisor handles this gracefully —
+# ROADMAP.md checkboxes are the source of truth; just re-run to resume.
 #
 # Prerequisites:
 #   gcloud auth login && gcloud config set project <your-project>
@@ -24,13 +27,15 @@ set -euo pipefail
 # ── Config (edit these) ───────────────────────────────────────────────────────
 PROJECT_ID="${GCP_PROJECT:-astro-flux-spyderboy}"
 ZONE="${GCP_ZONE:-us-central1-a}"
-VM_NAME="ollama-server"
-MACHINE_TYPE="g2-standard-8"          # 1× L4 GPU, 32 GB RAM — fits 7B + 32B
-DISK_SIZE="100GB"
+VM_NAME="ollama-a100"
+MACHINE_TYPE="a2-highgpu-1g"          # 1× A100 40GB, 85 GB RAM
+ACCELERATOR="nvidia-tesla-a100"
+DISK_SIZE="150GB"
 IMAGE_FAMILY="debian-12"
 IMAGE_PROJECT="debian-cloud"
 TIER1_MODEL="${TIER1_MODEL:-qwen2.5-coder:7b-instruct-q4_K_M}"
-TIER2_MODEL="${TIER2_MODEL:-qwen2.5-coder:32b}"
+TIER2_MODEL="${TIER2_MODEL:-qwen3.6:35b-a3b}"
+OLLAMA_PARALLEL="${OLLAMA_PARALLEL:-4}"   # concurrent inference slots
 
 echo "═══════════════════════════════════════════════════"
 echo "  Sovereign Agent — Ollama GPU VM provisioner"
@@ -46,18 +51,15 @@ gcloud compute instances create "$VM_NAME" \
     --project="$PROJECT_ID" \
     --zone="$ZONE" \
     --machine-type="$MACHINE_TYPE" \
-    --accelerator="type=nvidia-l4,count=1" \
+    --accelerator="type=${ACCELERATOR},count=1" \
     --maintenance-policy=TERMINATE \
-    --provisioning-model=STANDARD \
+    --provisioning-model=SPOT \
+    --instance-termination-action=STOP \
     --image-family="$IMAGE_FAMILY" \
     --image-project="$IMAGE_PROJECT" \
     --boot-disk-size="$DISK_SIZE" \
     --boot-disk-type=pd-ssd \
     --tags=ollama-server \
-    --metadata=startup-script='#!/bin/bash
-# Basic startup: ensure CUDA drivers persist across reboots
-/opt/google/compute-engine/startup-scripts/google_metadata_script_runner startup
-' \
     --scopes=cloud-platform
 
 echo "✓ VM created. Waiting 30 s for SSH to come up..."
@@ -84,7 +86,7 @@ echo "  Installing Ollama..."
 curl -fsSL https://ollama.ai/install.sh | sudo sh
 
 echo "  Writing systemd service for Ollama (listen on all interfaces)..."
-sudo tee /etc/systemd/system/ollama.service > /dev/null << 'EOF'
+sudo tee /etc/systemd/system/ollama.service > /dev/null << EOF
 [Unit]
 Description=Ollama LLM server
 After=network-online.target
@@ -92,6 +94,8 @@ After=network-online.target
 [Service]
 ExecStart=/usr/local/bin/ollama serve
 Environment=OLLAMA_HOST=0.0.0.0:11434
+Environment=OLLAMA_NUM_PARALLEL=${OLLAMA_PARALLEL}
+Environment=OLLAMA_MAX_LOADED_MODELS=2
 Restart=always
 RestartSec=5
 
@@ -136,13 +140,19 @@ INTERNAL_IP=$(gcloud compute instances describe "$VM_NAME" \
 
 echo ""
 echo "═══════════════════════════════════════════════════"
-echo "  ✓ Ollama VM ready"
+echo "  ✓ Ollama VM ready  (A100 40GB Spot ~\$1.10/hr)"
+echo "  VM name     : $VM_NAME"
 echo "  Internal IP : $INTERNAL_IP"
-echo "  OLLAMA_URL  : http://$INTERNAL_IP:11434"
 echo ""
-echo "  Set this in your worker env:"
-echo "    OLLAMA_URL=http://$INTERNAL_IP:11434"
+echo "  SSH in and run the sprint:"
+echo "    gcloud compute ssh $VM_NAME --zone $ZONE"
+echo "    cd ~/astro_flux"
+echo "    OLLAMA_HOST=http://localhost:11434 \\"
+echo "    ../Xanadu/sovereign_agent/supervisor.sh . --workers 4 --deep"
 echo ""
-echo "  Stop VM when sprint is done:"
+echo "  Stop VM when sprint is done (saves cost):"
 echo "    gcloud compute instances stop $VM_NAME --zone $ZONE"
+echo ""
+echo "  Restart a stopped VM (Spot survives stop; models stay on disk):"
+echo "    gcloud compute instances start $VM_NAME --zone $ZONE"
 echo "═══════════════════════════════════════════════════"

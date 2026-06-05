@@ -15,6 +15,10 @@
 #   ./supervisor.sh ~/Code/astro_flux --workers 4 --quick  # parallel quick sweep
 #   ./supervisor.sh ~/Code/astro_flux --workers 2 --deep   # parallel deep mop-up
 #
+# Usage (full run — quick sweep then automatic deep mop-up in one command):
+#   ./supervisor.sh ~/Code/astro_flux --full               # 4-worker quick, then 1-worker deep
+#   ./supervisor.sh ~/Code/astro_flux --full --workers 6   # custom worker count for quick pass
+#
 # Each worker K handles tasks at positions K, K+N, K+2N … (round-robin).
 # OLLAMA_NUM_PARALLEL should be set to at least N for the 4B model calls.
 #
@@ -53,8 +57,9 @@ if [ -f "$REQS" ]; then
     }
 fi
 
-# ── parse --workers N from args, pass the rest through to work.py ─────────────
+# ── parse --workers N and --full from args ────────────────────────────────────
 WORKERS=1
+FULL_RUN=false
 PASS_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -66,12 +71,49 @@ while [[ $# -gt 0 ]]; do
             fi
             shift 2
             ;;
+        --full)
+            FULL_RUN=true
+            shift
+            ;;
         *)
             PASS_ARGS+=("$1")
             shift
             ;;
     esac
 done
+
+# ── --full: run quick sweep then deep mop-up automatically ───────────────────
+if $FULL_RUN; then
+    # Default quick workers to 4 unless user passed --workers explicitly
+    QUICK_WORKERS="${WORKERS:-4}"
+    log() { echo -e "[$(date '+%H:%M:%S')] $*"; }
+
+    echo -e "\n${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${BOLD}  🤖  Full Run — Quick sweep → Deep mop-up${RESET}"
+    echo -e "${BOLD}  Project: $PROJECT${RESET}"
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+
+    echo -e "${BOLD}  Pass 1/2 — Quick sweep ($QUICK_WORKERS workers, 7B model)${RESET}"
+    "$0" "$PROJECT" --workers "$QUICK_WORKERS" --quick "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
+    QUICK_EXIT=$?
+
+    if [[ $QUICK_EXIT -eq 130 ]]; then
+        echo -e "\n  Full run interrupted during quick pass."
+        exit 130
+    fi
+
+    QUEUE="$PROJECT/logs/tier2_queue.jsonl"
+    if [[ -f "$QUEUE" ]] && [[ -s "$QUEUE" ]]; then
+        QUEUED=$(wc -l < "$QUEUE" | tr -d ' ')
+        echo -e "\n${BOLD}  Pass 2/2 — Deep mop-up ($QUEUED queued failures, 1 worker, 32B/35B model)${RESET}"
+        "$0" "$PROJECT" --workers 1 --deep "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
+    else
+        echo -e "\n${GREEN}${BOLD}  ✓ No failures queued — deep pass not needed.${RESET}"
+    fi
+
+    echo -e "\n${GREEN}${BOLD}  ✓ Full run complete.${RESET}\n"
+    exit 0
+fi
 
 # ── deep pass: limit workers on Apple Silicon (VRAM thrash); allow on Linux ──
 IS_DEEP=false

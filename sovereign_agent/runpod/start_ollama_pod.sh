@@ -41,9 +41,13 @@ ASTRO_REPO="${ASTRO_REPO:-https://github.com/spyderboy/astro_flux.git}"
 XANADU_REPO="${XANADU_REPO:-https://github.com/spyderboy/Xanadu.git}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
 
-# GPU candidates — L4 only; add others here if you want fallbacks
+# GPU candidates — tried in order until one succeeds
 GPU_CANDIDATES=(
+    "NVIDIA RTX A6000|RTX A6000 48GB ~\$0.33/hr"
     "NVIDIA L4|L4 24GB ~\$0.44/hr"
+    "NVIDIA GeForce RTX 3090|RTX 3090 24GB ~\$0.22/hr"
+    "NVIDIA RTX A5000|RTX A5000 24GB ~\$0.16/hr"
+    "NVIDIA A100-SXM4-40GB|A100 SXM 40GB ~\$1.00/hr"
 )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -240,38 +244,47 @@ if $AUTO_RUN; then
 
     echo "→ Connected — running setup + full sprint..."
 
-    $SSH_CMD << REMOTE
+    $SSH_CMD bash << REMOTE
 set -e
 
-echo "=== Installing dependencies ==="
-apt-get update -qq && apt-get install -y -qq zstd pciutils
+echo "=== [1/8] System deps ==="
+apt-get update -qq
+apt-get install -y -qq zstd pciutils curl unzip xz-utils zip libglu1-mesa git
 
-echo "=== Installing Ollama ==="
+echo "=== [2/8] Python symlink ==="
+ln -sf /usr/bin/python3 /usr/bin/python
+
+echo "=== [3/8] Ollama ==="
 curl -fsSL https://ollama.ai/install.sh | sh
 
-echo "=== Starting Ollama (quick-pass config: ${QUICK_WORKERS} parallel slots) ==="
+echo "=== [4/8] Starting Ollama ==="
 OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_PARALLEL=${QUICK_WORKERS} OLLAMA_MAX_LOADED_MODELS=2 \
     ollama serve > /tmp/ollama.log 2>&1 &
-sleep 8
+sleep 10
+grep "inference compute" /tmp/ollama.log || { echo "ERROR: GPU not detected"; cat /tmp/ollama.log; exit 1; }
 
-echo "=== GPU check ==="
-grep "inference compute" /tmp/ollama.log || echo "WARNING: no GPU line in log"
+echo "=== [5/8] Flutter ==="
+cd /opt
+curl -sO https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_3.29.2-stable.tar.xz
+tar xf flutter_linux_3.29.2-stable.tar.xz
+git config --global --add safe.directory /opt/flutter
+ln -sf /opt/flutter/bin/flutter /usr/local/bin/flutter
+ln -sf /opt/flutter/bin/dart /usr/local/bin/dart
+flutter precache --no-ios --no-android --no-web
+echo "Flutter: \$(flutter --version | head -1)"
 
-echo "=== Pulling tier-1 model: ${TIER1_MODEL} ==="
+echo "=== [6/8] Models ==="
 ollama pull ${TIER1_MODEL}
 
-echo "=== Pulling tier-2 model: ${TIER2_MODEL} ==="
-ollama pull ${TIER2_MODEL}
-
-echo "=== Cloning repos ==="
+echo "=== [7/8] Repos & deps ==="
 [ -d ~/astro_flux ] || git clone ${ASTRO_REPO} ~/astro_flux
 [ -d ~/Xanadu ]     || git clone ${XANADU_REPO} ~/Xanadu
-
-echo "=== Installing Python deps ==="
 pip install -r ~/Xanadu/sovereign_agent/requirements.txt -q
+cd ~/astro_flux && flutter pub get
 
-echo "=== Starting full sprint (quick: ${QUICK_WORKERS} workers → deep: ${DEEP_WORKERS} workers) ==="
-~/Xanadu/sovereign_agent/supervisor.sh ~/astro_flux --full --workers ${QUICK_WORKERS}
+echo "=== [8/8] Sprint ==="
+TIER1_MODEL=${TIER1_MODEL} TIER2_MODEL=${TIER2_MODEL} DEEP_WORKERS=${DEEP_WORKERS} \
+  ~/Xanadu/sovereign_agent/supervisor.sh ~/astro_flux --full --workers ${QUICK_WORKERS}
 REMOTE
 
 else

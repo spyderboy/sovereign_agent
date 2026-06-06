@@ -84,16 +84,19 @@ done
 
 # ── --full: run quick sweep then deep mop-up automatically ───────────────────
 if $FULL_RUN; then
-    # Default quick workers to 4 unless user passed --workers explicitly
-    QUICK_WORKERS="${WORKERS:-4}"
+    # Quick workers from --workers flag; deep workers from DEEP_WORKERS env (default 2)
+    QUICK_WORKERS="${WORKERS:-3}"
+    DEEP_WORKERS="${DEEP_WORKERS:-2}"
     log() { echo -e "[$(date '+%H:%M:%S')] $*"; }
 
     echo -e "\n${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo -e "${BOLD}  🤖  Full Run — Quick sweep → Deep mop-up${RESET}"
-    echo -e "${BOLD}  Project: $PROJECT${RESET}"
+    echo -e "${BOLD}  Project : $PROJECT${RESET}"
+    echo -e "${BOLD}  Quick   : $QUICK_WORKERS workers (7B model)${RESET}"
+    echo -e "${BOLD}  Deep    : $DEEP_WORKERS workers (14B model)${RESET}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
 
-    echo -e "${BOLD}  Pass 1/2 — Quick sweep ($QUICK_WORKERS workers, 7B model)${RESET}"
+    echo -e "${BOLD}  Pass 1/2 — Quick sweep ($QUICK_WORKERS workers)${RESET}"
     "$0" "$PROJECT" --workers "$QUICK_WORKERS" --quick "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
     QUICK_EXIT=$?
 
@@ -105,8 +108,8 @@ if $FULL_RUN; then
     QUEUE="$PROJECT/logs/tier2_queue.jsonl"
     if [[ -f "$QUEUE" ]] && [[ -s "$QUEUE" ]]; then
         QUEUED=$(wc -l < "$QUEUE" | tr -d ' ')
-        echo -e "\n${BOLD}  Pass 2/2 — Deep mop-up ($QUEUED queued failures, 1 worker, 32B/35B model)${RESET}"
-        "$0" "$PROJECT" --workers 1 --deep "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
+        echo -e "\n${BOLD}  Pass 2/2 — Deep mop-up ($QUEUED failures, $DEEP_WORKERS workers)${RESET}"
+        "$0" "$PROJECT" --workers "$DEEP_WORKERS" --deep "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
     else
         echo -e "\n${GREEN}${BOLD}  ✓ No failures queued — deep pass not needed.${RESET}"
     fi

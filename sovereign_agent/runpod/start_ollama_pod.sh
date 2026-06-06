@@ -33,25 +33,17 @@ VOLUME_GB=100        # persistent — models cached here; survives pod stop
 CONTAINER_DISK_GB=50
 MIN_VCPU=4
 MIN_RAM_GB=20
-TIER1_MODEL="${TIER1_MODEL:-qwen2.5-coder:7b-instruct-q4_K_M}"
-TIER2_MODEL="${TIER2_MODEL:-qwen3.6:35b-a3b}"
+TIER1_MODEL="${TIER1_MODEL:-qwen2.5-coder:14b-instruct-q4_K_M}"
+TIER2_MODEL="${TIER2_MODEL:-qwen2.5-coder:14b-instruct-q4_K_M}"
+QUICK_WORKERS="${QUICK_WORKERS:-2}"   # 2 × 14B Q4 ~8GB = 16GB — safe on 24GB
+DEEP_WORKERS="${DEEP_WORKERS:-2}"     # same model for both passes
 ASTRO_REPO="${ASTRO_REPO:-https://github.com/spyderboy/astro_flux.git}"
 XANADU_REPO="${XANADU_REPO:-https://github.com/spyderboy/Xanadu.git}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
 
-# GPU candidates — tried in order until one succeeds
-# Format: "gpu_type_id|workers|cost_note"
-# Ordered: best value with ≥24GB VRAM first (needed for 35B MoE model)
+# GPU candidates — L4 only; add others here if you want fallbacks
 GPU_CANDIDATES=(
-    "NVIDIA RTX A5000|4|RTX A5000 24GB ~\$0.16/hr"
-    "NVIDIA GeForce RTX 3090|4|RTX 3090 24GB ~\$0.22/hr"
-    "NVIDIA GeForce RTX 3090 Ti|4|RTX 3090 Ti 24GB ~\$0.27/hr"
-    "NVIDIA GeForce RTX 4090|4|RTX 4090 24GB ~\$0.34/hr"
-    "NVIDIA RTX A6000|4|RTX A6000 48GB ~\$0.33/hr"
-    "NVIDIA L4|4|L4 24GB ~\$0.44/hr"
-    "NVIDIA A40|4|A40 48GB ~\$0.35/hr"
-    "NVIDIA A100-SXM4-40GB|4|A100 SXM 40GB ~\$1.00/hr"
-    "NVIDIA A100 80GB PCIe|4|A100 80GB ~\$1.19/hr"
+    "NVIDIA L4|L4 24GB ~\$0.44/hr"
 )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -133,10 +125,8 @@ echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━�
 
 # ── Try each GPU candidate ────────────────────────────────────────────────────
 POD_ID=""
-CHOSEN_WORKERS=4
-
 for candidate in "${GPU_CANDIDATES[@]}"; do
-    IFS='|' read -r gpu_type workers cost_note <<< "$candidate"
+    IFS='|' read -r gpu_type cost_note <<< "$candidate"
     echo "→ Trying $cost_note..."
 
     RESPONSE=$(gql "mutation {
@@ -155,7 +145,7 @@ for candidate in "${GPU_CANDIDATES[@]}"; do
             volumeMountPath: \"/workspace\"
             env: [
                 { key: \"OLLAMA_HOST\",             value: \"0.0.0.0:11434\" },
-                { key: \"OLLAMA_NUM_PARALLEL\",      value: \"$workers\" },
+                { key: \"OLLAMA_NUM_PARALLEL\",      value: \"$QUICK_WORKERS\" },
                 { key: \"OLLAMA_MAX_LOADED_MODELS\", value: \"2\" }
             ]
         })
@@ -164,7 +154,6 @@ for candidate in "${GPU_CANDIDATES[@]}"; do
 
     if echo "$RESPONSE" | jq -e '.data.podFindAndDeployOnDemand.id' &>/dev/null; then
         POD_ID=$(echo "$RESPONSE" | jq -r '.data.podFindAndDeployOnDemand.id')
-        CHOSEN_WORKERS=$workers
         echo -e "${GREEN}✓ Pod created: $POD_ID  ($cost_note)${RESET}"
         break
     else
@@ -229,30 +218,60 @@ echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━�
 # ── Auto-run: SSH in, set up, and launch sprint ───────────────────────────────
 if $AUTO_RUN; then
     echo ""
-    echo "→ Connecting and running setup + full sprint..."
+    echo "→ Waiting for SSH to be ready..."
+    SSH_READY=false
+    for i in $(seq 1 24); do
+        if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+               -o BatchMode=yes -i "${SSH_KEY}" \
+               -p "${SSH_PORT}" "root@${SSH_IP}" "echo ok" &>/dev/null; then
+            SSH_READY=true
+            break
+        fi
+        printf "."
+        sleep 5
+    done
+    echo ""
+
+    if ! $SSH_READY; then
+        echo -e "${YELLOW}SSH not reachable after 2 min. Connect manually:${RESET}"
+        echo "  $SSH_CMD"
+        exit 1
+    fi
+
+    echo "→ Connected — running setup + full sprint..."
 
     $SSH_CMD << REMOTE
 set -e
+
+echo "=== Installing dependencies ==="
+apt-get update -qq && apt-get install -y -qq zstd pciutils
+
 echo "=== Installing Ollama ==="
 curl -fsSL https://ollama.ai/install.sh | sh
-sleep 3
 
-echo "=== Starting Ollama service ==="
-OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_PARALLEL=${CHOSEN_WORKERS} ollama serve &
-sleep 5
+echo "=== Starting Ollama (quick-pass config: ${QUICK_WORKERS} parallel slots) ==="
+OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_PARALLEL=${QUICK_WORKERS} OLLAMA_MAX_LOADED_MODELS=2 \
+    ollama serve > /tmp/ollama.log 2>&1 &
+sleep 8
 
-echo "=== Pulling models ==="
+echo "=== GPU check ==="
+grep "inference compute" /tmp/ollama.log || echo "WARNING: no GPU line in log"
+
+echo "=== Pulling tier-1 model: ${TIER1_MODEL} ==="
 ollama pull ${TIER1_MODEL}
+
+echo "=== Pulling tier-2 model: ${TIER2_MODEL} ==="
 ollama pull ${TIER2_MODEL}
-ollama list
 
 echo "=== Cloning repos ==="
 [ -d ~/astro_flux ] || git clone ${ASTRO_REPO} ~/astro_flux
 [ -d ~/Xanadu ]     || git clone ${XANADU_REPO} ~/Xanadu
-cd ~/Xanadu/sovereign_agent && pip install -r requirements.txt -q
 
-echo "=== Starting sprint ==="
-~/Xanadu/sovereign_agent/supervisor.sh ~/astro_flux --full --workers ${CHOSEN_WORKERS}
+echo "=== Installing Python deps ==="
+pip install -r ~/Xanadu/sovereign_agent/requirements.txt -q
+
+echo "=== Starting full sprint (quick: ${QUICK_WORKERS} workers → deep: ${DEEP_WORKERS} workers) ==="
+~/Xanadu/sovereign_agent/supervisor.sh ~/astro_flux --full --workers ${QUICK_WORKERS}
 REMOTE
 
 else

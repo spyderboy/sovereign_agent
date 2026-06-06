@@ -244,63 +244,17 @@ if $AUTO_RUN; then
 
     echo "→ Connected — running setup + full sprint..."
 
-    $SSH_CMD bash << REMOTE
-set -e
-
-echo "=== [1/8] System deps ==="
-apt-get update -qq
-apt-get install -y -qq zstd pciutils curl unzip xz-utils zip libglu1-mesa git
-
-echo "=== [2/8] Python symlink ==="
-ln -sf /usr/bin/python3 /usr/bin/python
-
-echo "=== [3/8] Ollama ==="
-curl -fsSL https://ollama.ai/install.sh | sh
-
-echo "=== [4/8] Starting Ollama ==="
-OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_PARALLEL=${QUICK_WORKERS} OLLAMA_MAX_LOADED_MODELS=2 \
-    ollama serve > /tmp/ollama.log 2>&1 &
-sleep 10
-grep "inference compute" /tmp/ollama.log || { echo "ERROR: GPU not detected"; cat /tmp/ollama.log; exit 1; }
-
-echo "=== [5/8] Flutter ==="
-cd /opt
-curl -sO https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_3.29.2-stable.tar.xz
-tar xf flutter_linux_3.29.2-stable.tar.xz
-git config --global --add safe.directory /opt/flutter
-ln -sf /opt/flutter/bin/flutter /usr/local/bin/flutter
-ln -sf /opt/flutter/bin/dart /usr/local/bin/dart
-flutter precache --no-ios --no-android --no-web
-echo "Flutter: \$(flutter --version | head -1)"
-
-echo "=== [6/8] Models ==="
-ollama pull ${TIER1_MODEL}
-
-echo "=== [7/8] Repos & deps ==="
-[ -d ~/astro_flux ] || git clone ${ASTRO_REPO} ~/astro_flux
-[ -d ~/Xanadu ]     || git clone ${XANADU_REPO} ~/Xanadu
-pip install -r ~/Xanadu/sovereign_agent/requirements.txt -q
-cd ~/astro_flux && flutter pub get
-
-echo "=== [8/8] Sprint ==="
-TIER1_MODEL=${TIER1_MODEL} TIER2_MODEL=${TIER2_MODEL} DEEP_WORKERS=${DEEP_WORKERS} \
-  ~/Xanadu/sovereign_agent/supervisor.sh ~/astro_flux --full --workers ${QUICK_WORKERS}
-REMOTE
+    $SSH_CMD bash -c "MODEL=${TIER1_MODEL} WORKERS=${QUICK_WORKERS} DEEP_WORKERS=${DEEP_WORKERS} \
+        bash <(curl -s https://raw.githubusercontent.com/spyderboy/Xanadu/master/sovereign_agent/runpod/setup_pod.sh)"
 
 else
     # Print manual setup commands
     echo ""
-    echo "  Next steps — run these on the pod:"
+    echo "  Next steps — SSH in and run one command:"
     echo ""
     echo "  $SSH_CMD"
     echo ""
-    echo "  # On the pod:"
-    echo "  curl -fsSL https://ollama.ai/install.sh | sh"
-    echo "  OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_PARALLEL=${CHOSEN_WORKERS} ollama serve &"
-    echo "  ollama pull ${TIER1_MODEL}"
-    echo "  ollama pull ${TIER2_MODEL}"
-    echo "  git clone ${ASTRO_REPO} ~/astro_flux"
-    echo "  git clone ${XANADU_REPO} ~/Xanadu"
-    echo "  cd ~/Xanadu/sovereign_agent && pip install -r requirements.txt -q"
-    echo "  ~/Xanadu/sovereign_agent/supervisor.sh ~/astro_flux --full --workers ${CHOSEN_WORKERS}"
+    echo "  # Then on the pod:"
+    echo "  MODEL=${TIER1_MODEL} WORKERS=${QUICK_WORKERS} DEEP_WORKERS=${DEEP_WORKERS} \\"
+    echo "    bash <(curl -s https://raw.githubusercontent.com/spyderboy/Xanadu/master/sovereign_agent/runpod/setup_pod.sh)"
 fi

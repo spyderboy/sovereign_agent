@@ -38,7 +38,7 @@ TIER2_MODEL="${TIER2_MODEL:-qwen2.5-coder:14b-instruct-q4_K_M}"
 QUICK_WORKERS="${QUICK_WORKERS:-2}"   # 2 × 14B Q4 ~8GB = 16GB — safe on 24GB
 DEEP_WORKERS="${DEEP_WORKERS:-2}"     # same model for both passes
 ASTRO_REPO="${ASTRO_REPO:-https://github.com/spyderboy/astro_flux.git}"
-XANADU_REPO="${XANADU_REPO:-https://github.com/spyderboy/Xanadu.git}"
+XANADU_REPO="${XANADU_REPO:-https://github.com/spyderboy/sovereign_agent.git}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
 
 # GPU candidates — tried in order until one succeeds
@@ -245,7 +245,7 @@ if $AUTO_RUN; then
     echo "→ Connected — running setup + full sprint..."
 
     $SSH_CMD bash -c "MODEL=${TIER1_MODEL} WORKERS=${QUICK_WORKERS} DEEP_WORKERS=${DEEP_WORKERS} \
-        bash <(curl -s https://raw.githubusercontent.com/spyderboy/Xanadu/master/sovereign_agent/runpod/setup_pod.sh)"
+        bash <(curl -s https://raw.githubusercontent.com/spyderboy/sovereign_agent/main/runpod/setup_pod.sh)"
 
 else
     # Print manual setup commands
@@ -256,5 +256,5 @@ else
     echo ""
     echo "  # Then on the pod:"
     echo "  MODEL=${TIER1_MODEL} WORKERS=${QUICK_WORKERS} DEEP_WORKERS=${DEEP_WORKERS} \\"
-    echo "    bash <(curl -s https://raw.githubusercontent.com/spyderboy/Xanadu/master/sovereign_agent/runpod/setup_pod.sh)"
+    echo "    bash <(curl -s https://raw.githubusercontent.com/spyderboy/sovereign_agent/main/runpod/setup_pod.sh)"
 fi

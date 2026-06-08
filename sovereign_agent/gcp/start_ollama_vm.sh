@@ -26,41 +26,71 @@ set -euo pipefail
 
 # ── Config (edit these) ───────────────────────────────────────────────────────
 PROJECT_ID="${GCP_PROJECT:-astro-flux-spyderboy}"
-ZONE="${GCP_ZONE:-us-central1-a}"
-VM_NAME="ollama-a100"
-MACHINE_TYPE="a2-highgpu-1g"          # 1× A100 40GB, 85 GB RAM
-ACCELERATOR="nvidia-tesla-a100"
 DISK_SIZE="150GB"
 IMAGE_FAMILY="debian-12"
 IMAGE_PROJECT="debian-cloud"
 TIER1_MODEL="${TIER1_MODEL:-qwen2.5-coder:7b-instruct-q4_K_M}"
 TIER2_MODEL="${TIER2_MODEL:-qwen3.6:35b-a3b}"
-OLLAMA_PARALLEL="${OLLAMA_PARALLEL:-4}"   # concurrent inference slots
+
+# GPU candidates — tried in order until one succeeds
+# Format: "vm-name|machine-type|accelerator|zone|workers|cost-note"
+GPU_CANDIDATES=(
+    "ollama-a100|a2-highgpu-1g|nvidia-tesla-a100|us-central1-a|4|A100 40GB Spot ~\$1.10/hr"
+    "ollama-a100|a2-highgpu-1g|nvidia-tesla-a100|us-east1-b|4|A100 40GB Spot ~\$1.10/hr"
+    "ollama-a100|a2-highgpu-1g|nvidia-tesla-a100|europe-west4-a|4|A100 40GB Spot ~\$1.10/hr"
+    "ollama-l4|g2-standard-8|nvidia-l4|us-central1-a|2|L4 24GB Spot ~\$0.16/hr"
+    "ollama-l4|g2-standard-8|nvidia-l4|us-central1-b|2|L4 24GB Spot ~\$0.16/hr"
+    "ollama-l4|g2-standard-8|nvidia-l4|us-east1-b|2|L4 24GB Spot ~\$0.16/hr"
+)
 
 echo "═══════════════════════════════════════════════════"
 echo "  Sovereign Agent — Ollama GPU VM provisioner"
 echo "  Project : $PROJECT_ID"
-echo "  Zone    : $ZONE"
-echo "  VM      : $VM_NAME ($MACHINE_TYPE)"
+echo "  Trying GPU candidates in order..."
 echo "═══════════════════════════════════════════════════"
 
-# ── 1. Create the VM ──────────────────────────────────────────────────────────
-echo ""
-echo "→ Creating VM $VM_NAME..."
-gcloud compute instances create "$VM_NAME" \
-    --project="$PROJECT_ID" \
-    --zone="$ZONE" \
-    --machine-type="$MACHINE_TYPE" \
-    --accelerator="type=${ACCELERATOR},count=1" \
-    --maintenance-policy=TERMINATE \
-    --provisioning-model=SPOT \
-    --instance-termination-action=STOP \
-    --image-family="$IMAGE_FAMILY" \
-    --image-project="$IMAGE_PROJECT" \
-    --boot-disk-size="$DISK_SIZE" \
-    --boot-disk-type=pd-ssd \
-    --tags=ollama-server \
-    --scopes=cloud-platform
+# ── 1. Create the VM — try each candidate until one succeeds ─────────────────
+VM_NAME="" MACHINE_TYPE="" ACCELERATOR="" ZONE="" OLLAMA_PARALLEL=""
+
+for candidate in "${GPU_CANDIDATES[@]}"; do
+    IFS='|' read -r _name _machine _accel _zone _workers _note <<< "$candidate"
+    echo ""
+    echo "→ Trying $_note  (zone: $_zone)..."
+    if gcloud compute instances create "$_name" \
+        --project="$PROJECT_ID" \
+        --zone="$_zone" \
+        --machine-type="$_machine" \
+        --accelerator="type=${_accel},count=1" \
+        --maintenance-policy=TERMINATE \
+        --provisioning-model=SPOT \
+        --instance-termination-action=STOP \
+        --image-family="$IMAGE_FAMILY" \
+        --image-project="$IMAGE_PROJECT" \
+        --boot-disk-size="$DISK_SIZE" \
+        --boot-disk-type=pd-ssd \
+        --tags=ollama-server \
+        --scopes=cloud-platform 2>/dev/null; then
+        VM_NAME="$_name"
+        MACHINE_TYPE="$_machine"
+        ACCELERATOR="$_accel"
+        ZONE="$_zone"
+        OLLAMA_PARALLEL="$_workers"
+        echo "✓ VM created: $_name ($_note)"
+        break
+    else
+        echo "  ✗ quota unavailable — trying next option..."
+    fi
+done
+
+if [[ -z "$VM_NAME" ]]; then
+    echo ""
+    echo "ERROR: All GPU options exhausted. Options:"
+    echo "  1. Request A100 quota: https://console.cloud.google.com/iam-admin/quotas"
+    echo "     Filter: NVIDIA_A100_GPUS → Edit Quotas → request 1 in us-central1"
+    echo "  2. Check L4 quota:     filter NVIDIA_L4_GPUS"
+    echo "  3. Re-run after quota is approved (usually same-day for small requests)"
+    exit 1
+fi
 
 echo "✓ VM created. Waiting 30 s for SSH to come up..."
 sleep 30

@@ -743,6 +743,30 @@ ERROR_HINTS: list[tuple[str, str]] = [
      "  RIGHT: final Ref ref;\n"
      "  Import: import 'package:flutter_riverpod/flutter_riverpod.dart'; (Ref is in there)"),
 
+    (r"'currentHealth' can't be used as a setter.*final|"
+     r"can't be used as a setter.*'currentHealth'|"
+     r"setter.*isn't defined.*'Star'|"
+     r"'hp' can't be used as a setter.*final",
+     "⚠️  FINAL FIELD ON STAR/UNIT: Star and unit models use final fields — you cannot assign to them.\n"
+     "  Star.currentHealth, Star.hp, Star.ownerId are all FINAL — never write star.currentHealth = x.\n"
+     "  To update a Star, use the notifier:\n"
+     "    ref.read(gameServiceProvider.notifier).updateStar(starId, health: newHealth);\n"
+     "  Or replace the whole Star via copyWith if it supports it:\n"
+     "    final updated = star.copyWith(currentHealth: newHealth);\n"
+     "  NEVER mutate model fields directly — the models are immutable value objects."),
+
+    (r"Undefined class 'Star'.*enemy_ai|enemy_ai.*Undefined class 'Star'|"
+     r"Undefined class 'PositionComponent'.*enemy_ai|enemy_ai.*Undefined class 'PositionComponent'|"
+     r"Undefined name 'Vector2'.*enemy_ai|enemy_ai.*Undefined name 'Vector2'",
+     "⚠️  MISSING IMPORTS in enemy_ai.dart. Add these at the top:\n"
+     "    import 'package:flame/components.dart' hide Vector;\n"
+     "    import 'package:astro_flux/models/star.dart';\n"
+     "    import 'package:astro_flux/models/vector.dart';\n"
+     "    import 'package:astro_flux/models/game_state_provider.dart';\n"
+     "  AiStrategy is a local enum — define it IN enemy_ai.dart if it doesn't exist yet:\n"
+     "    enum AiStrategy { expander, builder, defender }\n"
+     "  Do NOT import PositionComponent for data — it's a Flame render class, not a model."),
+
     (r"positional argument.*AstroGame|AstroGame.*positional argument|"
      r"argument.*expected by 'AstroGame\.new'",
      "⚠️  AstroGame CONSTRUCTOR: AstroGame requires exactly ONE positional argument: a Riverpod Ref.\n"

@@ -245,7 +245,7 @@ if $AUTO_RUN; then
     echo "→ Connected — running setup + full sprint..."
 
     $SSH_CMD bash -c "MODEL=${TIER1_MODEL} WORKERS=${QUICK_WORKERS} DEEP_WORKERS=${DEEP_WORKERS} \
-        bash <(curl -s https://raw.githubusercontent.com/spyderboy/sovereign_agent/main/runpod/setup_pod.sh)"
+        bash <(curl -s https://raw.githubusercontent.com/spyderboy/sovereign_agent/main/sovereign_agent/runpod/setup_pod.sh)"
 
 else
     # Print manual setup commands
@@ -256,5 +256,5 @@ else
     echo ""
     echo "  # Then on the pod:"
     echo "  MODEL=${TIER1_MODEL} WORKERS=${QUICK_WORKERS} DEEP_WORKERS=${DEEP_WORKERS} \\"
-    echo "    bash <(curl -s https://raw.githubusercontent.com/spyderboy/sovereign_agent/main/runpod/setup_pod.sh)"
+    echo "    bash <(curl -s https://raw.githubusercontent.com/spyderboy/sovereign_agent/main/sovereign_agent/runpod/setup_pod.sh)"
 fi

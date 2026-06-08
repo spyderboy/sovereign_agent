@@ -743,6 +743,29 @@ ERROR_HINTS: list[tuple[str, str]] = [
      "  RIGHT: final Ref ref;\n"
      "  Import: import 'package:flutter_riverpod/flutter_riverpod.dart'; (Ref is in there)"),
 
+    (r"argument type 'Vector2' can't be assigned to the parameter type 'Offset'|"
+     r"type 'Vector2' is not a subtype of type 'Offset'",
+     "⚠️  Vector2 IS NOT Offset — they are incompatible types.\n"
+     "  Convert manually wherever an Offset is required:\n"
+     "    WRONG: someMethod(myVector2)          // type error\n"
+     "    WRONG: someMethod(myVector2.toOffset())  // .toOffset() does NOT exist on Vector2\n"
+     "    RIGHT: someMethod(Offset(myVector2.x, myVector2.y))\n"
+     "  Common places this fires:\n"
+     "    • GestureDetector callbacks — use localPosition (Offset), not a Vector2\n"
+     "    • canvas.drawLine(a, b, paint) — a and b must be Offset\n"
+     "    • Transform.translate(offset:) — must be Offset\n"
+     "  If you're calling a Flame API (spawnSpark, etc.), those take Vector2 — pass Vector2.\n"
+     "  Rule: Flame game canvas = Vector2.  Flutter widget layer = Offset."),
+
+    (r"argument type 'Duration' can't be assigned.*'double'|"
+     r"type 'Duration' is not a subtype of type 'double'",
+     "⚠️  DURATION VS DOUBLE: Flame's update loop uses double (seconds), not Duration.\n"
+     "  Never pass a Duration where a double is expected.\n"
+     "  WRONG: timer = Duration(seconds: 3)  then  if (elapsed > timer)\n"
+     "  RIGHT: double _timer = 0;  then  _timer += dt;  if (_timer >= 3.0)\n"
+     "  To convert Duration → double seconds: duration.inMilliseconds / 1000.0\n"
+     "  All cooldown/timer fields in this codebase are double (seconds), never Duration."),
+
     (r"'currentHealth' can't be used as a setter.*final|"
      r"can't be used as a setter.*'currentHealth'|"
      r"setter.*isn't defined.*'Star'|"

@@ -767,6 +767,39 @@ ERROR_HINTS: list[tuple[str, str]] = [
      "    enum AiStrategy { expander, builder, defender }\n"
      "  Do NOT import PositionComponent for data — it's a Flame render class, not a model."),
 
+    (r"getter 'position' isn't defined.*'Star'|"
+     r"'Star'.*getter 'position'.*isn't defined|"
+     r"getter 'position' isn't defined.*'Vector'[^C]|"
+     r"'Vector'.*getter 'position'.*isn't defined",
+     "⚠️  Star AND Vector are PURE DATA MODELS — they have NO position field.\n"
+     "  Star fields: id (int), ownerId (String), health (int), maxHealth (int), productionRate (int).\n"
+     "  Vector fields: id (int), owner (String), tier (int).\n"
+     "  Position is stored SEPARATELY in AstroGame._starPositions (Map<int, Vector2>).\n"
+     "  To get a star's world position in game code:\n"
+     "    final pos = _starPositions[star.id];  // Vector2 or null\n"
+     "  To get a unit's world position, use VectorComponent.position (the Flame component).\n"
+     "  NEVER write: star.position, star.worldPosition, vector.position, unit.position\n"
+     "  These fields do NOT exist on the model classes."),
+
+    (r"enum_without_constants|The enum must have at least one constant",
+     "⚠️  EMPTY ENUM: An enum was declared with no constants — this is a Dart error.\n"
+     "  For AiStrategy, always define it with all variants:\n"
+     "    enum AiStrategy { expander, builder, defender, aggressor }\n"
+     "  Never declare an enum body with zero values:\n"
+     "    enum AiStrategy {}  // ← invalid Dart\n"
+     "  Define the enum BEFORE the class that uses it in the same file."),
+
+    (r"Undefined name 'difficultyProvider'|difficultyProvider.*isn't defined|"
+     r"Undefined name 'settingsProvider'.*enemy_ai|"
+     r"Undefined name 'gameRulesProvider'",
+     "⚠️  HALLUCINATED PROVIDER: difficultyProvider, settingsProvider, and gameRulesProvider "
+     "do NOT exist in this project.\n"
+     "  Do not reference providers that aren't in the provided file list.\n"
+     "  For difficulty/balance constants, use the constants in lib/game/balance.dart directly:\n"
+     "    import 'package:astro_flux/game/balance.dart';\n"
+     "    // e.g. Balance.enemyTickInterval, Balance.maxEnemyUnits\n"
+     "  Never invent a provider — only use providers that exist in the codebase."),
+
     (r"positional argument.*AstroGame|AstroGame.*positional argument|"
      r"argument.*expected by 'AstroGame\.new'",
      "⚠️  AstroGame CONSTRUCTOR: AstroGame requires exactly ONE positional argument: a Riverpod Ref.\n"

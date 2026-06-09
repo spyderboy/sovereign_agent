@@ -35,7 +35,7 @@ step "[3/8] Ollama"
 curl -fsSL https://ollama.ai/install.sh | sh
 
 step "[4/8] Starting Ollama (GPU check)"
-OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_PARALLEL=${WORKERS} OLLAMA_MAX_LOADED_MODELS=2 \
+OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_PARALLEL=${WORKERS} OLLAMA_MAX_LOADED_MODELS=1 \
     ollama serve > /tmp/ollama.log 2>&1 &
 echo -n "Waiting for Ollama..."
 for i in $(seq 1 12); do
@@ -69,6 +69,17 @@ ollama pull "${MODEL}"
 echo -e "${GREEN}✓ Model ready${RESET}"
 
 step "[7/8] Repos & deps"
+# Prune orphaned Ollama blobs (leftover from deleted models eat GBs)
+if [ -d ~/.ollama/models/blobs ]; then
+    find ~/.ollama/models/manifests -type f -exec cat {} \; 2>/dev/null \
+        | grep -oP 'sha256:[a-f0-9]+' | sed 's/sha256:/sha256-/' | sort -u > /tmp/needed_blobs.txt
+    cd ~/.ollama/models/blobs
+    for f in sha256-*; do
+        grep -qF "$f" /tmp/needed_blobs.txt 2>/dev/null || rm -f "$f"
+    done
+    cd -
+fi
+
 [ -d ~/astro_flux ]     || git clone "${ASTRO_REPO}" ~/astro_flux
 [ -d ~/sovereign_agent ] || git clone "${AGENT_REPO}" ~/sovereign_agent
 cd ~/astro_flux      && git pull --ff-only 2>/dev/null || true
@@ -85,6 +96,11 @@ echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━�
 [[ "${SKIP_SPRINT}" == "1" ]] && exit 0
 
 step "[8/8] Sprint"
+# Mount logs dir in RAM so trace writes never fill the container disk
+mkdir -p ~/astro_flux/logs
+mount -t tmpfs -o size=500M tmpfs ~/astro_flux/logs/ 2>/dev/null || true
+echo "Logs dir: $(df -h ~/astro_flux/logs/ | tail -1)"
+
 cd ~/astro_flux
 TIER1_MODEL="${MODEL}" TIER2_MODEL="${MODEL}" DEEP_WORKERS="${DEEP_WORKERS}" \
     ~/sovereign_agent/sovereign_agent/supervisor.sh ~/astro_flux --full --workers "${WORKERS}"

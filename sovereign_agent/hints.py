@@ -476,6 +476,39 @@ ERROR_HINTS: list[tuple[str, str]] = [
      "  NEVER write: CombatAttackEvent(1, 2) — both parameters are named and required.\n"
      "  The class has exactly two fields: sourceVectorId (int) and targetStarId (int)."),
 
+    (r"method 'addMoveOrder' isn't defined.*'AstroGame'|"
+     r"method 'issueOrder' isn't defined.*'AstroGame'|"
+     r"method 'dispatchOrder' isn't defined.*'AstroGame'|"
+     r"method 'sendUnit' isn't defined.*'AstroGame'",
+     "⚠️  HALLUCINATED METHOD on AstroGame: addMoveOrder/issueOrder/dispatchOrder/sendUnit do NOT exist.\n"
+     "  AstroGame is a FlameGame render host — it has NO game-logic command methods.\n"
+     "  To move a unit or issue an order, go through the Riverpod notifier:\n"
+     "    _ref.read(gameServiceProvider.notifier).moveVector(vectorId, targetStarId);\n"
+     "  EnemyAI must hold 'final Ref _ref' and call notifier methods — never call methods on AstroGame.\n"
+     "  Check lib/game/game_state_notifier.dart for the actual available methods."),
+
+    (r"argument type 'Offset' can't be assigned to the parameter type 'Vector2'|"
+     r"type 'Offset' is not a subtype of type 'Vector2'",
+     "⚠️  Offset IS NOT Vector2 — they are incompatible types.\n"
+     "  Convert manually wherever a Vector2 is required:\n"
+     "    WRONG: someFlameMethod(myOffset)\n"
+     "    RIGHT: someFlameMethod(Vector2(myOffset.dx, myOffset.dy))\n"
+     "  Offset has .dx/.dy;  Vector2 has .x/.y.\n"
+     "  Rule: Flame game canvas = Vector2.  Flutter widget layer = Offset.\n"
+     "  In GestureDetector callbacks, localPosition is Offset — convert before passing to Flame."),
+
+    (r"getter 'state' isn't defined.*'AstroGame'|"
+     r"'AstroGame'.*getter 'state'.*isn't defined|"
+     r"_game\.state\b|game\.state\b",
+     "⚠️  AstroGame has NO '.state' getter — never call _game.state or game.state.\n"
+     "  AstroGame is a FlameGame subclass, not a state container.\n"
+     "  To read game state from inside AI/handler classes:\n"
+     "    final state = _ref.read(gameServiceProvider);   // _ref is a Riverpod Ref\n"
+     "  To mutate state:\n"
+     "    _ref.read(gameServiceProvider.notifier).someMethod();\n"
+     "  EnemyAI and all AI classes must hold a 'final Ref _ref' — NOT a reference to AstroGame.\n"
+     "  NEVER write: _game.state, game.state, _astroGame.state"),
+
     (r"getter 'state' isn't defined.*GameStateNotifier|"
      r"'state'.*isn't defined.*type 'GameStateNotifier'|"
      r"_gameStateNotifier\.state",

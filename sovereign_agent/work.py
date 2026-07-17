@@ -61,7 +61,7 @@ class PromptTooLargeError(Exception):
 OLLAMA_URL      = os.getenv("LOCAL_MODEL_URL",  "http://localhost:11434")
 TIER1_MODEL     = os.getenv("TIER1_MODEL",      "qwen2.5-coder:7b-instruct-q4_K_M")  # 7B dense  — fast, strong on Dart
 TIER2_MODEL     = os.getenv("TIER2_MODEL",      "gemma4:26b")                          # 26B MoE (4B active) — quick second opinion
-TIER3_MODEL     = os.getenv("TIER3_MODEL",      "qwen3.6:35b-a3b")                    # 35B MoE (3B active) — third opinion
+TIER3_MODEL     = os.getenv("TIER3_MODEL",      "qwen3-coder:30b")                    # 30B dense — Qwen3, spatial reasoning
 TIER4_MODEL     = os.getenv("TIER4_MODEL",      "qwen2.5-coder:32b")                  # 32B dense — heavy hitter before Claude
 TIER_MODELS     = [TIER1_MODEL, TIER2_MODEL, TIER3_MODEL, TIER4_MODEL]   # Claude handles final escalation
 
@@ -76,7 +76,7 @@ QUICK_PARAM_LIMIT_B: float = float(os.getenv("QUICK_PARAM_LIMIT_B", "30"))
 MODEL_PARAMS: dict[str, float] = {
     TIER1_MODEL:   float(os.getenv("MODEL_PARAMS_TIER1",   "7")),    #  7B dense
     TIER2_MODEL:   float(os.getenv("MODEL_PARAMS_TIER2",   "26")),   # 26B MoE
-    TIER3_MODEL:   float(os.getenv("MODEL_PARAMS_TIER3",   "35")),   # 35B MoE
+    TIER3_MODEL:   float(os.getenv("MODEL_PARAMS_TIER3",   "30")),   # 30B dense
     TIER4_MODEL:   float(os.getenv("MODEL_PARAMS_TIER4",   "32")),   # 32B dense
 }
 
@@ -515,6 +515,53 @@ def _commit_roadmap_mark(task_line: str, attempts: int = 4) -> None:
         time.sleep(0.5 * (i + 1))
     print(f"  {RED}⚠ could not commit ROADMAP.md mark — it WILL be lost at the "
           f"next forced checkout: {(r.stdout + r.stderr).strip()[:200]}{RESET}")
+
+
+def _sync_task_graph_from_roadmap(project_root: str) -> None:
+    """Regenerate task_graph.json from ROADMAP.md to keep them in sync.
+
+    Runs at the start of each work session so task_graph.json always reflects
+    the current ROADMAP state (completed/pending checkboxes).
+    """
+    roadmap_path = os.path.join(project_root, ROADMAP_PATH)
+    graph_path = os.path.join(project_root, "task_graph.json")
+
+    if not os.path.exists(roadmap_path):
+        return
+
+    tasks = []
+    task_id = 0
+
+    with open(roadmap_path) as f:
+        in_phase = None
+        for line in f:
+            if line.startswith("## Phase "):
+                phase_match = re.search(r"Phase p(\d+)", line)
+                if phase_match:
+                    in_phase = f"p{phase_match.group(1)}"
+            elif line.startswith("- ["):
+                is_done = "[x]" in line
+                match = re.search(r"\] (In .+?) — done when:", line)
+                if match and in_phase:
+                    desc = match.group(1).strip()
+                    tasks.append({
+                        "id": task_id,
+                        "phase": in_phase,
+                        "short": desc[:70] + "..." if len(desc) > 70 else desc,
+                        "description": desc,
+                        "status": "done" if is_done else "pending",
+                        "dependencies": [],
+                        "file": None,
+                    })
+                    task_id += 1
+
+    graph = {
+        "tasks": tasks,
+        "metadata": {"generated": date.today().isoformat(), "total": len(tasks)},
+    }
+
+    with open(graph_path, "w") as f:
+        json.dump(graph, f, indent=2)
 
 
 # ─── File discovery ───────────────────────────────────────────────────────────
@@ -3088,6 +3135,10 @@ def main():
                              "(e.g. pass --stride value so parallel workers "
                              "get proportionally more time to account for "
                              "Ollama queue depth)")
+    parser.add_argument("--start-tier", type=int, default=None,
+                        help="Start at tier N (1-indexed, skip T1..T(N-1)). "
+                             "Use for complex tasks that benefit from larger models. "
+                             "E.g. --start-tier 4 starts at qwen2.5-coder:32b.")
     parser.add_argument("--max-tier", type=int, default=None,
                         help="Cap the tier ladder at N (1-indexed). "
                              "Tasks that fail at tier N are written to "
@@ -3129,6 +3180,15 @@ def main():
         os.chdir(project_root)
     else:
         project_root = os.getcwd()
+
+    if os.path.exists(os.path.join(project_root, ".git")):
+        r = _git(["status", "--porcelain"], project_root)
+        dirty = [line for line in r.stdout.strip().split('\n') if line and not line.endswith('/logs/') and 'logs/' not in line]
+        if dirty:
+            print(f"{RED}✗ Working tree is dirty. Commit or stash changes before running work:{RESET}")
+            print('\n'.join(dirty))
+            print(f"\n  git add . && git commit -m 'checkpoint'")
+            sys.exit(1)
 
     # ── Load per-project config (.sovereign_config.json) ─────────────────────
     # Must happen before anything else so LOCKED_FILES is populated before
@@ -3252,7 +3312,10 @@ def main():
     run_max_tier_idx: int | None = (
         min(args.max_tier, len(TIER_MODELS)) if args.max_tier else None
     )
-    run_start_tier_idx: int = 1 if args.quick else 0   # quick skips T1
+    if args.start_tier:
+        run_start_tier_idx: int = min(args.start_tier - 1, len(TIER_MODELS) - 1)
+    else:
+        run_start_tier_idx: int = 1 if args.quick else 0   # quick skips T1
 
     tasks = parse_all_tasks()
 

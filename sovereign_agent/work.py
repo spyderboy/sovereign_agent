@@ -8,9 +8,11 @@ After standup.py approves today's tasks, this script runs unattended:
   4. Runs flutter analyze / pytest to validate
   5. On failure:
      a. autofix.py applies deterministic mechanical fixes (zero API cost)
-     b. qwen_advisor.py (qwen3.5:4b-nvfp4) classifies remaining errors,
-        enriches context for the 35B, and drafts new .roorules entries
-     c. 35B retries with enriched error context
+     b. qwen_advisor.py (ADVISOR_MODEL — same 7B weights as Tier 1, Tier 1
+        attempts only; skipped on Tier 2-4 to avoid evicting the larger
+        model from GPU) classifies remaining errors, enriches context,
+        and drafts new .roorules entries
+     c. the current tier's model retries with enriched error context
   6. Marks each task [x] in ROADMAP.md when done
   7. Moves to the next task — no human prompts, ever
 
@@ -28,6 +30,8 @@ import fcntl
 import shutil
 import argparse
 import subprocess
+import contextlib
+import import_fixer
 from datetime import date
 from pathlib import Path
 from dotenv import load_dotenv
@@ -100,27 +104,84 @@ ADVISOR_MODEL   = os.getenv("ADVISOR_MODEL",    "qwen2.5-coder:7b-instruct-q4_K_
 
 # Claude API escalation (final tier after all local models exhausted)
 CLAUDE_MODEL        = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
-CLAUDE_ENABLED      = os.getenv("ANTHROPIC_API_KEY", "") != ""  # auto-enabled when key present
+CLAUDE_ENABLED      = os.getenv("CLAUDE_ENABLED", "0") == "1"   # opt-in only; set CLAUDE_ENABLED=1 to re-enable
 
 # ── Per-model context windows ─────────────────────────────────────────────────
 # Larger context = more files visible per task, but more VRAM for KV cache.
 # Sized for M4 32 GB: small models get more context since their weights are cheaper.
 # Override any entry via env vars (e.g. CTX_TIER1=16384).
+#
+# IMPORTANT: this dict is keyed by MODEL NAME, not by role. TIER1_MODEL,
+# PLANNER_MODEL, and ADVISOR_MODEL are the same model string by default
+# (qwen2.5-coder:7b-instruct-q4_K_M), so CTX_TIER1/CTX_PLANNER/CTX_ADVISOR are
+# NOT three independent settings — a Python dict literal silently lets the
+# last duplicate key win, so only ONE of them actually takes effect for all
+# three roles (whichever line is listed last below). Keep all three env vars
+# equal unless TIER1/PLANNER/ADVISOR are ever pointed at genuinely different
+# models. Fixed 2026-07-10: previously defaulted to 32768 while RACE_MODEL
+# defaulted to 65536 — an unfair race, and backwards, since qwen2.5-coder:7b
+# (4.7GB) is the SMALLEST model in the whole lineup, smaller than
+# gemma4:12b-mlx (7.7GB) which was getting the bigger context window.
 MODEL_CTX: dict[str, int] = {
-    TIER1_MODEL:   int(os.getenv("CTX_TIER1",   "32768")),  # 7B dense  — plenty of headroom
-    TIER2_MODEL:   int(os.getenv("CTX_TIER2",   "16384")),  # 26B MoE   — keep small to preserve headroom
-    TIER3_MODEL:   int(os.getenv("CTX_TIER3",   "16384")),  # 35B MoE   — same reasoning
-    TIER4_MODEL:   int(os.getenv("CTX_TIER4",   "16384")),  # 32B dense — tight on 32GB Mac, keep small
-    PLANNER_MODEL: int(os.getenv("CTX_PLANNER", "32768")),
-    ADVISOR_MODEL: int(os.getenv("CTX_ADVISOR", "32768")),
+    TIER1_MODEL:   int(os.getenv("CTX_TIER1",   "65536")),  # 7B dense  — smallest model, most headroom
+    TIER2_MODEL:   int(os.getenv("CTX_TIER2",   "32768")),  # 26B MoE   — DOUBLED 2026-07-11: same
+    # silent-overflow suspect as tier4 (fixed below) — tier2/3 "no output" failures
+    # were untraceable until the trace-logging gap was closed this session; real
+    # prompts run in the same 14-16k token range that overflowed tier4 at 16384.
+    TIER3_MODEL:   int(os.getenv("CTX_TIER3",   "32768")),  # 35B MoE   — DOUBLED 2026-07-11, same reasoning
+    # 2026-07-10: doubled 16384→32768 — this was the "last resort" tier failing
+    # on every single escalated task in a real run, hitting "prompt too large"
+    # even after trimming to 3 files (real prompts were running 14.5k-15.7k
+    # tokens). A tier that can't accept the prompt isn't a safety net, it's a
+    # guaranteed dead end. Watch VRAM on 32GB Macs — this is the one tier where
+    # the ceiling really was sized tight on purpose, so if this causes OOM
+    # thrashing it may need to come back down and get its file-trimming logic
+    # tightened instead.
+    TIER4_MODEL:   int(os.getenv("CTX_TIER4",   "32768")),  # 32B dense
+    PLANNER_MODEL: int(os.getenv("CTX_PLANNER", "65536")),  # same model as TIER1_MODEL — see note above
+    ADVISOR_MODEL: int(os.getenv("CTX_ADVISOR", "65536")),  # same model as TIER1_MODEL — see note above
+    # RACE_MODEL wasn't in this table before (2026-07-10) — it silently fell through
+    # to the OLLAMA_CONTEXT_LENGTH default of 16384, which caused it to truncate on
+    # ~31% of race attempts (compound/multi-file prompts ran 91-107% of that limit).
+    # Now matches TIER1_MODEL's 65536 so the two raced models get equal footing.
+    RACE_MODEL:    int(os.getenv("CTX_RACE",    "65536")),
 }
+
+# The TIER1/PLANNER/ADVISOR collision above is silent by design (a dict can only
+# hold one value per key) — this check makes it loud instead, in case someone
+# sets the env vars inconsistently expecting three independent values.
+if len({TIER1_MODEL, PLANNER_MODEL, ADVISOR_MODEL}) == 1:
+    _ctx_vals = {os.getenv("CTX_TIER1", "65536"), os.getenv("CTX_PLANNER", "65536"), os.getenv("CTX_ADVISOR", "65536")}
+    if len(_ctx_vals) > 1:
+        print(f"⚠  CTX_TIER1/CTX_PLANNER/CTX_ADVISOR are set to different values "
+              f"({_ctx_vals}) but TIER1_MODEL/PLANNER_MODEL/ADVISOR_MODEL are the "
+              f"same model ({TIER1_MODEL}) — only one value actually applies "
+              f"(MODEL_CTX[{TIER1_MODEL!r}] = {MODEL_CTX[TIER1_MODEL]}). "
+              f"Set all three env vars to the same value.")
 
 # Strikes before advancing to the next tier (same error repeated)
 PHASE_STRIKE_LIMIT = 2
 
-# Hard cap on total validation failures per tier — catches thrashing (all-different errors)
-PHASE_MAX_ATTEMPTS = 6
+# Hard cap on total validation failures per tier — catches thrashing (all-different errors).
+# 2026-07-10: tier 1 lowered from 6→3 — a task that isn't solved in 3 tries on the fast,
+# cheap tier is better off escalating sooner than grinding. Tiers 2-3 stay tight at 2 (they
+# already were). Tier 4 — the LAST tier, the automated system's final resort before a task
+# needs a human's attention — gets its own named constant instead of being lumped in with
+# tiers 2-3 under one "tier_idx > 0" check, so it can be tuned independently of them.
+PHASE_MAX_ATTEMPTS = 3
 TIER2_MAX_ATTEMPTS = 2
+TIER4_MAX_ATTEMPTS = 2
+
+
+def _max_attempts_for_tier(idx: int) -> int:
+    """Single source of truth for the attempt ceiling — tier 1 / last tier / everything
+    in between each get their own budget. Also used for the printed 'Attempt X/N' label,
+    which used to always print PHASE_MAX_ATTEMPTS even on tiers enforcing a different cap."""
+    if idx == 0:
+        return PHASE_MAX_ATTEMPTS
+    if idx == len(TIER_MODELS) - 1:
+        return TIER4_MAX_ATTEMPTS
+    return TIER2_MAX_ATTEMPTS
 
 # ── Time budget ────────────────────────────────────────────────────────────────
 # Max wall-clock seconds a single task may run before being skipped.
@@ -130,6 +191,16 @@ BUDGET_MULTIPLIER = 1.7   # first pass: ~1.7× rolling average (6 min avg → 10
 BUDGET_FLOOR_S    = 120   # never cut off before 2 min regardless of average
 BUDGET_CEILING_S  = 1200  # first-pass hard cap: 20 min
 RETRY_BUDGET_MULT = 2.0   # retry pass ceiling: 2× first-pass ceiling = 40 min
+
+# Absolute hard ceiling — no exceptions. Unlike BUDGET_CEILING_S / RETRY_BUDGET_MULT
+# (which only apply in the "wrote code, validation failed" path and can be pushed out
+# by the +300s "bonus" granted on each tier escalation), this is checked at the very
+# top of every attempt, on every code path (timeout, bad-pattern loop, no-output,
+# stale-error thrash). 2026-07-12: a single task ran 25,769s (~7.2h) because repeated
+# tier escalations each got their own 300s bonus and the bad-pattern/no-output
+# branches never consulted the budget check at all. This caps total wall-clock time
+# per task regardless of how many tiers remain or how the bonus math works out.
+MAX_TASK_SECONDS  = 3600  # 1 hour, hard stop — no bonuses, no tier-availability escape hatch
 
 # Lazy imports — only loaded on first validation failure to avoid startup cost
 _autofix = None
@@ -220,6 +291,31 @@ def _model_size_gb(model_name: str) -> float:
     return 10.0  # safe default if unknown
 
 
+# 2026-07-11: cross-process lock so at most one worker at a time runs a
+# tier2+ ("large") model. Parallel quick-sweep workers each escalate through
+# tiers independently and were never coordinated with each other — only the
+# --deep pass (which is exclusively tier2+ retries) had a VRAM guard, and it
+# worked by forcing --workers 1 for the whole pass. That's too blunt for the
+# quick pass, where most tasks stay on tier1 and losing all parallelism there
+# would be a big throughput hit. Instead, tier1 calls stay fully parallel and
+# only the large-model calls serialize across workers — same effect as the
+# deep-pass guard, scoped to just the calls that actually need it. This
+# matters more now that tier2/3/4 context windows were all doubled to 32768
+# (2026-07-11), since two of these loaded at once is the exact VRAM-thrash
+# scenario the deep-pass guard exists to prevent.
+_TIER2_LOCK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tier2_lock")
+
+
+@contextlib.contextmanager
+def _large_model_lock():
+    with open(_TIER2_LOCK_PATH, "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
     # Flush VRAM before loading any large model to avoid swap on 32GB Mac.
     # Tier1/2 (7b/16b) stay resident together (~13GB combined) — no flush needed.
@@ -246,45 +342,53 @@ def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
     # stream=True: Ollama writes tokens as they're generated, so the server's
     # 10-minute write-deadline never fires on long tasks.  We reassemble the
     # content from newline-delimited JSON chunks — callers see no difference.
-    resp = requests.post(
-        f"{OLLAMA_URL}/api/chat",
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user},
-            ],
-            "options": {"num_ctx": ctx_limit},
-            "stream": True,
-            "keep_alive": keep_alive,
-        },
-        stream=True,
-        timeout=timeout,
-    )
-    resp.raise_for_status()
-    content = []
-    done_chunk: dict = {}
-    for raw_line in resp.iter_lines():
-        if not raw_line:
-            continue
-        try:
-            chunk = json.loads(raw_line)
-        except json.JSONDecodeError:
-            continue
-        delta = chunk.get("message", {}).get("content", "")
-        if delta:
-            content.append(delta)
-        if chunk.get("done"):
-            done_chunk = chunk
-            break
+    def _do_request() -> str:
+        resp = requests.post(
+            f"{OLLAMA_URL}/api/chat",
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user},
+                ],
+                "options": {"num_ctx": ctx_limit},
+                "stream": True,
+                "keep_alive": keep_alive,
+            },
+            stream=True,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        content = []
+        done_chunk: dict = {}
+        for raw_line in resp.iter_lines():
+            if not raw_line:
+                continue
+            try:
+                chunk = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            delta = chunk.get("message", {}).get("content", "")
+            if delta:
+                content.append(delta)
+            if chunk.get("done"):
+                done_chunk = chunk
+                break
 
-    # Post-flight confirmation: verify the model didn't truncate despite our
-    # estimate (e.g. tokeniser is denser than expected for this content).
-    prompt_tokens = done_chunk.get("prompt_eval_count", 0)
-    if prompt_tokens and prompt_tokens >= int(ctx_limit * 0.90):
-        raise PromptTooLargeError(prompt_tokens, ctx_limit)  # ctx_limit already model-specific
+        # Post-flight confirmation: verify the model didn't truncate despite our
+        # estimate (e.g. tokeniser is denser than expected for this content).
+        prompt_tokens = done_chunk.get("prompt_eval_count", 0)
+        if prompt_tokens and prompt_tokens >= int(ctx_limit * 0.90):
+            raise PromptTooLargeError(prompt_tokens, ctx_limit)  # ctx_limit already model-specific
 
-    return "".join(content)
+        return "".join(content)
+
+    # Only large (tier2+) models serialize across workers — tier1 stays fully
+    # parallel. See _large_model_lock() above for why.
+    if size_gb >= _LARGE_MODEL_THRESHOLD_GB:
+        with _large_model_lock():
+            return _do_request()
+    return _do_request()
 
 
 # ─── JSON extraction helper ───────────────────────────────────────────────────
@@ -364,7 +468,18 @@ def _is_test_task(task: str) -> bool:
 
 def mark_done(task_line: str):
     """Mark a task done in ROADMAP.md. Uses an exclusive file lock so parallel
-    workers cannot corrupt each other's writes."""
+    workers cannot corrupt each other's writes.
+
+    2026-07-13: the [x] mark MUST be committed immediately. mark_done() runs
+    after _branch_merge() returns to main, so the mark sat UNCOMMITTED in the
+    working tree — and the very next task's _branch_start() does a forced
+    `git checkout -f main`, which resets every tracked file (ROADMAP.md
+    included) to HEAD. Net effect: every DONE mark was erased seconds after
+    it was written, and the remaining-task count never moved between runs.
+    (Before the 2026-07-13 force-checkout fix the marks survived only by
+    accident — the dirty tree leaked through plain checkouts and eventually
+    got swept into a later task's `git add -A` commit.)
+    """
     with open(ROADMAP_PATH, "r+") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         try:
@@ -378,14 +493,41 @@ def mark_done(task_line: str):
             f.truncate()
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
+    _commit_roadmap_mark(task_line)
+
+
+def _commit_roadmap_mark(task_line: str, attempts: int = 4) -> None:
+    """Commit ROADMAP.md so the DONE mark survives forced checkouts.
+
+    Retries briefly on index.lock contention (parallel workers). If every
+    attempt fails the mark is still on disk — but the next _branch_start
+    will wipe it, so a persistent failure is printed loudly.
+    """
+    cwd = os.getcwd()
+    if not os.path.exists(os.path.join(cwd, ".git")):
+        return
+    msg = f"roadmap: mark done — {task_text(task_line)[:60]}"
+    for i in range(attempts):
+        _git(["add", "ROADMAP.md"], cwd)
+        r = _git(["commit", "-m", msg, "--", "ROADMAP.md"], cwd)
+        if r.returncode == 0 or "nothing to commit" in (r.stdout + r.stderr):
+            return
+        time.sleep(0.5 * (i + 1))
+    print(f"  {RED}⚠ could not commit ROADMAP.md mark — it WILL be lost at the "
+          f"next forced checkout: {(r.stdout + r.stderr).strip()[:200]}{RESET}")
 
 
 # ─── File discovery ───────────────────────────────────────────────────────────
 
 def all_source_files(project_root: str) -> list[str]:
-    """Return all dart/py/js source files relative to project root."""
-    exts = {".dart", ".py", ".js", ".ts"}
-    skip = {"build", ".dart_tool", ".git", "node_modules", ".fvm", ".venv"}
+    """Return all dart/py/js/go source files relative to project root.
+
+    2026-07-13: added ".go" — its absence meant find_relevant_files returned
+    [] for Go projects, so every worker coded with ZERO context and
+    hallucinated field names, math helpers, and imports.
+    """
+    exts = {".dart", ".py", ".js", ".ts", ".go"}
+    skip = {"build", ".dart_tool", ".git", "node_modules", ".fvm", ".venv", "logs"}
     result = []
     for p in Path(project_root).rglob("*"):
         if p.suffix in exts and not any(s in p.parts for s in skip):
@@ -438,7 +580,12 @@ def find_relevant_files(task: str, project_root: str) -> list[str]:
 
 # ─── Code execution ───────────────────────────────────────────────────────────
 
-def read_files(paths: list[str], project_root: str, max_chars: int = 3000) -> dict[str, str]:
+def read_files(paths: list[str], project_root: str, max_chars: int = 10000) -> dict[str, str]:
+    # 2026-07-13: max_chars 3000 → 10000. At 3000, sim/API.md (7.4 KB) and
+    # spec/03-simulation.md (8 KB) were cut mid-file, so every phase-p2+ task
+    # ran without its function contract and hallucinated fields/signatures.
+    # All tiers now run 32k+ ctx — worst case ~9 files × 10 KB ≈ 25k chars
+    # ≈ 8k tokens, well inside the pre-flight check in ollama().
     result = {}
     for rel in paths:
         full = os.path.join(project_root, rel)
@@ -509,6 +656,7 @@ import re as _re
 # ─── Bad patterns & error hints ────────────────────────────────────────────────
 # Extracted to hints.py — import from there so each can be edited independently.
 from hints import BAD_PATTERNS, ERROR_HINTS  # noqa: E402
+import grounding  # noqa: E402  — identifier whitelist gate for Go projects
 
 
 def apply_error_hints(error_output: str) -> str:
@@ -547,18 +695,221 @@ def check_bad_patterns(rel_path: str, content) -> list[str]:
     return violations
 
 
+def _extract_dart_api_stub(content: str, max_chars: int = 800) -> str:
+    """Extract a compact read-only API stub from a Dart source file.
+
+    Returns class declarations, constructor signatures, and public field/method
+    signatures — enough for the model to use the API correctly without seeing
+    the full implementation.  Private members (_name) are omitted.
+    """
+    import re as _re
+    lines = content.splitlines()
+    stub_lines: list[str] = []
+    in_class = False
+    brace_depth = 0
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Skip private members
+        if _re.match(r'(final|late|var|void|Future|List|Map|Set|int|double|bool|String)\s+_', stripped):
+            continue
+        if _re.match(r'_\w+\(', stripped):
+            continue
+
+        # Class declaration
+        if _re.match(r'(abstract\s+)?class\s+\w+', stripped):
+            in_class = True
+            brace_depth = 0
+            stub_lines.append(line.rstrip())
+            continue
+
+        if in_class:
+            brace_depth += stripped.count('{') - stripped.count('}')
+            if brace_depth < 0:
+                stub_lines.append('}')
+                in_class = False
+                brace_depth = 0
+                continue
+
+            # Only emit top-level members (brace_depth == 1 means we're directly inside the class)
+            if brace_depth != 1:
+                continue
+            # Skip comments, blank lines, control-flow keywords
+            if not stripped or stripped.startswith('//') or stripped.startswith('/*'):
+                continue
+            if _re.match(r'(if|else|for|while|switch|return|throw|assert|case|default|break|continue)\b', stripped):
+                continue
+
+            # Constructor: ClassName( — top-level, no return type
+            if _re.match(r'[A-Z]\w*[\._]?\w*\s*\(', stripped):
+                stub_lines.append('  ' + stripped.split('{')[0].split('=>')[0].strip() + ';')
+            # Public field declaration
+            elif _re.match(r'(final\s+|late\s+|static\s+const\s+|static\s+final\s+|static\s+)?(int|double|bool|String|var|dynamic|[A-Z]\w*)[?<\s]', stripped):
+                decl = stripped.split('=')[0].strip().rstrip(';') + ';'
+                if not decl.startswith('_'):
+                    stub_lines.append('  ' + decl)
+            # Public method / getter signature (return type + name)
+            elif _re.match(r'(static\s+|override\s+)?(void|Future|bool|int|double|String|List|Map|Set|[A-Z]\w*)[?<\s].*[a-z]\w*\s*[\(\{]', stripped):
+                sig = stripped.split('{')[0].split('=>')[0].strip()
+                if not _re.match(r'_', sig.split()[-1] if ' ' in sig else sig):
+                    stub_lines.append('  ' + sig + ' { ... }')
+            # enum
+            elif _re.match(r'enum\s+\w+', stripped):
+                stub_lines.append(line.rstrip())
+
+    result = '\n'.join(stub_lines)
+    return result[:max_chars] if len(result) > max_chars else result
+
+
+def _ts_fn_sig(lines: list[str], i: int) -> tuple[str, int]:
+    """Signature (body dropped) for an exported function starting at line i.
+
+    Matches the parameter parens across lines and cuts at the body brace, so
+    inline object-typed params (e.g. `isIdle(u: { target: Vec2 | null })`) and
+    multi-line signatures survive intact. Returns (signature, next_index).
+    """
+    buf = lines[i]
+    depth = buf.count('(') - buf.count(')')
+    j = i
+    while depth > 0 and j + 1 < len(lines):
+        j += 1
+        buf += ' ' + lines[j].strip()
+        depth += lines[j].count('(') - lines[j].count(')')
+    p = buf.find('(')
+    close, d = -1, 0
+    for idx in range(p, len(buf)):
+        if buf[idx] == '(':
+            d += 1
+        elif buf[idx] == ')':
+            d -= 1
+            if d == 0:
+                close = idx
+                break
+    after = buf[close + 1:] if close != -1 else ''
+    b = after.find('{')
+    ret = after[:b] if b != -1 else after
+    sig = (buf[:close + 1] if close != -1 else buf) + ret
+    return sig.strip() + ' { ... }', j + 1
+
+
+def _extract_ts_api_stub(content: str, max_chars: int = 1500) -> str:
+    """Read-only API surface of a TypeScript/JavaScript file.
+
+    Keeps exported function/class signatures and FULL interface / object-type /
+    enum bodies (their fields ARE the API the model must use) plus full
+    const/let/type-alias lines (constant VALUES like MOTE_SPEED = 60 matter).
+    Function bodies are dropped to save budget.
+    """
+    import re as _re
+    lines = content.splitlines()
+    out: list[str] = []
+    i, n = 0, len(lines)
+    while i < n:
+        s = lines[i].strip()
+        # Exported interface / enum / object-type alias: keep the whole brace block.
+        if (_re.match(r'export\s+(interface|enum)\b', s)
+                or _re.match(r'export\s+type\s+\w+[^=]*=\s*\{', s)):
+            block = [lines[i].rstrip()]
+            depth = s.count('{') - s.count('}')
+            i += 1
+            while i < n and depth > 0:
+                block.append(lines[i].rstrip())
+                depth += lines[i].count('{') - lines[i].count('}')
+                i += 1
+            out.append("\n".join(block))
+            continue
+        # Exported function: signature only.
+        if _re.match(r'export\s+(async\s+)?function\b', s):
+            sig, i = _ts_fn_sig(lines, i)
+            out.append(sig)
+            continue
+        # Exported class: declaration head only.
+        if _re.match(r'export\s+(abstract\s+)?class\b', s):
+            out.append(s.split('{')[0].strip() + ' { ... }')
+            i += 1
+            continue
+        # Exported const / let / one-line type alias: keep the full line.
+        if _re.match(r'export\s+(const|let|type)\b', s):
+            out.append(s.rstrip())
+            i += 1
+            continue
+        i += 1
+    return "\n".join(out).strip()[:max_chars]
+
+
+def _extract_api_stub(path: str, content: str, max_chars: int = 1500) -> str:
+    """Language-aware read-only API stub for a locked file, dispatched by extension.
+
+    2026-07-16: locked files were run unconditionally through the Dart
+    extractor, so on TypeScript projects (GalaxicanJS) vec.ts / types.ts
+    produced an EMPTY stub — the model never saw `dist`, `pos: Vec2`, or
+    `interface Mote`, and hallucinated `vecDist`, `.position`, `sortedIds`
+    on nearly every task, escalating both A/B arms for the same reason.
+    Markdown (API.md) is injected whole — never code-parsed.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".md":
+        return content[:max_chars]
+    if ext in (".ts", ".tsx", ".js", ".jsx", ".mjs"):
+        return _extract_ts_api_stub(content, max_chars=max_chars)
+    return _extract_dart_api_stub(content, max_chars=min(max_chars, 800))
+
+
+# Cache of (symbol->module, module->exports) per project_root. Cheap to build
+# (regex over the source tree) but rebuilt only when explicitly invalidated;
+# exports change rarely between tasks and a slightly stale map is still correct
+# for the vast majority of symbols.
+_SYMBOL_INDEX_CACHE: dict[str, tuple[dict, dict, dict]] = {}
+
+
+def _symbol_index(project_root: str, refresh: bool = False):
+    """Memoized (symbol->module, module->exports, funcname->signature)."""
+    key = os.path.abspath(project_root)
+    if refresh or key not in _SYMBOL_INDEX_CACHE:
+        try:
+            idx, exp = import_fixer.build_symbol_index(project_root)
+            sigs = import_fixer.build_signature_index(project_root)
+            _SYMBOL_INDEX_CACHE[key] = (idx, exp, sigs)
+        except Exception:
+            _SYMBOL_INDEX_CACHE[key] = ({}, {}, {})
+    return _SYMBOL_INDEX_CACHE[key]
+
+
+def _target_ts_file(task: str) -> str | None:
+    """Extract the target .ts/.tsx path a task names: 'In src/sim/foo.ts: ...'."""
+    m = re.search(r'\bIn ([\w./-]+\.tsx?):', task)
+    return m.group(1) if m else None
+
+
 def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
                    model: str | None = None,
                    is_test: bool = False,
                    project_root: str = ".") -> tuple[dict[str, str], dict]:
     """Ask Ollama to implement the task. Returns {rel_path: new_content}."""
     model = model or EXECUTOR_MODEL
-    # Only send editable files as context — locked files waste tokens and confuse the model
+    # Split context: editable files get full content; locked files get a compact
+    # read-only API stub so the model knows what classes/constructors exist without
+    # being able to overwrite them.  Previously locked files were stripped entirely,
+    # which caused the model to hallucinate APIs from training data.
     editable = {p: c for p, c in file_contents.items() if p not in LOCKED_FILES}
+    locked_context = {p: c for p, c in file_contents.items() if p in LOCKED_FILES}
+
     context = "\n\n".join(
         f"=== {path} ===\n{content}"
         for path, content in editable.items()
     )
+
+    # Inject compact stubs for locked files — class name, constructor, public API only.
+    # Capped at 800 chars per file to keep tier-1 token budget manageable.
+    if locked_context:
+        stub_parts = []
+        for path, content in locked_context.items():
+            stub = _extract_api_stub(path, content, max_chars=1500)
+            if stub:
+                stub_parts.append(f"=== {path} [READ-ONLY — do not return this path] ===\n{stub}")
+        if stub_parts:
+            context += "\n\n// ── Locked file APIs (read-only context) ──\n" + "\n\n".join(stub_parts)
     vision = open("VISION.md").read() if os.path.exists("VISION.md") else ""
     _project_rules = open(".roorules").read() if os.path.exists(".roorules") else ""
     _global_rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "global_rules.md")
@@ -619,17 +970,32 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
     )
 
     system_prompt = (
-        "You are a Dart/Flutter coding agent. Implement the given task.\n"
-        "Return ONLY a JSON object where:\n"
-        "  - Keys are file paths exactly as given (e.g. 'lib/game/game_core.dart')\n"
-        "  - Values are the COMPLETE new file contents (not diffs, not snippets)\n"
+        # Language-aware role line (2026-07-13): this said "Dart/Flutter coding
+        # agent" unconditionally — on Go projects the model was primed with the
+        # wrong language, wrong example paths, and Dart idioms.
+        (f"You are a Go coding agent. Implement the given task.\n"
+           if PROJECT_LANGUAGE == "go" else
+           "You are a Dart/Flutter coding agent. Implement the given task.\n")
+        + "Return ONLY a JSON object where:\n"
+        + ("  - Keys are file paths exactly as given (e.g. 'sim/mote_move.go')\n"
+           if PROJECT_LANGUAGE == "go" else
+           "  - Keys are file paths exactly as given (e.g. 'lib/game/game_core.dart')\n")
+        + "  - Values are the COMPLETE new file contents (not diffs, not snippets)\n"
         "Only include files that DIRECTLY change to implement this specific task.\n"
         "DO NOT touch files that are not required. DO NOT refactor or improve unrelated files.\n"
         "DO NOT create new files unless the task explicitly says to create one.\n"
-        "Typical task requires 1-3 files. If you find yourself changing more than 5, stop and reconsider.\n"
-        "Keep implementations MINIMAL — write the fewest lines that make the task work. "
+        + ("This task changes EXACTLY ONE file — the one named in the task. Return exactly one key.\n"
+           if PROJECT_LANGUAGE == "go" else
+           "Typical task requires 1-3 files. If you find yourself changing more than 5, stop and reconsider.\n")
+        + "Keep implementations MINIMAL — write the fewest lines that make the task work. "
         "Do not add elaborate systems, helpers, or abstractions unless required.\n"
-        "No explanation or markdown outside the JSON object.\n\n"
+        + ("COMPLETENESS: the file must be complete and compilable — every opened brace closed, "
+           "no trailing truncation. Before finishing, verify the final character of the file "
+           "content is the closing brace of the last function.\n"
+           "NESTING: keep nesting depth <= 3. Use early `continue`/`return` guard clauses "
+           "instead of nested if-blocks — deep nesting causes brace-count errors.\n"
+           if PROJECT_LANGUAGE == "go" else "")
+        + "No explanation or markdown outside the JSON object.\n\n"
         "CRITICAL — these files are LOCKED and will be silently ignored if returned:\n"
         f"{locked_list}\n\n"
         "Coding rules:\n"
@@ -637,10 +1003,26 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
         f"{pitfalls_block}"
         f"{scope_block}"
     )
+    # Import map (TS projects): tell the model EXACTLY which module exports each
+    # symbol, with the relative specifier already computed for the target file.
+    # This is the single biggest curb on the "invented import / wrong module"
+    # loop — the dominant local-model failure. Harmless no-op for non-TS.
+    import_map_block = ""
+    _tgt = _target_ts_file(task)
+    if _tgt:
+        try:
+            idx, exp, sigs = _symbol_index(project_root)
+            _map = import_fixer.build_import_map(project_root, _tgt, idx, exp, sigs)
+            if _map:
+                import_map_block = f"\n\n{_map}\n"
+        except Exception:
+            import_map_block = ""
+
     user_prompt = (
         f"Task: {task}\n\n"
         f"Project vision summary:\n{vision[:1500]}\n"
-        f"{api_guide_block}\n\n"
+        f"{api_guide_block}"
+        f"{import_map_block}\n"
         f"Current file contents:\n{context}"
         f"{error_block}"
     )
@@ -663,7 +1045,8 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
 
 
 def write_changes(changes: dict[str, str], project_root: str,
-                  test_only: bool = False) -> tuple[list[str], str]:
+                  test_only: bool = False,
+                  required_file: str | None = None) -> tuple[list[str], str]:
     """Write changes, skipping locked files and bad-pattern violations.
 
     When test_only=True (a 'Write unit test' task), any file outside test/ is
@@ -676,8 +1059,36 @@ def write_changes(changes: dict[str, str], project_root: str,
     written = []
     pattern_errors: list[str] = []
     for rel_path, content in changes.items():
+        # Target-file enforcement (2026-07-15): Go tasks name exactly one
+        # file ("In game/tick.go: ..."). The model sometimes writes a
+        # DIFFERENT path (observed: sim/tick.go instead of game/tick.go,
+        # every attempt, all tiers) and nothing stopped it — the wrong file
+        # then fails vet forever. Reject non-matching paths outright.
+        if required_file and rel_path != required_file:
+            msg = (
+                f"WRONG FILE [{rel_path}]: this task implements {required_file} "
+                f"and NOTHING else. You returned '{rel_path}'. Return exactly one "
+                f"key: '{required_file}', with the package declaration matching "
+                f"its directory."
+            )
+            print(f"  {RED}(blocked wrong-file write: {rel_path} ≠ {required_file}){RESET}")
+            pattern_errors.append(msg)
+            continue
         if rel_path in LOCKED_FILES:
             print(f"  {DIM}(skipped locked file: {rel_path}){RESET}")
+            continue
+        # Frozen-suite guard (Go projects): the acceptance tests are authored
+        # once and locked (conformance/); workers must NEVER write *_test.go,
+        # anywhere — a worker-written test could game its own acceptance gate.
+        if PROJECT_LANGUAGE == "go" and rel_path.endswith("_test.go"):
+            msg = (
+                f"SCOPE VIOLATION [{rel_path}]: this project's test suite is frozen "
+                f"(conformance/ is locked). Never write *_test.go files. Implement "
+                f"the feature in the exact file named by the task; acceptance is the "
+                f"existing conformance suite."
+            )
+            print(f"  {RED}(blocked frozen-suite violation: {rel_path}){RESET}")
+            pattern_errors.append(msg)
             continue
         # Scope guard: test tasks must only write test files.
         # Allowed: test/**  OR  lib/**/*_test.dart (Flame projects keep tests in lib/)
@@ -732,7 +1143,27 @@ def write_changes(changes: dict[str, str], project_root: str,
                 content = str(content)
         # Only check Dart source files for bad patterns — not docs, XML, YAML, etc.
         import pathlib
-        violations = check_bad_patterns(rel_path, content) if pathlib.Path(rel_path).suffix == '.dart' else []
+        violations = check_bad_patterns(rel_path, content) if pathlib.Path(rel_path).suffix in ('.dart', '.go') else []
+        # Grounding gate (Go): reject files that reference identifiers or
+        # import paths that exist nowhere in the project, the stdlib, or the
+        # change-set itself. Catches hallucinated APIs (g.FindSquad, .IsIdle,
+        # invented vec2 packages) instantly, before gofmt/vet ever runs, and
+        # the rejection message (with did-you-mean suggestions) is fed back
+        # to the model on the next attempt — rejection IS the repair prompt.
+        if not violations and PROJECT_LANGUAGE == "go" and rel_path.endswith(".go"):
+            # Mechanical brace repair BEFORE the grounding check: models
+            # reliably drop 1-2 closing braces on deeply nested functions
+            # ("unexpected EOF, expected }") — append them rather than burn
+            # a whole attempt on a deterministic failure.
+            content, _added = grounding.balance_go_braces(content)
+            if _added:
+                print(f"  {DIM}(appended {_added} missing closing brace(s): {rel_path}){RESET}")
+            _extra_decl: set[str] = set()
+            for _other, _oc in changes.items():
+                if _other != rel_path and _other.endswith(".go") and isinstance(_oc, str):
+                    _extra_decl |= grounding.declared_names(_oc)
+            violations = grounding.check_go_grounding(
+                rel_path, content, project_root, extra_declared=_extra_decl)
         if violations:
             for v in violations:
                 print(f"  {RED}(blocked bad pattern: {v[:80]}){RESET}")
@@ -846,12 +1277,27 @@ def _branch_start(project_root: str, task_idx: int, task: str) -> str | None:
         return None
     slug = re.sub(r"[^a-z0-9]+", "-", task[:45].lower()).strip("-")
     branch = f"task-{task_idx}-{slug}"
-    # Always start from main so branches don't stack on each other
-    _git(["checkout", "main"], project_root)
+    # Always start from main so branches don't stack on each other.
+    # MUST be a forced checkout: write_changes() writes the model's output
+    # straight to disk before validation ever runs, so the working tree is
+    # essentially always dirty by the time we get here. A plain `checkout
+    # main` silently no-ops on a dirty tree instead of erroring — it does
+    # NOT restore main's clean file contents — so a previous task's failed
+    # (never-committed) writes were surviving in the working tree and
+    # contaminating every task after it, even though the branches themselves
+    # forked cleanly from main at the git-ref level. Found 2026-07-13: task
+    # 4's abandoned squad_move.go (with a hallucinated import of a package
+    # that doesn't exist) kept failing go vet for tasks 8 and 10, neither of
+    # which had anything to do with squad_move.go.
+    _git(["checkout", "-f", "main"], project_root)
+    # -e logs: never clean the logs/ dir — tier2_queue.jsonl, velocity.jsonl,
+    # the failure ledger etc. live there untracked; a bare `clean -fd` was
+    # deleting the --deep queue between tasks (2026-07-13).
+    _git(["clean", "-fd", "-e", "logs"], project_root)
     r = _git(["checkout", "-b", branch], project_root)
     if r.returncode != 0:
         # Branch exists from a previous aborted run — reuse it
-        _git(["checkout", branch], project_root)
+        _git(["checkout", "-f", branch], project_root)
     return branch
 
 
@@ -859,14 +1305,21 @@ def _branch_merge(project_root: str, branch: str, task_idx: int, task: str) -> N
     """Commit the task changes, merge to main, delete the branch."""
     _git(["add", "-A"], project_root)
     _git(["commit", "-m", f"task {task_idx}: {task[:72]}"], project_root)
-    _git(["checkout", "main"], project_root)
+    _git(["checkout", "-f", "main"], project_root)
     _git(["merge", "--no-ff", branch, "-m", f"Merge task-{task_idx}"], project_root)
     _git(["branch", "-D", branch], project_root)
 
 
 def _branch_abandon(project_root: str, branch: str) -> None:
-    """Discard a failed task branch and return to main."""
-    _git(["checkout", "main"], project_root)
+    """Discard a failed task branch and return to main.
+
+    Force + clean: this branch failed, so nothing it wrote — committed or
+    not — should be allowed to survive into main or leak into the next
+    task's working tree. See the note in _branch_start for why a plain
+    (non-forced) checkout isn't enough here.
+    """
+    _git(["checkout", "-f", "main"], project_root)
+    _git(["clean", "-fd", "-e", "logs"], project_root)
     _git(["branch", "-D", branch], project_root)
 
 
@@ -916,6 +1369,36 @@ def _post_planning_commit(project_root: str,
 
 
 # ─── Project config (.sovereign_config.json) ──────────────────────────────────
+
+# Per-project validation gates (language-agnostic). When non-empty, validate()
+# runs these shell commands (in order, cwd = project root, fail on nonzero
+# exit) INSTEAD of the built-in flutter/pytest/npm chain, and
+# snapshot_baseline_errors() skips its flutter-analyze baseline entirely.
+# Populated from .sovereign_config.json "validate_commands": list[str].
+PROJECT_VALIDATE_COMMANDS: list[str] = []
+
+# Project language from .sovereign_config.json "language" (default "dart").
+# Currently used to: extend bad-pattern checks to .go files, and block all
+# *_test.go writes in Go projects (their conformance suite is frozen).
+PROJECT_LANGUAGE: str = "dart"
+
+# Project identifier from .sovereign_config.json "project" (falls back to the
+# project directory's basename if the key is absent). Used to scope Firestore
+# lesson push/pull per-project — see _firestore_push_lessons/_firestore_pull_lessons.
+# Added 2026-07-13: before this, error_patterns/project_rules were pushed and
+# pulled with NO project field at all, so every project sharing this Firestore
+# project (FIRESTORE_PROJECT) drew from one global, unscoped pool. In practice
+# this meant a brand-new Go project pulled 433 Dart/Flutter-specific rules from
+# an older unrelated project on its very first run, silently re-contaminating
+# any local .roorules cleanup on every session start.
+PROJECT_ID: str = ""
+
+# Files fed as context to EVERY task, from .sovereign_config.json
+# "context_always_include". Added 2026-07-13: the key existed only as prose in
+# the config's "notes" — nothing implemented it, so Go workers never saw
+# types.go/vec.go/API.md and hallucinated struct fields and helpers.
+PROJECT_ALWAYS_INCLUDE: list[str] = []
+
 
 def _load_project_config(project_root: str) -> dict:
     """Load .sovereign_config.json from project_root and apply settings.
@@ -978,6 +1461,29 @@ def _load_project_config(project_root: str) -> dict:
         if isinstance(entry, dict) and "pattern" in entry and "hint" in entry:
             ERROR_HINTS.append((_re.compile(entry["pattern"]), entry["hint"]))
 
+    # ── Always-include context files ──────────────────────────────────────────
+    global PROJECT_ALWAYS_INCLUDE
+    ai = cfg.get("context_always_include", [])
+    if isinstance(ai, list) and all(isinstance(p, str) for p in ai):
+        PROJECT_ALWAYS_INCLUDE = list(ai)
+        if ai:
+            print(f"  {DIM}Loaded {len(ai)} always-include context file(s){RESET}")
+
+    # ── Per-project validation commands + language ────────────────────────────
+    global PROJECT_VALIDATE_COMMANDS, PROJECT_LANGUAGE, PROJECT_ID
+    vc = cfg.get("validate_commands", [])
+    if isinstance(vc, list) and vc and all(isinstance(c, str) for c in vc):
+        PROJECT_VALIDATE_COMMANDS = list(vc)
+        print(f"  {DIM}Loaded {len(vc)} project validate command(s) — "
+              f"built-in flutter/pytest/npm gates disabled{RESET}")
+    lang = cfg.get("language")
+    if isinstance(lang, str) and lang:
+        PROJECT_LANGUAGE = lang.lower()
+
+    proj_id = cfg.get("project")
+    PROJECT_ID = proj_id if isinstance(proj_id, str) and proj_id else os.path.basename(
+        os.path.abspath(project_root))
+
     total = len(exact) + len(prefixes)
     if total:
         print(f"  {DIM}Loaded project config: {len(exact)} locked paths, "
@@ -1033,7 +1539,7 @@ def _firestore_push_lessons(project_root: str) -> None:
                                 or rec.get("pattern", ""))
                         if not code:
                             continue
-                        doc_id = code.replace("/", "_")[:128]
+                        doc_id = f"{PROJECT_ID}_{code}".replace("/", "_")[:128]
                         col.document(doc_id).set({
                             "code":      code,
                             "count":     rec.get("count", 1),
@@ -1041,6 +1547,7 @@ def _firestore_push_lessons(project_root: str) -> None:
                             "last_date": rec.get("date", date.today().isoformat()),
                             "hint":      rec.get("hint", ""),
                             "source":    "local",
+                            "project":   PROJECT_ID,
                         }, merge=True)
                         pushed += 1
                     except Exception:
@@ -1057,13 +1564,14 @@ def _firestore_push_lessons(project_root: str) -> None:
                         rule_text = rec.get("rule") or rec.get("new_rule", "")
                         if not rule_text:
                             continue
-                        doc_id = _hl2.md5(rule_text.encode()).hexdigest()[:16]
+                        doc_id = f"{PROJECT_ID}_" + _hl2.md5(rule_text.encode()).hexdigest()[:16]
                         col.document(doc_id).set({
                             "rule":      rule_text,
                             "task_idx":  rec.get("task_idx", 0),
                             "date":      rec.get("date", date.today().isoformat()),
                             "source":    "local",
                             "applied":   False,
+                            "project":   PROJECT_ID,
                         }, merge=True)
                         pushed += 1
                     except Exception:
@@ -1079,8 +1587,8 @@ def _firestore_push_lessons(project_root: str) -> None:
                 try:
                     rec = json.loads(line)
                     key = rec.get("date", "") + rec.get("task", "")[:60]
-                    doc_id = _hl2.md5(key.encode()).hexdigest()[:16]
-                    col.document(doc_id).set(rec, merge=True)
+                    doc_id = f"{PROJECT_ID}_" + _hl2.md5(key.encode()).hexdigest()[:16]
+                    col.document(doc_id).set({**rec, "project": PROJECT_ID}, merge=True)
                     pushed += 1
                 except Exception:
                     pass
@@ -1125,7 +1633,7 @@ def _firestore_pull_lessons(project_root: str) -> None:
                         pass
 
         new_patterns: list[str] = []
-        for doc in db.collection("error_patterns").stream():
+        for doc in db.collection("error_patterns").where("project", "==", PROJECT_ID).stream():
             d = doc.to_dict()
             code = d.get("code", "")
             if code and code not in existing_codes:
@@ -1153,7 +1661,7 @@ def _firestore_pull_lessons(project_root: str) -> None:
                         pass
 
         new_rules: list[str] = []
-        for doc in db.collection("project_rules").stream():
+        for doc in db.collection("project_rules").where("project", "==", PROJECT_ID).stream():
             d = doc.to_dict()
             rule = d.get("rule", "")
             if rule and rule[:80] not in existing_rules:
@@ -1199,6 +1707,10 @@ def snapshot_baseline_errors(project_root: str) -> frozenset[str]:
     These are errors the model didn't cause and cannot fix — they must not
     block task validation.
     """
+    if PROJECT_VALIDATE_COMMANDS:
+        # Per-project gates are absolute (a Go build either passes or it
+        # doesn't) — no flutter baseline to snapshot.
+        return frozenset()
     if not shutil.which("flutter"):
         return frozenset()
     try:
@@ -1213,10 +1725,66 @@ def snapshot_baseline_errors(project_root: str) -> frozenset[str]:
         return frozenset()
 
 
+_TASK_GATE_RE = re.compile(r"task gate:\s*(.+?)(?:\s+passes)?\s*$", re.IGNORECASE)
+
+
+def _extract_task_gate(task: str | None) -> str | None:
+    """Pull the per-task acceptance command out of the task text.
+
+    Tasks are authored with a trailing "task gate: <cmd> passes" clause (see
+    plan_week.py). That command is the REAL acceptance test — typically a
+    scoped conformance run like `npx vitest run conformance/pN.test.ts -t 'B05'`.
+    validate_commands (typecheck + test:locked) pass on unimplemented stubs, so
+    without running this gate a stub logs as PASSED. Returns the command, or
+    None if the task carries no gate clause.
+    """
+    if not task:
+        return None
+    for line in task.splitlines():
+        m = _TASK_GATE_RE.search(line.strip())
+        if m:
+            cmd = m.group(1).strip()
+            return cmd or None
+    return None
+
+
 def validate(
     baseline_errors: frozenset[str] | None = None,
     files_written: list[str] | None = None,
+    task_gate: str | None = None,
 ) -> tuple[bool, str]:
+    # ── Per-project gates (from .sovereign_config.json "validate_commands") ──
+    # Run in order, cwd = project root (main() chdirs there at startup).
+    # First nonzero exit fails the task with that command's output.
+    if PROJECT_VALIDATE_COMMANDS:
+        for shell_cmd in PROJECT_VALIDATE_COMMANDS:
+            try:
+                result = subprocess.run(
+                    ["bash", "-lc", shell_cmd],
+                    capture_output=True, text=True, timeout=300,
+                )
+            except subprocess.TimeoutExpired:
+                return False, f"$ {shell_cmd}\n(validator timed out after 300 s)"
+            if result.returncode != 0:
+                output = (result.stdout + result.stderr).strip()
+                return False, f"$ {shell_cmd}\n{output[-3000:]}"
+        # ── Per-task acceptance gate ──────────────────────────────────────
+        # validate_commands passing only means the code TYPE-CHECKS and leaves
+        # locked files intact — a stub satisfies both. The task's own gate is
+        # what proves the behaviour exists. Run it last so a stub cannot pass.
+        if task_gate:
+            try:
+                result = subprocess.run(
+                    ["bash", "-lc", task_gate],
+                    capture_output=True, text=True, timeout=300,
+                )
+            except subprocess.TimeoutExpired:
+                return False, f"$ {task_gate}\n(task gate timed out after 300 s)"
+            if result.returncode != 0:
+                output = (result.stdout + result.stderr).strip()
+                return False, f"$ {task_gate}\n{output[-3000:]}"
+        return True, "all project validate_commands + task gate passed"
+
     for cmd, label in [
         (["flutter", "analyze", "--no-fatal-infos", "--no-fatal-warnings"], "flutter analyze"),
         (["python", "-m", "pytest", "--tb=short", "-q"], "pytest"),
@@ -1513,6 +2081,58 @@ def _log_task_summary(
         "final_model":    model,
         "duration_s":     round(time.time() - task_start, 1),
     })
+    if task_outcome != "done":
+        _ledger(project_root, task_idx, model,
+                f"task_{task_outcome}", task[:120])
+
+
+# ─── Failure ledger ──────────────────────────────────────────────────────────
+# One TSV line per failure event: answers "are we still making the same kind
+# of mistakes?" with `cut -f4 logs/failure_ledger.tsv | sort | uniq -c`
+# instead of transcript archaeology. Lives in logs/ (excluded from git clean).
+
+FAILURE_LEDGER = "logs/failure_ledger.tsv"
+
+_LEDGER_CATEGORIES = [
+    # (regex on error text, category)
+    (r"UNKNOWN IDENTIFIER|UNKNOWN IMPORT",                       "hallucinated_api"),
+    (r"SCOPE VIOLATION|frozen",                                  "scope_violation"),
+    (r"INVALID FORMAT|patch descriptor",                         "bad_output_format"),
+    (r"unexpected EOF|expected '\}'|expected declaration",       "truncated_output"),
+    (r"undefined:|has no field or method|undeclared name",       "undefined_identifier"),
+    (r"cannot use .* as .* value|type mismatch|mismatched types","type_error"),
+    (r"imported and not used|declared and not used",             "unused_decl"),
+    (r"--- FAIL|FAIL\t|test.*failed",                            "test_failure"),
+    (r"gofmt|not gofmt'd|file is not formatted",                 "format"),
+]
+
+def _ledger_category(error_text: str) -> str:
+    for pat, cat in _LEDGER_CATEGORIES:
+        if _re.search(pat, error_text, _re.IGNORECASE):
+            return cat
+    return "other"
+
+def _ledger(project_root: str, task_idx: int, model: str,
+            event: str, error_text: str = "") -> None:
+    """Append one failure event. event: attempt_blocked | validate_failed |
+    task_skipped | task_failed | task_done_after_retry ..."""
+    try:
+        path = os.path.join(project_root, FAILURE_LEDGER)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        cat = _ledger_category(error_text) if error_text else "-"
+        # first identifier-ish detail from the error, for grep-ability
+        m = _re.search(r"`([^`]+)`|undefined: (\S+)|\"([^\"]+)\"", error_text)
+        detail = next((g for g in (m.groups() if m else ()) if g), "")[:80]
+        line = "\t".join([
+            time.strftime("%Y-%m-%dT%H:%M:%S"),
+            str(task_idx), model, event, cat,
+            detail.replace("\t", " "),
+            error_text[:200].replace("\n", " ").replace("\t", " "),
+        ])
+        with open(path, "a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass  # the ledger must never kill a run
 
 
 def _write_escalation(project_root: str, task_idx: int, task: str,
@@ -1841,6 +2461,32 @@ def run_task(task: str, project_root: str, log_file: str,
 
     print(f"  {DIM}Finding relevant files ({PLANNER_MODEL})...{RESET}")
     rel_files = find_relevant_files(task, project_root)
+
+    # Always-include context (config "context_always_include") plus any
+    # spec/*.md files the task text references (e.g. "per spec/03-simulation.md §2").
+    spec_refs = re.findall(r"\b[\w./-]*spec/[\w.-]+\.md\b", task)
+    # Deterministic package context (2026-07-15): the planner sometimes omits
+    # the files defining the very types the task must use — game/tick.go
+    # never saw ai/ai.go, so every tier died on `undefined: AI`. Force-include
+    # the target file's own package dir plus any package referenced as a Go
+    # qualifier (`ai.AI`, `game.Tick`) in the task text. sim/ is excluded:
+    # its locked core is already always-included and the full package is huge.
+    pkg_ctx: list[str] = []
+    if PROJECT_LANGUAGE == "go":
+        _dirs: set[str] = set()
+        _tm = re.search(r'\bIn ([\w./-]+\.go):', task)
+        if _tm and os.path.dirname(_tm.group(1)) not in ("", "sim"):
+            _dirs.add(os.path.dirname(_tm.group(1)))
+        for _pkg in set(re.findall(r'\b([a-z]\w+)\.[A-Z]\w*', task)) - {"sim"}:
+            if os.path.isdir(os.path.join(project_root, _pkg)):
+                _dirs.add(_pkg)
+        for _d in sorted(_dirs):
+            _fs = sorted(f for f in os.listdir(os.path.join(project_root, _d))
+                         if f.endswith(".go"))[:8]
+            pkg_ctx += [os.path.join(_d, f) for f in _fs]
+    forced = [f for f in PROJECT_ALWAYS_INCLUDE + spec_refs + pkg_ctx
+              if os.path.exists(os.path.join(project_root, f))]
+    rel_files = list(dict.fromkeys(forced + rel_files))
     print(f"  Files: {', '.join(rel_files) or '(none found)'}")
 
     # Snapshot pre-existing errors so the validator only fails on NEW ones
@@ -1863,7 +2509,7 @@ def run_task(task: str, project_root: str, log_file: str,
                 written_c, pat_errs_c = write_changes(
                     claude_changes, project_root, test_only=is_test)
                 if not pat_errs_c:
-                    passed_c, output_c = validate(baseline_errors, files_written=written_c)
+                    passed_c, output_c = validate(baseline_errors, files_written=written_c, task_gate=_extract_task_gate(task))
                     if passed_c:
                         print(f"  {GREEN}✓ Chronic blocker solved by Claude{RESET}")
                         update_api_guide(written_c, claude_changes, project_root)
@@ -1912,6 +2558,27 @@ def run_task(task: str, project_root: str, log_file: str,
         return True
 
     for attempt in range(1, MAX_RETRIES + 1):
+        # ── Absolute hard ceiling ────────────────────────────────────────────
+        # Checked first, before any branch (timeout/bad-pattern/no-output/thrash)
+        # gets a chance to `continue` past it. No bonuses, no tier-availability
+        # exception — once a task blows past MAX_TASK_SECONDS it is done.
+        hard_elapsed = time.time() - task_start
+        if hard_elapsed > MAX_TASK_SECONDS:
+            print(
+                f"\n  {RED}⛔ Hard ceiling {MAX_TASK_SECONDS:.0f}s exceeded "
+                f"({hard_elapsed:.0f}s elapsed) — skipping regardless of tier state{RESET}"
+            )
+            restore_files(backups, project_root)
+            _append_velocity(project_root, {
+                "date": date.today().isoformat(), "task": task[:120],
+                "outcome": "budget", "attempts": attempt,
+                "duration_s": round(hard_elapsed, 1),
+                "error_types": list(dict.fromkeys(errors_seen + ["hard_ceiling"])),
+            })
+            _log_task_summary(project_root, task_idx, task, "budget",
+                              attempt, current_model, task_start)
+            return "skipped"
+
         # Snapshot error context at the top of each attempt so the trace record
         # captures exactly what failure context the model was given this round.
         errors_at_start = errors
@@ -1922,7 +2589,7 @@ def run_task(task: str, project_root: str, log_file: str,
         _racing = tier_idx == 0 and RACE_ENABLED
         _race_label = f" racing {TIER1_MODEL} vs {RACE_MODEL}" if _racing else f" ({current_model}){tier_label}"
         print(
-            f"  {DIM}Attempt {phase_attempts + 1}/{PHASE_MAX_ATTEMPTS} — coding"
+            f"  {DIM}Attempt {phase_attempts + 1}/{_max_attempts_for_tier(tier_idx)} — coding"
             f"{_race_label}...{RESET}",
             end="", flush=True,
         )
@@ -1942,7 +2609,7 @@ def run_task(task: str, project_root: str, log_file: str,
             errors_seen.append("timeout")
             print(f" {YELLOW}timeout — retrying{RESET}")
             phase_attempts += 1
-            if phase_attempts >= (TIER2_MAX_ATTEMPTS if tier_idx > 0 else PHASE_MAX_ATTEMPTS):
+            if phase_attempts >= _max_attempts_for_tier(tier_idx):
                 if not _advance_tier(attempt):
                     restore_files(backups, project_root)
                     _append_velocity(project_root, {
@@ -1961,7 +2628,7 @@ def run_task(task: str, project_root: str, log_file: str,
             errors_seen.append("ollama_500")
             time.sleep(5)
             phase_attempts += 1
-            if phase_attempts >= (TIER2_MAX_ATTEMPTS if tier_idx > 0 else PHASE_MAX_ATTEMPTS):
+            if phase_attempts >= _max_attempts_for_tier(tier_idx):
                 if not _advance_tier(attempt):
                     restore_files(backups, project_root)
                     _append_velocity(project_root, {
@@ -2009,6 +2676,18 @@ def run_task(task: str, project_root: str, log_file: str,
         if not changes:
             errors_seen.append("no_output")
             print(f" {YELLOW}no output{RESET}")
+            # 2026-07-10: this branch used to `continue` without ever logging a
+            # trace record — "no output" failures were completely invisible in
+            # task_traces.jsonl (no raw model response captured anywhere), which
+            # made root-causing them impossible after the fact. Log it now, same
+            # as every other attempt outcome, so the raw text survives for
+            # inspection (empty response vs malformed JSON vs truncated prompt
+            # all look identical from the console alone).
+            _log_attempt_trace(project_root, task_idx, task, attempt,
+                               tier_idx + 1, current_model, is_test, rel_files,
+                               call_info, [], False,
+                               False, "(no output — see raw_output)", errors_at_start,
+                               False, task_start)
             phase_stale += 1
             if phase_stale >= PHASE_STRIKE_LIMIT:
                 if not _advance_tier(attempt):
@@ -2026,12 +2705,20 @@ def run_task(task: str, project_root: str, log_file: str,
             continue
 
         last_skipped = [p for p in changes if p in LOCKED_FILES]
-        written, pattern_errs = write_changes(changes, project_root, test_only=is_test)
+        # Go tasks name their single target file: "In <path>.go: implement ..."
+        _go_target = None
+        if PROJECT_LANGUAGE == "go":
+            _m = re.search(r'\bIn ([\w./-]+\.go):', task)
+            _go_target = _m.group(1) if _m else None
+        written, pattern_errs = write_changes(changes, project_root, test_only=is_test,
+                                              required_file=_go_target)
         last_written = written
 
         if pattern_errs:
             errors = pattern_errs + ("\n\n" + errors if errors else "")
             errors_seen.append("bad_pattern")
+            _ledger(project_root, task_idx, current_model,
+                    "attempt_blocked", pattern_errs)
             consecutive_bad_pattern += 1
             print(f" {YELLOW}blocked by bad patterns — retrying{RESET}")
             # After 3 consecutive bad-pattern blocks the model is stuck in a loop.
@@ -2060,12 +2747,43 @@ def run_task(task: str, project_root: str, log_file: str,
         changed_list = ", ".join(written)
         print(f" wrote {len(written)} file(s): {changed_list[:60]}")
 
+        # Pre-format Go files BEFORE the first validation (2026-07-13).
+        # Local models emit space-indented Go, so validate #1 always died at
+        # the gofmt gate, and the post-autofix failure produced a different
+        # error signature each attempt — feeding the thrash detector bogus
+        # "all different errors" streaks and escalating tiers prematurely.
+        if PROJECT_LANGUAGE == "go":
+            try:
+                _get_autofix().apply_go_mechanical_fixes(project_root, written)
+            except Exception:
+                pass
+
+        # Mechanically repair TS imports BEFORE the first validation: relocate
+        # wrong-module symbols to their real module and drop invented ones. This
+        # deterministically kills the TS2305/TS2307 "invented import" loop — the
+        # dominant local-model failure — without the model ever getting it right.
+        if any(w.endswith((".ts", ".tsx")) for w in written):
+            try:
+                idx, exp, _sigs = _symbol_index(project_root, refresh=True)
+                _fixes = import_fixer.fix_ts_imports(project_root, written, idx, exp)
+                if _fixes:
+                    errors_seen.append("import_autofixed")
+                    print(f" {DIM}[import-fix: {len(_fixes)}]{RESET}", end="", flush=True)
+                    with open(log_file, "a") as _lg:
+                        _lg.write("Import autofix:\n  " + "\n  ".join(_fixes) + "\n")
+            except Exception as _e:
+                print(f"  {DIM}(import-fix error: {_e}){RESET}")
+
         print(f"  {DIM}Validating...{RESET}", end="", flush=True)
-        passed, output = validate(baseline_errors, files_written=written)
+        passed, output = validate(baseline_errors, files_written=written, task_gate=_extract_task_gate(task))
 
         with open(log_file, "a") as log:
             log.write(f"\n### Attempt {attempt}\nFiles changed: {changed_list}\n")
             log.write(f"Validation: {'PASSED' if passed else 'FAILED'}\n{output}\n")
+
+        if not passed:
+            _ledger(project_root, task_idx, current_model,
+                    "validate_failed", output)
 
         if race_stats:
             _append_race(project_root, {
@@ -2100,10 +2818,13 @@ def run_task(task: str, project_root: str, log_file: str,
         # Step 1: Mechanical auto-fixer
         try:
             af = _get_autofix()
-            fix_count, _ = af.apply_mechanical_fixes(output, project_root)
+            if PROJECT_LANGUAGE == "go":
+                fix_count, _ = af.apply_go_mechanical_fixes(project_root, written)
+            else:
+                fix_count, _ = af.apply_mechanical_fixes(output, project_root)
             if fix_count > 0:
                 print(f"  {DIM}⚙  Auto-fixed {fix_count} issue(s) — re-validating...{RESET}", end="", flush=True)
-                passed2, output2 = validate(baseline_errors, files_written=written)
+                passed2, output2 = validate(baseline_errors, files_written=written, task_gate=_extract_task_gate(task))
                 if passed2:
                     print(f" {GREEN}✓ passed after autofix{RESET}")
                     errors_seen.append("autofix_resolved")
@@ -2127,10 +2848,16 @@ def run_task(task: str, project_root: str, log_file: str,
         except Exception as e:
             print(f"  {DIM}(autofix error: {e}){RESET}")
 
-        # Step 2: qwen advisor (skipped with --no-advisor to avoid evicting
-        # the large model from GPU between retries in --deep mode)
+        # Step 2: qwen advisor — tier 1 only (2026-07-10). The advisor runs on
+        # ADVISOR_MODEL, which is the same 7B weights as TIER1_MODEL, so a
+        # tier-1 call costs nothing extra (already resident in VRAM). But for
+        # tier 2-4 (gemma4:26b / qwen3.6:35b / qwen2.5-coder:32b) it evicts
+        # that much larger model from GPU every retry and forces a full
+        # reload afterward — confirmed ~20-30s per retry. Not worth an
+        # enriched hint on the rare tier 2-4 attempt. --no-advisor still
+        # works as an explicit override to disable it for tier 1 too.
         advisor_hint = ""
-        if not skip_advisor:
+        if not skip_advisor and tier_idx == 0:
             try:
                 adv = _get_advisor()
                 adv.log_error_pattern(output, task, attempt, task_idx, project_root, categories=[])
@@ -2196,10 +2923,21 @@ def run_task(task: str, project_root: str, log_file: str,
 
         # Build enriched context for next attempt
         errors = apply_error_hints(output)
+        # Deterministic import correction from the symbol index — precise, unlike
+        # the LLM advisor which tends to re-guess the same wrong module.
+        try:
+            _idx, _exp, _sigs = _symbol_index(project_root)
+            _imp_hint = import_fixer.import_error_hint(output, project_root, _idx, _exp)
+            _sig_hint = import_fixer.signature_error_hint(output, project_root, _sigs)
+            _combined = "\n\n".join(h for h in (_sig_hint, _imp_hint) if h)
+            if _combined:
+                errors = f"{_combined}\n\n{errors}"
+        except Exception:
+            pass
         if advisor_hint:
             errors = f"⚠️  Advisor note: {advisor_hint}\n\n{errors}"
 
-        thrashing = phase_attempts >= (TIER2_MAX_ATTEMPTS if tier_idx > 0 else PHASE_MAX_ATTEMPTS)
+        thrashing = phase_attempts >= _max_attempts_for_tier(tier_idx)
         if thrashing and phase_stale < PHASE_STRIKE_LIMIT:
             print(
                 f"\n  {YELLOW}⚡ {current_model} thrashing — {phase_attempts} attempts, "
@@ -2224,7 +2962,7 @@ def run_task(task: str, project_root: str, log_file: str,
                         written_c, pat_errs_c = write_changes(
                             claude_changes, project_root, test_only=is_test)
                         if not pat_errs_c:
-                            passed_c, output_c = validate(baseline_errors, files_written=written_c)
+                            passed_c, output_c = validate(baseline_errors, files_written=written_c, task_gate=_extract_task_gate(task))
                             if passed_c:
                                 print(f"  {GREEN}✓ Claude solved it{RESET}")
                                 update_api_guide(written_c, claude_changes, project_root)
@@ -2339,10 +3077,12 @@ def main():
                         help="Skip tasks identified as tests")
     parser.add_argument("--tests-only",    action="store_true",
                         help="Skip tasks NOT identified as tests")
-    parser.add_argument("--worker-id", type=int, default=0,
-                        help="Worker index for parallel execution (0-based)")
-    parser.add_argument("--stride",    type=int, default=1,
-                        help="Total number of parallel workers (1 = sequential)")
+    parser.add_argument("--worker-id", type=int,
+                        default=int(os.getenv("WORKER_ID", "0")),
+                        help="Worker index for parallel execution (0-based); also reads WORKER_ID env var")
+    parser.add_argument("--stride",    type=int,
+                        default=int(os.getenv("STRIDE", "1")),
+                        help="Total number of parallel workers (1 = sequential); also reads STRIDE env var")
     parser.add_argument("--budget-multiplier", type=float, default=None,
                         help="Override BUDGET_MULTIPLIER for this run "
                              "(e.g. pass --stride value so parallel workers "
@@ -2371,6 +3111,14 @@ def main():
                              "(ROADMAP.md, task_graph.json, .roorules) before "
                              "starting the work loop. Use after plan_week.py "
                              "so cloud workers can immediately pull the DAG.")
+    parser.add_argument("--remaining-count", choices=["features", "tests", "all"], default=None,
+                        help="Print the number of unchecked ROADMAP.md tasks matching this "
+                             "type and exit. Used by supervisor.sh to check whether a "
+                             "features-only or tests-only session still has work, without "
+                             "ever mixing the two loop conditions together.")
+    parser.add_argument("--queue-remaining-count", choices=["features", "tests", "all"], default=None,
+                        help="Same as --remaining-count but counts logs/tier2_queue.jsonl "
+                             "entries instead of ROADMAP.md — used for --deep mop-up sessions.")
     args = parser.parse_args()
 
     if args.project:
@@ -2385,7 +3133,49 @@ def main():
     # ── Load per-project config (.sovereign_config.json) ─────────────────────
     # Must happen before anything else so LOCKED_FILES is populated before
     # any file reads, writes, or planning steps touch the project.
-    _load_project_config(project_root)
+    # EXCEPT for the counting queries below: supervisor.sh does
+    # `N=$(work.py --remaining-count ...)` and tests N as an integer, so
+    # stdout must contain ONLY the number. _load_project_config prints
+    # "Loaded N always-include context file(s)" etc., which polluted the
+    # capture and made supervisor.sh's [ -eq ] test fail
+    # ("integer expression expected") — it then fell through to a false
+    # "All ROADMAP tasks complete". Counting uses only parse_all_tasks()/
+    # _is_test_task(), neither of which needs the config, so config load is
+    # deferred until after the counting branches exit. (2026-07-14)
+    if not (args.remaining_count or args.queue_remaining_count):
+        _load_project_config(project_root)
+
+    # ── Fast counting queries (--remaining-count / --queue-remaining-count) ───
+    # Pure reads, no Firestore/model calls — supervisor.sh shells out to these
+    # on every loop iteration to decide whether a features-only or tests-only
+    # session is actually done, so they need to reuse the exact same
+    # parse_all_tasks()/_is_test_task() logic the real run uses. Exits before
+    # any other side effect (Firestore pull, sprint commit, model checks).
+    if args.remaining_count:
+        all_tasks = parse_all_tasks()
+        if args.remaining_count == "all":
+            n = len(all_tasks)
+        else:
+            want_test = (args.remaining_count == "tests")
+            n = sum(1 for line in all_tasks if _is_test_task(task_text(line)) == want_test)
+        print(n)
+        sys.exit(0)
+
+    if args.queue_remaining_count:
+        queue_path = os.path.join(project_root, TIER2_QUEUE_FILE)
+        n = 0
+        if os.path.exists(queue_path):
+            for line in open(queue_path):
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if args.queue_remaining_count == "all":
+                    n += 1
+                elif (args.queue_remaining_count == "tests") == _is_test_task(rec.get("task", "")):
+                    n += 1
+        print(n)
+        sys.exit(0)
 
     # ── Sprint planning commit (--commit-sprint) ──────────────────────────────
     # Must run before the task loop so cloud workers can pull ROADMAP.md + DAG.
@@ -2411,18 +3201,21 @@ def main():
             or os.path.getmtime(pubspec_yaml) > os.path.getmtime(pubspec_lock)
         )
         if needs_pub_get:
-            print(f"  {YELLOW}pubspec.yaml changed or cache missing — running flutter pub get...{RESET}")
-            result = subprocess.run(
-                ["flutter", "pub", "get"],
-                cwd=project_root,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if result.returncode == 0:
-                print(f"  {GREEN}✓ flutter pub get succeeded{RESET}")
+            if args.worker_id == 0:
+                print(f"  {YELLOW}pubspec.yaml changed or cache missing — running flutter pub get...{RESET}")
+                result = subprocess.run(
+                    ["flutter", "pub", "get"],
+                    cwd=project_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                if result.returncode == 0:
+                    print(f"  {GREEN}✓ flutter pub get succeeded{RESET}")
+                else:
+                    print(f"  {RED}⚠ flutter pub get failed (continuing anyway):\n{result.stderr[:400]}{RESET}")
             else:
-                print(f"  {RED}⚠ flutter pub get failed (continuing anyway):\n{result.stderr[:400]}{RESET}")
+                print(f"  {YELLOW}worker {args.worker_id}: skipping flutter pub get (worker 0 handles it){RESET}")
 
     # ── Effective budget for this run ─────────────────────────────────────────
     # Computed lazily after deep-mode resolution (which may set budget_multiplier).
@@ -2511,10 +3304,63 @@ def main():
         if args.budget_multiplier is None:
             args.budget_multiplier = BUDGET_MULTIPLIER * 2
 
-    # Apply stride: worker K handles tasks at positions K, K+stride, K+2×stride …
-    indexed_tasks = [(i + 1, t) for i, t in enumerate(tasks)]
+    # ── Chain-aware task assignment ────────────────────────────────────────────
+    # Two kinds of adjacency in ROADMAP.md's task order must never be split
+    # across parallel workers, or the tasks race each other with no
+    # coordination:
+    #   (a) consecutive tasks targeting the same primary file (one worker can
+    #       leave the file mid-edit for another to inherit)
+    #   (b) an "implement" task immediately followed by its test task (the
+    #       test would run against a possibly-missing implementation)
+    # Chains are built from the FULL, unfiltered task list first; stride is
+    # then applied at the chain level (round-robin over whole chains) instead
+    # of the raw task index, so a chain always lands on exactly one worker.
+    MAX_CHAIN_LEN = 6  # cap to avoid giant prompts / one worker hoarding tasks
+
+    import re as _re2
+    def _primary_file(t: str) -> str | None:
+        m = _re2.search(r'\b(lib/[\w/]+\.dart|test/[\w/]+\.dart)\b', t)
+        return m.group(1) if m else None
+
+    indexed_tasks_all = [(i + 1, t) for i, t in enumerate(tasks)]
+
+    chains: list[list[tuple[int, str]]] = []
+    i = 0
+    while i < len(indexed_tasks_all):
+        idx, task_line = indexed_tasks_all[i]
+        pf = _primary_file(task_line)
+        chain = [(idx, task_line)]
+        j = i + 1
+        while j < len(indexed_tasks_all) and j - i < MAX_CHAIN_LEN:
+            nidx, ntask = indexed_tasks_all[j]
+            same_file  = pf is not None and _primary_file(ntask) == pf
+            is_test_of = _is_test_task(task_text(ntask)) and not _is_test_task(task_text(indexed_tasks_all[j - 1][1]))
+            if same_file or is_test_of:
+                chain.append((nidx, ntask))
+                j += 1
+            else:
+                break
+        chains.append(chain)
+        i = j
+
     if args.stride > 1:
-        indexed_tasks = [it for it in indexed_tasks if (it[0] - 1) % args.stride == args.worker_id]
+        chains = [c for k, c in enumerate(chains) if k % args.stride == args.worker_id]
+
+    # Flatten assigned chains back into an ordered task list (same relative
+    # order as ROADMAP.md, restricted to this worker's chains).
+    indexed_tasks = [item for chain in chains for item in chain]
+
+    # NOTE (2026-07-10): same-file tasks used to be merged here into one giant
+    # "[COMPOUND — implement ALL N sub-tasks...]" LLM call. Removed — bundling
+    # N small tasks into one oversized generation call directly fights the
+    # "smallest possible task" principle, and empirically made tasks HARDER
+    # to complete, not safer (a 5-subtask compound call on one file failed
+    # across all 4 tiers for over an hour, when 5 separate small edits would
+    # each have had a real chance). Same-file tasks stay small and separate;
+    # chain-building above still keeps them on one worker, in order, and the
+    # same-file cascade guard below (extending the old test-dependency block)
+    # replaces the safety compound-merging used to provide.
+    _compound_extras: dict[str, list[str]] = {}  # kept empty; mark_done() checks it unconditionally
 
     if not indexed_tasks:
         print(f"{YELLOW}No unchecked tasks found anywhere in ROADMAP.md.{RESET}")
@@ -2537,7 +3383,9 @@ def main():
     print(f"{BOLD}  🤖  Autonomous work loop — {today_str}{worker_label}{RESET}")
     if mode_label:
         print(f"{BOLD}{mode_label}{RESET}")
-    print(f"{BOLD}  {len(indexed_tasks)} tasks · {tier_range} · up to {PHASE_MAX_ATTEMPTS} attempts/tier · YOLO{RESET}")
+    print(f"{BOLD}  {len(indexed_tasks)} tasks · {tier_range} · "
+          f"{PHASE_MAX_ATTEMPTS}/{TIER2_MAX_ATTEMPTS}/{TIER4_MAX_ATTEMPTS} attempts "
+          f"(tier1/mid/last) · YOLO{RESET}")
     print(f"{BOLD}{'━'*56}{RESET}\n")
 
     # ── Verify Model Availability ─────────────────────────────────────────────
@@ -2546,7 +3394,10 @@ def main():
         print(f"  {DIM}Verifying model availability...{RESET}")
         # Only check models that will actually be used in this run
         active_tiers = TIER_MODELS[run_start_tier_idx:(run_max_tier_idx or len(TIER_MODELS))]
-        for m in list(dict.fromkeys(active_tiers + [PLANNER_MODEL, ADVISOR_MODEL])):
+        required_models = active_tiers + [PLANNER_MODEL, ADVISOR_MODEL]
+        if RACE_ENABLED and run_start_tier_idx == 0:
+            required_models.append(RACE_MODEL)  # racing tier1 vs RACE_MODEL — must be pulled too
+        for m in list(dict.fromkeys(required_models)):
             ensure_model_exists(m)
         print(f"  {DIM}All models ready.{RESET}\n")
 
@@ -2564,10 +3415,53 @@ def main():
     skipped_tasks: list[tuple[int, str]] = []              # (task_idx, task_text)
     retry_queue:   list[tuple[int, str, str]] = []         # (task_idx, task_line, task_text)
 
-    # Dependency tracking: when an implement task fails/skips, any immediately
-    # following test task is auto-blocked and queued for the retry pass instead
-    # of running against a broken or missing implementation.
-    last_incomplete: int | None = None   # task index of last failed/skipped task
+    # Dependency tracking: when a task fails/skips, its immediate successor is
+    # auto-blocked and queued for the retry pass instead of running against a
+    # broken/missing implementation, in two cases:
+    #   (a) the successor is a test task (would test something that isn't there)
+    #   (b) the successor targets the SAME primary file (would inherit whatever
+    #       broken state the failed task left the file in)
+    # (b) replaces the old compound-merge behavior — same-file tasks stay
+    # small and separate now, but still can't cascade a failure forward.
+    last_incomplete: int | None = None       # task index of last failed/skipped task
+    last_incomplete_file: str | None = None  # its primary file, if any
+
+    # ── Go dependency gating (2026-07-15) ─────────────────────────────────────
+    # 2026-07-15's run burned ~20 attempts on level/seed.go hallucinating
+    # Level-struct fields — because level/level.go (which CREATES type Level)
+    # had failed minutes earlier. A task whose prerequisite failed this run
+    # cannot possibly compile; detect it and send it straight to the retry
+    # pass. Two conservative rules:
+    #   1. types — task A says "implement types X, Y"; a later task whose text
+    #      mentions X or Y depends on A.
+    #   2. package qualifier — task text using `pkg.Ident` (e.g. `game.Tick`)
+    #      depends on earlier tasks targeting files under pkg/.
+    go_failed_targets: set[str] = set()
+    go_task_deps: dict[int, list[tuple[int, str]]] = {}
+    if PROJECT_LANGUAGE == "go":
+        _go_tgt_re = re.compile(r'\bIn ([\w./-]+\.go):')
+        _decl_re = re.compile(r'implement types?\s+([A-Z]\w*(?:\s*,\s*[A-Z]\w*)*)')
+        _entries = []
+        for _ti, _tl in indexed_tasks:
+            _tt = task_text(_tl)
+            _m = _go_tgt_re.search(_tt)
+            _dm = _decl_re.search(_tt)
+            _decls = {d.strip() for d in _dm.group(1).split(",")} if _dm else set()
+            _entries.append((_ti, _m.group(1) if _m else None, _decls, _tt))
+        for _i, (_ti, _tgt, _, _tt) in enumerate(_entries):
+            _deps = []
+            _pkg_refs = set(re.findall(r'\b([a-z]\w+)\.[A-Z]\w*', _tt)) - {"sim"}
+            for _pi, _ptgt, _pdecls, _ptt in _entries[:_i]:
+                if not _ptgt:
+                    continue
+                if any(re.search(r'\b' + re.escape(d) + r'\b', _tt) for d in _pdecls):
+                    _deps.append((_pi, _ptgt))
+                    continue
+                _ppkg = _ptgt.split("/")[0]
+                if _ppkg in _pkg_refs and not (_tgt or "").startswith(_ppkg + "/"):
+                    _deps.append((_pi, _ptgt))
+            if _deps:
+                go_task_deps[_ti] = _deps
 
     for loop_idx, (task_idx, task_line) in enumerate(indexed_tasks, 1):
         if loop_idx < args.start_at:
@@ -2594,20 +3488,46 @@ def main():
             print(f"  {DIM}(dry-run){RESET}")
             continue
 
-        # Dependency block: if the immediately preceding task did not complete
-        # and this is a test task, skip it now and retry later (after the
-        # implement task has had a chance to succeed in the retry pass).
-        if _is_test_task(task) and last_incomplete is not None and task_idx == last_incomplete + 1:
+        # Go dependency gating: a prerequisite task failed this run, so this
+        # task cannot compile no matter what the model writes — don't burn
+        # attempts proving it. Straight to the retry pass (where the
+        # prerequisite retries first, in queue order).
+        _unmet = [(di, dt) for di, dt in go_task_deps.get(task_idx, [])
+                  if dt in go_failed_targets]
+        if _unmet:
+            _di, _dt = _unmet[0]
+            print(f"  {YELLOW}⛓  Dependency not met: task {_di} ({_dt}) failed this run "
+                  f"— deferred to retry pass{RESET}")
+            skipped_count += 1
+            skipped_tasks.append((task_idx, task))
+            retry_queue.append((task_idx, task_line, task))
+            last_incomplete = task_idx
+            last_incomplete_file = _primary_file(task_line)
+            _ledger(project_root, task_idx, "-", "task_dep_blocked", _dt)
+            continue
+
+        # Dependency block: defer this task if the immediately preceding task
+        # didn't complete AND either (a) this is its test, or (b) this targets
+        # the same file (would inherit whatever broken state was left behind).
+        is_immediate_successor = last_incomplete is not None and task_idx == last_incomplete + 1
+        same_file_as_failure = (
+            is_immediate_successor
+            and last_incomplete_file is not None
+            and _primary_file(task_line) == last_incomplete_file
+        )
+        if is_immediate_successor and (_is_test_task(task) or same_file_as_failure):
+            reason = "same file as the failed task" if same_file_as_failure else "test of a task that didn't complete"
             print(
-                f"  {YELLOW}⏭  Dependency-blocked: task {last_incomplete} did not complete — "
-                f"test task deferred to retry pass{RESET}"
+                f"  {YELLOW}⏭  Dependency-blocked: task {last_incomplete} did not complete "
+                f"({reason}) — deferred to retry pass{RESET}"
             )
             with open(log_file, "a") as f:
-                f.write(f"Dependency-blocked: preceding task {last_incomplete} failed/skipped.\n")
+                f.write(f"Dependency-blocked: preceding task {last_incomplete} failed/skipped ({reason}).\n")
             skipped_count += 1
             skipped_tasks.append((task_idx, task))
             retry_queue.append((task_idx, task_line, task))
             last_incomplete = task_idx   # chain: mark this task as incomplete too
+            last_incomplete_file = _primary_file(task_line)
             continue
 
         branch = _branch_start(project_root, task_idx, task)
@@ -2624,10 +3544,23 @@ def main():
             if branch:
                 _branch_merge(project_root, branch, task_idx, task)
                 print(f"  {DIM}⎇  Merged {branch} → main{RESET}")
-            mark_done(task_line)
-            print(f"  {GREEN}✓ Marked done in ROADMAP.md{RESET}")
+            # For compound tasks, mark all constituent task lines done.
+            # For regular tasks, _compound_extras won't have an entry and mark_done
+            # is called once on task_line as before.
+            extra_lines = _compound_extras.get(task, [])
+            if extra_lines:
+                for orig_line in extra_lines:
+                    mark_done(orig_line)
+                print(f"  {GREEN}✓ Marked {len(extra_lines)} compound sub-tasks done in ROADMAP.md{RESET}")
+            else:
+                mark_done(task_line)
+                print(f"  {GREEN}✓ Marked done in ROADMAP.md{RESET}")
             passed_count += 1
-            last_incomplete = None   # successful task resets the chain
+            _tm = re.search(r'\bIn ([\w./-]+\.go):', task)
+            if _tm:
+                go_failed_targets.discard(_tm.group(1))
+            last_incomplete = None        # successful task resets the chain
+            last_incomplete_file = None
         elif result == "skipped":
             if branch:
                 _branch_abandon(project_root, branch)
@@ -2640,6 +3573,10 @@ def main():
             skipped_tasks.append((task_idx, task))
             retry_queue.append((task_idx, task_line, task))
             last_incomplete = task_idx
+            last_incomplete_file = _primary_file(task_line)
+            _tm = re.search(r'\bIn ([\w./-]+\.go):', task)
+            if _tm:
+                go_failed_targets.add(_tm.group(1))
             print(f"  {YELLOW}⏭  Skipped — queued for retry pass{RESET}")
         else:
             if branch:
@@ -2647,6 +3584,10 @@ def main():
             failed_count += 1
             retry_queue.append((task_idx, task_line, task))
             last_incomplete = task_idx
+            last_incomplete_file = _primary_file(task_line)
+            _tm = re.search(r'\bIn ([\w./-]+\.go):', task)
+            if _tm:
+                go_failed_targets.add(_tm.group(1))
             print(f"  {YELLOW}Continuing to next task...{RESET}")
 
     # ── End-of-run summary ────────────────────────────────────────────────────
@@ -2681,17 +3622,33 @@ def main():
             with open(log_file, "a") as lf:
                 lf.write(f"\n## Retry Task {task_idx}: {task}\n")
 
+            # 2026-07-14: the retry pass MUST use the same branch isolation as
+            # the first pass. Without it, successful retries were marked done
+            # while their files sat uncommitted in the working tree, and failed
+            # retries left broken files behind that made `go vet ./...` fail
+            # for every subsequent task (identical cascading error blocks).
+            branch = _branch_start(project_root, task_idx, task)
+            if branch:
+                print(f"  {DIM}⎇  Branch: {branch}{RESET}")
+
             result = run_task(task, project_root, log_file,
                               task_idx=task_idx, budget_s=retry_budget,
                               skip_advisor=getattr(args, 'no_advisor', False))
             if result is True:
+                if branch:
+                    _branch_merge(project_root, branch, task_idx, task)
+                    print(f"  {DIM}⎇  Merged {branch} → main{RESET}")
                 mark_done(task_line)
                 print(f"  {GREEN}✓ Marked done in ROADMAP.md{RESET}")
                 retry_passed += 1
             elif result == "skipped":
+                if branch:
+                    _branch_abandon(project_root, branch)
                 retry_skipped += 1
                 print(f"  {YELLOW}⏭  Still skipped after retry{RESET}")
             else:
+                if branch:
+                    _branch_abandon(project_root, branch)
                 retry_failed += 1
                 print(f"  {RED}✗ Still failing after retry{RESET}")
 

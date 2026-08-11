@@ -481,6 +481,36 @@ def all_source_files(project_root: str) -> list[str]:
     return sorted(result)
 
 
+_SRC_ROOTS = ("lib/", "src/", "internal/", "pkg/")
+
+
+def _unplanned_new_files(written: list[str], task: str, project_root: str) -> list[str]:
+    """New source files the task text never names.
+
+    2026-08-11: task 4 needed applyMove/applyLightning/... which already
+    existed in moveRules.dart, spellLightning.dart and siblings. Instead of
+    importing them the model invented lib/sim/apply.dart holding twelve
+    `=> []` stubs. Its gate was `flutter analyze lib`, and stubs analyze
+    perfectly — so it merged green and silently broke the sim for eight
+    tasks, surfacing only when a conformance gate finally ran.
+
+    A file the roadmap never mentions is nearly always this: a fake local
+    definition standing in for a real one the model did not look for.
+    """
+    suspects = []
+    for rel in written:
+        if not rel.startswith(_SRC_ROOTS):
+            continue
+        if os.path.basename(rel) in task or rel in task:
+            continue
+        tracked = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", rel],
+            cwd=project_root, capture_output=True, text=True)
+        if tracked.returncode != 0:
+            suspects.append(rel)
+    return suspects
+
+
 def _heuristic_files(task: str, files: list[str]) -> list[str]:
     """Keyword-based fallback when the planner model is unavailable."""
     keywords = re.findall(r"[A-Za-z][a-z]+(?:[A-Z][a-z]+)*|[a-z_]{4,}", task)
@@ -2906,6 +2936,24 @@ def run_task(task: str, project_root: str, log_file: str,
         written, pattern_errs = write_changes(changes, project_root, test_only=is_test,
                                               required_file=_go_target)
         last_written = written
+
+        _unplanned = _unplanned_new_files(written, task, project_root)
+        if _unplanned:
+            pattern_errs = list(pattern_errs) + [
+                "INVENTED FILE [" + ", ".join(_unplanned) + "]: this task did not "
+                "ask you to create that file, and it does not exist in the project. "
+                "You are almost certainly writing a placeholder for something that "
+                "ALREADY EXISTS elsewhere — find the real definition and import it. "
+                "Write ONLY the file the task names. Never create a stub, an empty "
+                "function body, or a `=> []` / `return null` placeholder to make the "
+                "build pass; a stub compiles and is still wrong."
+            ]
+            for _p in _unplanned:
+                try:
+                    os.remove(os.path.join(project_root, _p))
+                except OSError:
+                    pass
+            print(f"  {RED}(blocked invented file: {', '.join(_unplanned)}){RESET}")
 
         if pattern_errs:
             errors = pattern_errs + ("\n\n" + errors if errors else "")

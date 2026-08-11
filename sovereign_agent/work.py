@@ -64,9 +64,9 @@ OLLAMA_URL      = os.getenv("LOCAL_MODEL_URL",  "http://localhost:11434")
 # The branch helpers below MUST use this, not a hardcoded 'main', or work merges
 # to a divergent 'main' while the real integration branch is left behind.
 MAIN_BRANCH     = os.getenv("MAIN_BRANCH", "main")
-TIER1_MODEL     = os.getenv("TIER1_MODEL",      "qwen2.5-coder:7b-instruct-q4_K_M")  # 7B dense  — fast, strong on Dart
-TIER2_MODEL     = os.getenv("TIER2_MODEL",      "gemma4:26b")                          # 26B MoE (4B active) — quick second opinion
-TIER3_MODEL     = os.getenv("TIER3_MODEL",      "qwen3-coder:30b")                    # 30B dense — Qwen3, spatial reasoning
+TIER1_MODEL     = os.getenv("TIER1_MODEL",      "qwen2.5-coder:32b")  # 7B dense  — fast, strong on Dart
+TIER2_MODEL     = os.getenv("TIER2_MODEL",      "qwen2.5-coder:32b")                          # 26B MoE (4B active) — quick second opinion
+TIER3_MODEL     = os.getenv("TIER3_MODEL",      "qwen2.5-coder:32b")                    # 30B dense — Qwen3, spatial reasoning
 TIER4_MODEL     = os.getenv("TIER4_MODEL",      "qwen2.5-coder:32b")                  # 32B dense — heavy hitter before Claude
 TIER_MODELS     = [TIER1_MODEL, TIER2_MODEL, TIER3_MODEL, TIER4_MODEL]   # Claude handles final escalation
 
@@ -128,12 +128,12 @@ CLAUDE_ENABLED      = os.getenv("CLAUDE_ENABLED", "0") == "1"   # opt-in only; s
 # (4.7GB) is the SMALLEST model in the whole lineup, smaller than
 # gemma4:12b-mlx (7.7GB) which was getting the bigger context window.
 MODEL_CTX: dict[str, int] = {
-    TIER1_MODEL:   int(os.getenv("CTX_TIER1",   "65536")),  # 7B dense  — smallest model, most headroom
-    TIER2_MODEL:   int(os.getenv("CTX_TIER2",   "32768")),  # 26B MoE   — DOUBLED 2026-07-11: same
+    TIER1_MODEL:   int(os.getenv("CTX_TIER1",   "24576")),  # 7B dense  — smallest model, most headroom
+    TIER2_MODEL:   int(os.getenv("CTX_TIER2",   "24576")),  # 26B MoE   — DOUBLED 2026-07-11: same
     # silent-overflow suspect as tier4 (fixed below) — tier2/3 "no output" failures
     # were untraceable until the trace-logging gap was closed this session; real
     # prompts run in the same 14-16k token range that overflowed tier4 at 16384.
-    TIER3_MODEL:   int(os.getenv("CTX_TIER3",   "32768")),  # 35B MoE   — DOUBLED 2026-07-11, same reasoning
+    TIER3_MODEL:   int(os.getenv("CTX_TIER3",   "24576")),  # 35B MoE   — DOUBLED 2026-07-11, same reasoning
     # 2026-07-10: doubled 16384→32768 — this was the "last resort" tier failing
     # on every single escalated task in a real run, hitting "prompt too large"
     # even after trimming to 3 files (real prompts were running 14.5k-15.7k
@@ -142,21 +142,21 @@ MODEL_CTX: dict[str, int] = {
     # the ceiling really was sized tight on purpose, so if this causes OOM
     # thrashing it may need to come back down and get its file-trimming logic
     # tightened instead.
-    TIER4_MODEL:   int(os.getenv("CTX_TIER4",   "32768")),  # 32B dense
-    PLANNER_MODEL: int(os.getenv("CTX_PLANNER", "65536")),  # same model as TIER1_MODEL — see note above
-    ADVISOR_MODEL: int(os.getenv("CTX_ADVISOR", "65536")),  # same model as TIER1_MODEL — see note above
+    TIER4_MODEL:   int(os.getenv("CTX_TIER4",   "24576")),  # 32B dense
+    PLANNER_MODEL: int(os.getenv("CTX_PLANNER", "24576")),  # same model as TIER1_MODEL — see note above
+    ADVISOR_MODEL: int(os.getenv("CTX_ADVISOR", "24576")),  # same model as TIER1_MODEL — see note above
     # RACE_MODEL wasn't in this table before (2026-07-10) — it silently fell through
     # to the OLLAMA_CONTEXT_LENGTH default of 16384, which caused it to truncate on
     # ~31% of race attempts (compound/multi-file prompts ran 91-107% of that limit).
     # Now matches TIER1_MODEL's 65536 so the two raced models get equal footing.
-    RACE_MODEL:    int(os.getenv("CTX_RACE",    "65536")),
+    RACE_MODEL:    int(os.getenv("CTX_RACE",    "24576")),
 }
 
 # The TIER1/PLANNER/ADVISOR collision above is silent by design (a dict can only
 # hold one value per key) — this check makes it loud instead, in case someone
 # sets the env vars inconsistently expecting three independent values.
 if len({TIER1_MODEL, PLANNER_MODEL, ADVISOR_MODEL}) == 1:
-    _ctx_vals = {os.getenv("CTX_TIER1", "65536"), os.getenv("CTX_PLANNER", "65536"), os.getenv("CTX_ADVISOR", "65536")}
+    _ctx_vals = {os.getenv("CTX_TIER1", "24576"), os.getenv("CTX_PLANNER", "24576"), os.getenv("CTX_ADVISOR", "24576")}
     if len(_ctx_vals) > 1:
         print(f"⚠  CTX_TIER1/CTX_PLANNER/CTX_ADVISOR are set to different values "
               f"({_ctx_vals}) but TIER1_MODEL/PLANNER_MODEL/ADVISOR_MODEL are the "
@@ -352,7 +352,7 @@ def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
     # Estimate token count before sending so we never pay for a full inference
     # round-trip on a prompt Ollama will just silently truncate.
     # Code averages ~3.5 chars/token for BPE tokenisers; use 3 to be conservative.
-    ctx_limit = MODEL_CTX.get(model, int(os.getenv("OLLAMA_CONTEXT_LENGTH", "16384")))
+    ctx_limit = MODEL_CTX.get(model, int(os.getenv("OLLAMA_CONTEXT_LENGTH", "24576")))
     estimated_tokens = (len(system) + len(user)) // 3
     if estimated_tokens >= int(ctx_limit * 0.85):
         raise PromptTooLargeError(estimated_tokens, ctx_limit)

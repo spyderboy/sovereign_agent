@@ -1,0 +1,13 @@
+#!/bin/bash
+# Wrapper — GalaxicanGo run: Gemma-4 tiers + Go toolchain env, then work.py.
+# Usage: ./work_go [work.py flags]        e.g.  ./work_go --quick
+DIR="$(cd "$(dirname "$0")" && pwd)"
+
+if [ ! -d /Volumes/Lexar/golang/go/bin ]; then
+  echo "✗ Lexar drive not mounted (no /Volumes/Lexar/golang) — mount it first." >&2
+  exit 1
+fi
+
+source "$DIR/galaxicango.env"
+source "$DIR/.venv/bin/activate"
+python "$DIR/work.py" --project ~/Code/GalaxicanGo --features-only "$@"

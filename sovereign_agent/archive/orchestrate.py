@@ -273,6 +273,17 @@ def main():
             save_task_state(db, run_id, t["id"], {"status": PENDING})
         print(f"✓ {len(tasks)} tasks reset.")
 
+    # ── On fresh start, reclaim stale tier1_running tasks ─────────────────────
+    # If the orchestrator just launched, no workers are alive — any task left
+    # in tier1_running from a prior session will never report back. Reset them
+    # to pending so dispatch_ready can re-fire them.
+    stale = [tid for tid, s in state.items() if s.get("status") == TIER1_RUNNING]
+    if stale and not args.reset:
+        print(f"\n→ Reclaiming {len(stale)} stale tier1_running tasks → pending...")
+        for tid in stale:
+            state[tid] = {**state[tid], "status": PENDING}
+            save_task_state(db, run_id, tid, {"status": PENDING})
+
     # ── Ensure Pub/Sub infrastructure exists ──────────────────────────────────
     print("\n→ Ensuring Pub/Sub topics and subscriptions...")
     ensure_topic(publisher, GCP_PROJECT, TOPIC_TIER1,   args.dry_run)

@@ -1,11 +1,22 @@
 """
 qwen_advisor.py — Fast local error classifier and rule drafter.
 
-Uses qwen3.5:4b-nvfp4 (via Ollama) to:
+Uses ADVISOR_MODEL (via Ollama) to:
   1. Classify flutter analyze errors by category
-  2. Generate targeted, actionable hints for the 35B's next attempt
+  2. Generate targeted, actionable hints for the next attempt
   3. Draft new .roorules entries for unknown error patterns
   4. Log everything to logs/errors.jsonl and logs/rule_drafts.jsonl
+
+ADVISOR_MODEL defaults to the same qwen2.5-coder:7b-instruct-q4_K_M weights as
+TIER1_MODEL — not the smaller ~4B model this file used to describe. That's a
+deliberate choice, not just a fallback: reusing Tier 1's weights means an
+advisor call during a Tier 1 retry costs nothing extra, since the model is
+already resident in VRAM. The catch is that any advisor call during a
+Tier 2-4 retry (gemma4:26b / qwen3.6:35b / qwen2.5-coder:32b) would evict that
+much larger model from GPU and force a ~20-30s reload afterward — so as of
+2026-07-10, work.py only calls the advisor for Tier 1 attempts (tier_idx == 0)
+and skips it entirely for Tier 2-4, where the eviction cost isn't worth an
+enriched hint.
 
 This runs after autofix.py has handled mechanical issues, so it only sees
 genuinely novel errors that require semantic understanding.

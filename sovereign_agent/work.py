@@ -59,6 +59,11 @@ class PromptTooLargeError(Exception):
 
 
 OLLAMA_URL      = os.getenv("LOCAL_MODEL_URL",  "http://localhost:11434")
+# Integration branch. Tasks fork from and merge back to this. Override for
+# projects whose integration branch isn't 'main' (e.g. galaxican uses 'master').
+# The branch helpers below MUST use this, not a hardcoded 'main', or work merges
+# to a divergent 'main' while the real integration branch is left behind.
+MAIN_BRANCH     = os.getenv("MAIN_BRANCH", "main")
 TIER1_MODEL     = os.getenv("TIER1_MODEL",      "qwen2.5-coder:7b-instruct-q4_K_M")  # 7B dense  — fast, strong on Dart
 TIER2_MODEL     = os.getenv("TIER2_MODEL",      "gemma4:26b")                          # 26B MoE (4B active) — quick second opinion
 TIER3_MODEL     = os.getenv("TIER3_MODEL",      "qwen3-coder:30b")                    # 30B dense — Qwen3, spatial reasoning
@@ -235,32 +240,45 @@ RESET  = "\033[0m"
 
 # ─── Ollama ───────────────────────────────────────────────────────────────────
 
-def ensure_model_exists(model: str):
-    """Check if model exists in Ollama; pull if missing."""
+def _ollama_installed_tags() -> list[str]:
+    """Return the list of model tags Ollama currently has, or raise on failure.
+
+    Raised exceptions are handled by preflight_models() so it can tell an
+    Ollama-not-running error apart from a merely-missing model.
+    """
+    resp = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
+    resp.raise_for_status()
+    return [m["name"] for m in resp.json().get("models", [])]
+
+
+def preflight_models(required: list[str]) -> None:
+    """Verify Ollama is up and every required model tag is already pulled.
+
+    Fails fast with actionable guidance instead of silently streaming a
+    multi-GB pull mid-setup or dying with an opaque connection error:
+      • Ollama unreachable  → tell the user to start it (`ollama serve`).
+      • Model tag missing    → print the exact `ollama pull <tag>` command.
+    Auto-pulling was removed 2026-07-17: an unattended 18GB download at run
+    start was surprising, and a missing tag is nearly always a typo'd model
+    name (e.g. qwen3.6:35b vs qwen3-coder:30b) that a pull would only mask.
+    """
     try:
-        resp = requests.get(f"{OLLAMA_URL}/api/tags")
-        if resp.status_code == 200:
-            models = [m["name"] for m in resp.json().get("models", [])]
-            # Handle both exact matches and version-less matches if appropriate
-            if model in models or f"{model}:latest" in models:
-                return
-        
-        print(f"  {YELLOW}Model {model} not found locally. Pulling...{RESET}")
-        with requests.post(f"{OLLAMA_URL}/api/pull", json={"name": model}, stream=True) as r:
-            r.raise_for_status()
-            for line in r.iter_lines():
-                if line:
-                    body = json.loads(line)
-                    if "status" in body:
-                        status = body["status"]
-                        if "completed" in body and "total" in body:
-                            pct = (body["completed"] / body["total"]) * 100
-                            print(f"\r  {DIM}Pulling {model}: {status} {pct:.1f}%{RESET}", end="", flush=True)
-                        else:
-                            print(f"\r  {DIM}Pulling {model}: {status}{RESET}", end="", flush=True)
-        print(f"\n  {GREEN}✓ Model {model} pulled successfully.{RESET}")
+        installed = _ollama_installed_tags()
     except Exception as e:
-        print(f"\n  {RED}⚠ Failed to pull model {model}: {e}{RESET}")
+        print(f"  {RED}✗ Ollama is not reachable at {OLLAMA_URL}: {e}{RESET}")
+        print(f"    Start it first:  ollama serve")
+        sys.exit(1)
+
+    def _present(tag: str) -> bool:
+        return tag in installed or f"{tag}:latest" in installed
+
+    missing = [m for m in dict.fromkeys(required) if not _present(m)]
+    if missing:
+        print(f"  {RED}✗ Required model(s) not pulled in Ollama:{RESET}")
+        for m in missing:
+            print(f"      ollama pull {m}")
+        print(f"    Installed tags: {', '.join(installed) or '(none)'}")
+        print(f"    (Tag must match `ollama list` exactly.)")
         sys.exit(1)
 
 
@@ -517,51 +535,11 @@ def _commit_roadmap_mark(task_line: str, attempts: int = 4) -> None:
           f"next forced checkout: {(r.stdout + r.stderr).strip()[:200]}{RESET}")
 
 
-def _sync_task_graph_from_roadmap(project_root: str) -> None:
-    """Regenerate task_graph.json from ROADMAP.md to keep them in sync.
-
-    Runs at the start of each work session so task_graph.json always reflects
-    the current ROADMAP state (completed/pending checkboxes).
-    """
-    roadmap_path = os.path.join(project_root, ROADMAP_PATH)
-    graph_path = os.path.join(project_root, "task_graph.json")
-
-    if not os.path.exists(roadmap_path):
-        return
-
-    tasks = []
-    task_id = 0
-
-    with open(roadmap_path) as f:
-        in_phase = None
-        for line in f:
-            if line.startswith("## Phase "):
-                phase_match = re.search(r"Phase p(\d+)", line)
-                if phase_match:
-                    in_phase = f"p{phase_match.group(1)}"
-            elif line.startswith("- ["):
-                is_done = "[x]" in line
-                match = re.search(r"\] (In .+?) — done when:", line)
-                if match and in_phase:
-                    desc = match.group(1).strip()
-                    tasks.append({
-                        "id": task_id,
-                        "phase": in_phase,
-                        "short": desc[:70] + "..." if len(desc) > 70 else desc,
-                        "description": desc,
-                        "status": "done" if is_done else "pending",
-                        "dependencies": [],
-                        "file": None,
-                    })
-                    task_id += 1
-
-    graph = {
-        "tasks": tasks,
-        "metadata": {"generated": date.today().isoformat(), "total": len(tasks)},
-    }
-
-    with open(graph_path, "w") as f:
-        json.dump(graph, f, indent=2)
+# NOTE: task_graph.json is NOT regenerated at run time. work.py drives off
+# ROADMAP.md via parse_all_tasks(); task_graph.json is the durable DAG record
+# maintained by make_graph.py / plan_week.py only. A prior auto-sync helper
+# lived here and was removed 2026-07-17 — regenerating the graph mid-run
+# clobbered completed-phase task state and desynced it from ROADMAP.
 
 
 # ─── File discovery ───────────────────────────────────────────────────────────
@@ -702,8 +680,11 @@ LOCKED_FILES: _LockedSet = _LockedSet()
 import re as _re
 # ─── Bad patterns & error hints ────────────────────────────────────────────────
 # Extracted to hints.py — import from there so each can be edited independently.
-from hints import BAD_PATTERNS, ERROR_HINTS  # noqa: E402
+import hints  # noqa: E402  — pack loader; see hints.py CONTRACT
+from hints import BAD_PATTERNS, ERROR_HINTS  # noqa: E402  (mutated in place)
 import grounding  # noqa: E402  — identifier whitelist gate for Go projects
+import grounders  # noqa: E402  — per-language grounding gate registry
+import prompt_artifacts  # noqa: E402  — grounding gate for model-written prompt text
 
 
 def apply_error_hints(error_output: str) -> str:
@@ -927,6 +908,61 @@ def _target_ts_file(task: str) -> str | None:
     """Extract the target .ts/.tsx path a task names: 'In src/sim/foo.ts: ...'."""
     m = re.search(r'\bIn ([\w./-]+\.tsx?):', task)
     return m.group(1) if m else None
+
+
+def _module_exists(base_no_ext: str, project_root: str) -> bool:
+    """True if a project module resolves to a real file (.ts/.tsx/.json/index)."""
+    for cand in (base_no_ext + ".ts", base_no_ext + ".tsx", base_no_ext + ".json",
+                 os.path.join(base_no_ext, "index.ts"),
+                 os.path.join(base_no_ext, "index.tsx")):
+        if os.path.exists(os.path.join(project_root, cand)):
+            return True
+    return False
+
+
+def _missing_local_deps(task: str, project_root: str) -> list[str]:
+    """Project source files a task says it depends on that do NOT exist yet.
+
+    A composition/integration task that imports a sibling module which hasn't
+    landed can never pass — the worker just hallucinates the missing symbol.
+    Rather than burn every attempt, the caller defers such a task to the retry
+    pass (returns "skipped") so its dependency has a chance to land first.
+
+    Only counts EXPLICIT project paths written in the task text ("src/render/
+    useGameLoop", "src/sim/lasso.ts") and quoted relative imports ("../sim/x").
+    Never flags the task's own target file, node_modules, or framework pkgs, so
+    a task with no named-but-missing dependency is never falsely deferred.
+    """
+    target = _target_ts_file(task)
+    target_dir = os.path.dirname(target) if target else ""
+    target_no_ext = re.sub(r'\.tsx?$', '', target) if target else None
+
+    candidates: set[str] = set()
+
+    # Absolute-style project references: src/render/useGameLoop(.ts)?
+    for m in re.findall(r'\bsrc/[\w./-]+', task):
+        p = m.rstrip('.,;)')
+        if p.endswith((".md",)):        # spec docs handled elsewhere
+            continue
+        candidates.add(re.sub(r'\.tsx?$', '', p))
+
+    # Quoted relative imports resolved against the target's directory.
+    if target_dir:
+        for rel in re.findall(r"""['"](\.\.?/[\w./-]+)['"]""", task):
+            resolved = os.path.normpath(os.path.join(target_dir, rel))
+            candidates.add(re.sub(r'\.tsx?$', '', resolved))
+
+    missing = []
+    for c in sorted(candidates):
+        if target_no_ext and c == target_no_ext:
+            continue                    # never flag the file we're writing
+        if not c.startswith("src/"):
+            continue                    # only project sources
+        if os.path.isdir(os.path.join(project_root, c)):
+            continue                    # a directory mention, not a module import
+        if not _module_exists(c, project_root):
+            missing.append(c)
+    return missing
 
 
 def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
@@ -1190,27 +1226,40 @@ def write_changes(changes: dict[str, str], project_root: str,
                 content = str(content)
         # Only check Dart source files for bad patterns — not docs, XML, YAML, etc.
         import pathlib
-        violations = check_bad_patterns(rel_path, content) if pathlib.Path(rel_path).suffix in ('.dart', '.go') else []
-        # Grounding gate (Go): reject files that reference identifiers or
-        # import paths that exist nowhere in the project, the stdlib, or the
+        violations = check_bad_patterns(rel_path, content) if pathlib.Path(rel_path).suffix in ('.dart', '.go', '.ts', '.tsx', '.py', '.swift') else []
+        # Grounding gate: reject files that reference identifiers or import
+        # paths that exist nowhere in the project, its dependencies, or the
         # change-set itself. Catches hallucinated APIs (g.FindSquad, .IsIdle,
-        # invented vec2 packages) instantly, before gofmt/vet ever runs, and
-        # the rejection message (with did-you-mean suggestions) is fed back
-        # to the model on the next attempt — rejection IS the repair prompt.
-        if not violations and PROJECT_LANGUAGE == "go" and rel_path.endswith(".go"):
-            # Mechanical brace repair BEFORE the grounding check: models
-            # reliably drop 1-2 closing braces on deeply nested functions
-            # ("unexpected EOF, expected }") — append them rather than burn
-            # a whole attempt on a deterministic failure.
-            content, _added = grounding.balance_go_braces(content)
-            if _added:
-                print(f"  {DIM}(appended {_added} missing closing brace(s): {rel_path}){RESET}")
+        # package:your_app_name/...) instantly, before the compiler or analyzer
+        # ever runs, and the rejection message (with did-you-mean suggestions)
+        # is fed back to the model on the next attempt — rejection IS the
+        # repair prompt.
+        #
+        # Was hardcoded to Go until 2026-07-25. On the Dart project that left
+        # 73% of failing attempts (invented imports and symbols) entirely
+        # ungated. Language selection now lives in grounders.py; adding a
+        # language does not mean editing this function.
+        _grounder = grounders.for_language(PROJECT_LANGUAGE)
+        if not violations and _grounder.handles(rel_path):
+            # Deterministic repairs BEFORE the check: Go models reliably drop
+            # 1-2 closing braces on deeply nested functions ("unexpected EOF,
+            # expected }") — fix rather than burn a whole attempt.
+            content, _note = _grounder.repair(content)
+            if _note:
+                print(f"  {DIM}({_note}: {rel_path}){RESET}")
+            # Sibling files in the same change set are not on disk yet, but
+            # their declarations and paths are legitimate references.
             _extra_decl: set[str] = set()
+            _extra_files: set[str] = set()
             for _other, _oc in changes.items():
-                if _other != rel_path and _other.endswith(".go") and isinstance(_oc, str):
-                    _extra_decl |= grounding.declared_names(_oc)
-            violations = grounding.check_go_grounding(
-                rel_path, content, project_root, extra_declared=_extra_decl)
+                if _other == rel_path or not isinstance(_oc, str):
+                    continue
+                if _grounder.handles(_other):
+                    _extra_decl |= _grounder.declared_names(_oc)
+                _extra_files.add(_other)
+            violations = _grounder.check(
+                rel_path, content, project_root,
+                extra_declared=_extra_decl, extra_files=_extra_files)
         if violations:
             for v in violations:
                 print(f"  {RED}(blocked bad pattern: {v[:80]}){RESET}")
@@ -1336,7 +1385,7 @@ def _branch_start(project_root: str, task_idx: int, task: str) -> str | None:
     # 4's abandoned squad_move.go (with a hallucinated import of a package
     # that doesn't exist) kept failing go vet for tasks 8 and 10, neither of
     # which had anything to do with squad_move.go.
-    _git(["checkout", "-f", "main"], project_root)
+    _git(["checkout", "-f", MAIN_BRANCH], project_root)
     # -e logs: never clean the logs/ dir — tier2_queue.jsonl, velocity.jsonl,
     # the failure ledger etc. live there untracked; a bare `clean -fd` was
     # deleting the --deep queue between tasks (2026-07-13).
@@ -1349,10 +1398,10 @@ def _branch_start(project_root: str, task_idx: int, task: str) -> str | None:
 
 
 def _branch_merge(project_root: str, branch: str, task_idx: int, task: str) -> None:
-    """Commit the task changes, merge to main, delete the branch."""
+    """Commit the task changes, merge to the integration branch, delete the branch."""
     _git(["add", "-A"], project_root)
     _git(["commit", "-m", f"task {task_idx}: {task[:72]}"], project_root)
-    _git(["checkout", "-f", "main"], project_root)
+    _git(["checkout", "-f", MAIN_BRANCH], project_root)
     _git(["merge", "--no-ff", branch, "-m", f"Merge task-{task_idx}"], project_root)
     _git(["branch", "-D", branch], project_root)
 
@@ -1365,7 +1414,7 @@ def _branch_abandon(project_root: str, branch: str) -> None:
     task's working tree. See the note in _branch_start for why a plain
     (non-forced) checkout isn't enough here.
     """
-    _git(["checkout", "-f", "main"], project_root)
+    _git(["checkout", "-f", MAIN_BRANCH], project_root)
     _git(["clean", "-fd", "-e", "logs"], project_root)
     _git(["branch", "-D", branch], project_root)
 
@@ -1461,11 +1510,20 @@ def _load_project_config(project_root: str) -> dict:
         these is treated as locked.  Trailing slash is optional.
         e.g. ["android/", "ios/", "assets/"]
 
+    hint_packs : list[str]
+        Which hint_packs/ modules to load. Omit for the language defaults
+        (see hints.DEFAULT_PACKS). Available: dart_core, flutter_ui,
+        dart_riverpod, dart_flame, galaxican.
+
+    disable_bad_patterns : list[str]
+        Substrings; any pack entry whose PATTERN contains one is dropped.
+        The escape hatch that did not exist before 2026-07-25.
+
     additional_bad_patterns : list[{"pattern": str, "hint": str}]
-        Extra entries appended to BAD_PATTERNS after the built-in list.
+        Extra entries appended to BAD_PATTERNS after the packs load.
 
     additional_error_hints : list[{"pattern": str, "hint": str}]
-        Extra entries appended to ERROR_HINTS after the built-in list.
+        Extra entries appended to ERROR_HINTS after the packs load.
 
     Returns the raw parsed dict (or {} if file absent / malformed).
     Mutates LOCKED_FILES and extends BAD_PATTERNS / ERROR_HINTS in-place.
@@ -1495,6 +1553,25 @@ def _load_project_config(project_root: str) -> dict:
         prefixes = []
     for p in prefixes:
         LOCKED_FILES.add_prefix(p)
+
+    # ── Hint packs ────────────────────────────────────────────────────────────
+    # Must run BEFORE additional_* below: load_packs() replaces the contents of
+    # BAD_PATTERNS / ERROR_HINTS in place, so anything appended first would be
+    # wiped. Reads `language` directly rather than PROJECT_LANGUAGE, which is
+    # not assigned until further down this same function.
+    _pack_lang = str(cfg.get("language", "") or "").lower() or None
+    _packs = cfg.get("hint_packs")
+    if _packs is not None and not (isinstance(_packs, list)
+                                   and all(isinstance(p, str) for p in _packs)):
+        print(f"  {YELLOW}⚠  .sovereign_config.json: 'hint_packs' must be a "
+              f"list of strings — falling back to language defaults{RESET}")
+        _packs = None
+    _disable = cfg.get("disable_bad_patterns", [])
+    if not isinstance(_disable, list):
+        print(f"  {YELLOW}⚠  .sovereign_config.json: 'disable_bad_patterns' "
+              f"must be a list{RESET}")
+        _disable = []
+    hints.load_packs(language=_pack_lang, packs=_packs, disable=_disable)
 
     # ── Extra bad patterns ────────────────────────────────────────────────────
     extra_bad = cfg.get("additional_bad_patterns", [])
@@ -2140,20 +2217,96 @@ def _log_task_summary(
 
 FAILURE_LEDGER = "logs/failure_ledger.tsv"
 
+# Ordered most-specific first; first match wins.
+#
+# Until 2026-07-25 every pattern here was Go-flavoured (`undefined:`, `gofmt`,
+# `mismatched types`). Against Dart analyzer or tsc output none of them match,
+# so the real 76-row ledger from the Dart project categorised 76/76 as "other"
+# — the instrument that answers "are we still making the same mistakes?" read
+# zero on the project generating all the mistakes. Patterns below are grouped
+# by language but checked against all output: error text is distinctive enough
+# that cross-language false matches are not a practical concern, and a single
+# combined list keeps categories comparable across projects.
 _LEDGER_CATEGORIES = [
-    # (regex on error text, category)
+    # ── Agent-internal gates (language-independent) ──────────────────────
     (r"UNKNOWN IDENTIFIER|UNKNOWN IMPORT",                       "hallucinated_api"),
     (r"SCOPE VIOLATION|frozen",                                  "scope_violation"),
     (r"INVALID FORMAT|patch descriptor",                         "bad_output_format"),
-    (r"unexpected EOF|expected '\}'|expected declaration",       "truncated_output"),
-    (r"undefined:|has no field or method|undeclared name",       "undefined_identifier"),
-    (r"cannot use .* as .* value|type mismatch|mismatched types","type_error"),
-    (r"imported and not used|declared and not used",             "unused_decl"),
-    (r"--- FAIL|FAIL\t|test.*failed",                            "test_failure"),
-    (r"gofmt|not gofmt'd|file is not formatted",                 "format"),
+    (r"PREFLIGHT|pub get has not been run|node_modules is absent","environment"),
+
+    # ── Truncated / malformed output ─────────────────────────────────────
+    (r"unexpected EOF|expected '\}'|expected declaration|"
+     r"expected_token|missing_identifier|unexpected_token|"
+     r"expected_executable|missing_function_body|"
+     r"missing_function_parameters",                             "truncated_output"),
+
+    # ── Wrong-language syntax ────────────────────────────────────────────
+    # Models reach for another stack's grammar: Swift/Kotlin `as?` in Dart,
+    # keywords used as identifiers, abstract-member confusion. Distinct from
+    # truncation — the output is complete, just not this language.
+    (r"SYNTAX ERROR|can't be used as an identifier because it's a keyword|"
+     r"must have a method body because|"
+     r"expected_identifier_but_got_keyword|"
+     r"IndentationError|SyntaxError",                            "wrong_language_syntax"),
+
+    # ── Unresolved imports — the largest single class on Dart (146×) ─────
+    (r"uri_does_not_exist|Target of URI doesn't exist|"
+     r"URI_DOES_NOT_EXIST|Cannot find module|TS2307|"
+     r"ModuleNotFoundError|No module named",                     "unresolved_import"),
+
+    # ── Invented symbols ─────────────────────────────────────────────────
+    (r"undefined:|has no field or method|undeclared name|"
+     r"undefined_function|undefined_identifier|undefined_class|"
+     r"undefined_method|undefined_named_parameter|"
+     r"isn't defined for the type|isn't a function|"
+     r"TS2304|TS2339|TS2551|"
+     r"NameError|AttributeError",                                "undefined_identifier"),
+
+    # ── Type errors ──────────────────────────────────────────────────────
+    (r"cannot use .* as .* value|type mismatch|mismatched types|"
+     r"invalid_assignment|argument_type_not_assignable|"
+     r"non_type_as_type_argument|cast_to_non_type|extends_non_class|"
+     r"return_of_invalid_type|unchecked_use_of_nullable_value|"
+     r"TS2322|TS2345|TS2554|"
+     r"is not assignable to",                                    "type_error"),
+
+    # ── Override / signature contract ────────────────────────────────────
+    (r"override_on_non_overriding_member|"
+     r"super_formal_parameter_without_associated_positional|"
+     r"not_enough_positional_arguments|"
+     r"missing_default_value_for_parameter|"
+     r"missing_required_argument",                               "signature_error"),
+
+    # ── Unused declarations ──────────────────────────────────────────────
+    (r"imported and not used|declared and not used|"
+     r"unused_local_variable|unused_import|TS6133|"
+     r"is declared but its value is never read",                 "unused_decl"),
+
+    # ── Control-flow / async ─────────────────────────────────────────────
+    (r"body_might_complete_normally|await_in_wrong_context|"
+     r"missing_return|await is only valid",                      "control_flow"),
+
+    # ── Test failures ────────────────────────────────────────────────────
+    (r"--- FAIL|FAIL\t|test.*failed|Some tests failed|"
+     r"Expected:.*Actual:|AssertionError",                       "test_failure"),
+
+    # ── Formatting / lint ────────────────────────────────────────────────
+    (r"gofmt|not gofmt'd|file is not formatted|"
+     r"dart format|prettier|eslint|"
+     r"prefer_const|unnecessary_",                               "format"),
 ]
 
-def _ledger_category(error_text: str) -> str:
+# Events whose payload is the task description, not compiler output. Running
+# the category regexes over a task title produces confident nonsense — six of
+# the ten stubborn "other" rows in the 2026-07-13 ledger were budget events
+# being categorised on their own task text.
+_NON_ERROR_EVENTS = {"task_budget", "task_no_output", "task_skipped",
+                     "preflight_failed"}
+
+
+def _ledger_category(error_text: str, event: str = "") -> str:
+    if event in _NON_ERROR_EVENTS:
+        return "-"
     for pat, cat in _LEDGER_CATEGORIES:
         if _re.search(pat, error_text, _re.IGNORECASE):
             return cat
@@ -2166,7 +2319,7 @@ def _ledger(project_root: str, task_idx: int, model: str,
     try:
         path = os.path.join(project_root, FAILURE_LEDGER)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        cat = _ledger_category(error_text) if error_text else "-"
+        cat = _ledger_category(error_text, event) if error_text else "-"
         # first identifier-ish detail from the error, for grep-ability
         m = _re.search(r"`([^`]+)`|undefined: (\S+)|\"([^\"]+)\"", error_text)
         detail = next((g for g in (m.groups() if m else ()) if g), "")[:80]
@@ -2512,6 +2665,17 @@ def run_task(task: str, project_root: str, log_file: str,
     # Always-include context (config "context_always_include") plus any
     # spec/*.md files the task text references (e.g. "per spec/03-simulation.md §2").
     spec_refs = re.findall(r"\b[\w./-]*spec/[\w.-]+\.md\b", task)
+    # Reference-source context: a PORT task ("port from src/sim/setTarget.ts")
+    # names a file in ANOTHER repo the worker can't see, so it guesses APIs. If a
+    # mirror of that source exists under reference/ (e.g. reference/ts/src/sim/
+    # setTarget.ts), include it so the worker translates instead of inventing.
+    ref_refs: list[str] = []
+    for _m in re.findall(r"\b(?:src|lib)/[\w./-]+\.(?:ts|tsx|dart|go|py)\b", task):
+        for _base in ("reference/ts/", "reference/"):
+            _cand = _base + _m
+            if os.path.exists(os.path.join(project_root, _cand)):
+                ref_refs.append(_cand)
+                break
     # Deterministic package context (2026-07-15): the planner sometimes omits
     # the files defining the very types the task must use — game/tick.go
     # never saw ai/ai.go, so every tier died on `undefined: AI`. Force-include
@@ -2531,10 +2695,30 @@ def run_task(task: str, project_root: str, log_file: str,
             _fs = sorted(f for f in os.listdir(os.path.join(project_root, _d))
                          if f.endswith(".go"))[:8]
             pkg_ctx += [os.path.join(_d, f) for f in _fs]
-    forced = [f for f in PROJECT_ALWAYS_INCLUDE + spec_refs + pkg_ctx
+    forced = [f for f in PROJECT_ALWAYS_INCLUDE + spec_refs + ref_refs + pkg_ctx
               if os.path.exists(os.path.join(project_root, f))]
     rel_files = list(dict.fromkeys(forced + rel_files))
     print(f"  Files: {', '.join(rel_files) or '(none found)'}")
+
+    # ── Dependency-abort guard (TS projects) ──────────────────────────────────
+    # If the task names sibling project modules that don't exist yet, it can't
+    # pass — the worker would just hallucinate the missing symbol and burn every
+    # attempt (observed: GameCanvas run before useGameLoop.ts landed → "Cannot
+    # find name 'useGameLoop'"). Defer to the retry pass so the dependency can
+    # land first, instead of failing the task outright.
+    if PROJECT_LANGUAGE in ("typescript", "ts", "tsx"):
+        _missing = _missing_local_deps(task, project_root)
+        if _missing:
+            print(f"  {YELLOW}⏭  Deferred: depends on file(s) not yet present — "
+                  f"{', '.join(_missing)}{RESET}")
+            print(f"     (will be retried after its dependencies land)")
+            _append_velocity(project_root, {
+                "date": date.today().isoformat(), "task": task[:120],
+                "outcome": "skipped", "attempts": 0,
+                "duration_s": round(time.time() - task_start, 1),
+                "error_types": ["missing_dependency"],
+            })
+            return "skipped"
 
     # Snapshot pre-existing errors so the validator only fails on NEW ones
     baseline_errors = snapshot_baseline_errors(project_root)
@@ -2915,6 +3099,22 @@ def run_task(task: str, project_root: str, log_file: str,
                     adv.log_rule_draft(advice["new_rule"], task_idx, project_root)
                     print(f"  {DIM}📝 Rule draft logged{RESET}")
                 advisor_hint = advice.get("enriched_hint", "")
+                # The hint is prepended to the next attempt's error text, so a
+                # hallucinated identifier in it primes the model to write code
+                # that cannot compile — the same failure mode as the 2026-07-14
+                # poisoned .roorules entry, just with a one-attempt blast radius
+                # instead of a permanent one. Same gate applies.
+                if advisor_hint:
+                    _v = prompt_artifacts.verify_prompt_artifact(
+                        advisor_hint, project_root, kind="advisor hint",
+                        mode="reject", check_code_blocks=True,
+                    )
+                    if not _v.ok:
+                        print(f"  {YELLOW}✗ Advisor hint dropped — "
+                              f"{_v.summary()}{RESET}")
+                        _ledger(project_root, task_idx, current_model,
+                                "advisor_hint_rejected", _v.summary())
+                        advisor_hint = ""
                 cats = advice.get("categories", [])
                 errors_seen.append(f"qwen:{','.join(str(c) for c in (cats if isinstance(cats, list) else []))}")
             except Exception as e:
@@ -3181,9 +3381,29 @@ def main():
     else:
         project_root = os.getcwd()
 
-    if os.path.exists(os.path.join(project_root, ".git")):
+    # ── Pre-run git hygiene guards ───────────────────────────────────────────
+    # Skipped for the pure counting queries (--remaining-count /
+    # --queue-remaining-count): supervisor.sh captures their stdout as an
+    # integer, so these must print nothing and never exit early.
+    #   1. Must be on the integration branch (default: main). Starting a run
+    #      from a leftover task-* branch is what stranded every earlier fix on
+    #      an abandoned branch and left main behind. Override with MAIN_BRANCH.
+    #   2. Working tree must be clean, EXCEPT for logs/ (generated each run and
+    #      gitignored per project — they must never block or dirty a run).
+    if not (args.remaining_count or args.queue_remaining_count) \
+            and os.path.exists(os.path.join(project_root, ".git")):
+        main_branch = os.getenv("MAIN_BRANCH", "main")
+        cur = _git(["rev-parse", "--abbrev-ref", "HEAD"], project_root).stdout.strip()
+        if cur and cur != main_branch:
+            print(f"{RED}✗ On branch '{cur}', not '{main_branch}'.{RESET}")
+            print(f"  Runs must start from '{main_branch}' so task branches merge back cleanly.")
+            print(f"  Leftover task branch? Merge or delete it, then:")
+            print(f"    git checkout {main_branch}")
+            print(f"  (override the expected branch with MAIN_BRANCH=<name>)")
+            sys.exit(1)
         r = _git(["status", "--porcelain"], project_root)
-        dirty = [line for line in r.stdout.strip().split('\n') if line and not line.endswith('/logs/') and 'logs/' not in line]
+        dirty = [ln for ln in r.stdout.strip().split('\n')
+                 if ln and 'logs/' not in ln]
         if dirty:
             print(f"{RED}✗ Working tree is dirty. Commit or stash changes before running work:{RESET}")
             print('\n'.join(dirty))
@@ -3204,6 +3424,23 @@ def main():
     # deferred until after the counting branches exit. (2026-07-14)
     if not (args.remaining_count or args.queue_remaining_count):
         _load_project_config(project_root)
+
+        # ── Environment preflight ────────────────────────────────────────
+        # 2026-07-13: 76 consecutive failures on a project where
+        # `package:flutter/material.dart` did not resolve. No model can fix an
+        # unbuilt dependency tree; every attempt was doomed before the first
+        # token. One stat() up front turns a wasted run into a clear message.
+        try:
+            _problems = grounders.for_language(PROJECT_LANGUAGE).preflight(project_root)
+            for _p in _problems:
+                print(f"  {YELLOW}⚠  PREFLIGHT: {_p}{RESET}")
+            if _problems:
+                print(f"  {YELLOW}   Fix the above before running — model "
+                      f"attempts cannot succeed against a broken tree.{RESET}")
+                _ledger(project_root, -1, "-", "preflight_failed",
+                        "; ".join(_problems))
+        except Exception:
+            pass  # preflight is advisory; never block a run on it
 
     # ── Fast counting queries (--remaining-count / --queue-remaining-count) ───
     # Pure reads, no Firestore/model calls — supervisor.sh shells out to these
@@ -3460,9 +3697,12 @@ def main():
         required_models = active_tiers + [PLANNER_MODEL, ADVISOR_MODEL]
         if RACE_ENABLED and run_start_tier_idx == 0:
             required_models.append(RACE_MODEL)  # racing tier1 vs RACE_MODEL — must be pulled too
-        for m in list(dict.fromkeys(required_models)):
-            ensure_model_exists(m)
-        print(f"  {DIM}All models ready.{RESET}\n")
+        preflight_models(required_models)
+        _unique = list(dict.fromkeys(required_models))
+        if len(_unique) == 1:
+            print(f"  {DIM}Model ready: {_unique[0]}{RESET}\n")
+        else:
+            print(f"  {DIM}All {len(_unique)} models ready.{RESET}\n")
 
     os.makedirs(LOG_DIR, exist_ok=True)
 

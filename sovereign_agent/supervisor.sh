@@ -2,24 +2,50 @@
 # supervisor.sh — Run work.py in a loop; supports parallel workers.
 #
 # Usage (sequential, original behaviour):
-#   ./supervisor.sh ~/Code/astro_flux
-#   ./supervisor.sh ~/Code/astro_flux --features-only
+#   ./supervisor.sh ~/Code/galaxican
+#   ./supervisor.sh ~/Code/galaxican --features-only
 #
 # Usage (parallel — N workers share the task list by stride):
-#   ./supervisor.sh ~/Code/astro_flux --workers 4
-#   ./supervisor.sh ~/Code/astro_flux --workers 4 --features-only
+#   ./supervisor.sh ~/Code/galaxican --workers 4
+#   ./supervisor.sh ~/Code/galaxican --workers 4 --features-only
 #
-# Usage (quick/deep split — tier-1 fast sweep then tier-2+ mop-up):
-#   ./supervisor.sh ~/Code/astro_flux --quick              # tier-1 only; failures → tier2_queue.jsonl
-#   ./supervisor.sh ~/Code/astro_flux --deep               # tier-2+ on queued failures only
-#   ./supervisor.sh ~/Code/astro_flux --workers 4 --quick  # parallel quick sweep
-#   ./supervisor.sh ~/Code/astro_flux --workers 2 --deep   # parallel deep mop-up
+# Usage (quick/deep split):
+#   IMPORTANT: --quick SKIPS TIER 1 — it starts at tier_idx=1 (currently just
+#   TIER2_MODEL, gemma4:26b, since Tier3 at 35B exceeds the <30B quick-mode
+#   param cap). It is NOT a tier-1 sweep despite the name. Racing
+#   (RACE_MODEL/RACE_ENABLED) only ever fires at tier_idx==0 (tier 1), so
+#   --quick never exercises it — run WITHOUT --quick/--deep to hit tier 1
+#   and trigger a race. See work.py's `run_start_tier_idx = 1 if args.quick
+#   else 0` for the source of truth.
+#   ./supervisor.sh ~/Code/galaxican --quick              # tier-2 only (<30B); failures → tier2_queue.jsonl
+#   ./supervisor.sh ~/Code/galaxican --deep               # tiers 2-3 on queued failures only
+#   ./supervisor.sh ~/Code/galaxican --workers 4 --quick  # parallel quick sweep
+#   ./supervisor.sh ~/Code/galaxican --workers 2 --deep   # parallel deep mop-up
 #
 # Usage (full run — quick sweep then automatic deep mop-up in one command):
-#   ./supervisor.sh ~/Code/astro_flux --full               # 4-worker quick, then 1-worker deep
-#   ./supervisor.sh ~/Code/astro_flux --full --workers 6   # custom worker count for quick pass
+#   ./supervisor.sh ~/Code/galaxican --full               # 4-worker quick, then 1-worker deep
+#   ./supervisor.sh ~/Code/galaxican --full --workers 6   # custom worker count for quick pass
 #
-# Each worker K handles tasks at positions K, K+N, K+2N … (round-robin).
+#   RULE: feature tasks and test tasks are NEVER run in the same worker
+#   session. There's features, and there's tests — mixing them in one
+#   session lets a test run against a feature implementation that hasn't
+#   landed yet (or that a different parallel worker is still mid-edit on).
+#   --full enforces this automatically: it runs a complete features-only
+#   session (quick + deep mop-up) to completion, THEN a complete tests-only
+#   session — never interleaved. See sovereign_agent/CLAUDE.md's "General
+#   Rules" section for the source of truth on this rule.
+#
+#   If you invoke work.py or supervisor.sh directly WITHOUT --full, always
+#   pass --features-only or --tests-only yourself:
+#     ./supervisor.sh ~/Code/galaxican --features-only
+#     ./supervisor.sh ~/Code/galaxican --tests-only
+#   Running with neither flag (and without --full) mixes both task types in
+#   one session — supervisor.sh will print a warning if you do this.
+#
+# Each worker K handles tasks at positions K, K+N, K+2N … (round-robin),
+# grouped into dependency-respecting chains first — see work.py's
+# chain-building comment above the stride-assignment code — so a same-file
+# run or an implement→test pair always lands on a single worker.
 # OLLAMA_NUM_PARALLEL should be set to at least N for the 4B model calls.
 #
 # Escalation (parallel mode):
@@ -82,7 +108,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ── --full: run quick sweep then deep mop-up automatically ───────────────────
+# ── --full: run a features session, then a tests session — never mixed ───────
+# See the "RULE" note in the usage header: feature tasks and test tasks must
+# never be in the same worker session, so this does NOT run one quick+deep
+# pass over everything. It runs a complete features-only session (quick +
+# deep mop-up) to completion, then a complete tests-only session — two fully
+# independent supervisor loops, each with its own quick sweep and deep
+# mop-up, composed one after the other.
 if $FULL_RUN; then
     # Quick workers from --workers flag; deep workers from DEEP_WORKERS env (default 2)
     QUICK_WORKERS="${WORKERS:-3}"
@@ -90,31 +122,46 @@ if $FULL_RUN; then
     log() { echo -e "[$(date '+%H:%M:%S')] $*"; }
 
     echo -e "\n${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-    echo -e "${BOLD}  🤖  Full Run — Quick sweep → Deep mop-up${RESET}"
+    echo -e "${BOLD}  🤖  Full Run — Features session → Tests session${RESET}"
     echo -e "${BOLD}  Project : $PROJECT${RESET}"
-    echo -e "${BOLD}  Quick   : $QUICK_WORKERS workers (7B model)${RESET}"
-    echo -e "${BOLD}  Deep    : $DEEP_WORKERS workers (14B model)${RESET}"
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+    echo -e "${BOLD}  Quick   : $QUICK_WORKERS workers${RESET}"
+    echo -e "${BOLD}  Deep    : $DEEP_WORKERS workers${RESET}"
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "  Never mixed: features run to completion first, then tests.\n"
 
-    echo -e "${BOLD}  Pass 1/2 — Quick sweep ($QUICK_WORKERS workers)${RESET}"
-    "$0" "$PROJECT" --workers "$QUICK_WORKERS" --quick "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
-    QUICK_EXIT=$?
+    # $1 = mode ("features"/"tests"), $2 = mode flag, $3 = human label
+    run_full_session() {
+        local mode="$1" mode_flag="$2" label="$3"
+        echo -e "${BOLD}  ── ${label} session ──${RESET}"
 
-    if [[ $QUICK_EXIT -eq 130 ]]; then
-        echo -e "\n  Full run interrupted during quick pass."
-        exit 130
-    fi
+        echo -e "${BOLD}  Pass 1/2 — Quick sweep ($QUICK_WORKERS workers)${RESET}"
+        "$0" "$PROJECT" --workers "$QUICK_WORKERS" --quick "$mode_flag" "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
+        local exit1=$?
+        if [[ $exit1 -eq 130 ]]; then
+            echo -e "\n  Full run interrupted during ${label} quick pass."
+            exit 130
+        fi
 
-    QUEUE="$PROJECT/logs/tier2_queue.jsonl"
-    if [[ -f "$QUEUE" ]] && [[ -s "$QUEUE" ]]; then
-        QUEUED=$(wc -l < "$QUEUE" | tr -d ' ')
-        echo -e "\n${BOLD}  Pass 2/2 — Deep mop-up ($QUEUED failures, $DEEP_WORKERS workers)${RESET}"
-        "$0" "$PROJECT" --workers "$DEEP_WORKERS" --deep "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
-    else
-        echo -e "\n${GREEN}${BOLD}  ✓ No failures queued — deep pass not needed.${RESET}"
-    fi
+        local queued
+        queued=$("$PYTHON" "$SOVEREIGN/work.py" --project "$PROJECT" --queue-remaining-count "$mode" 2>/dev/null)
+        if [[ -n "$queued" ]] && [[ "$queued" -gt 0 ]]; then
+            echo -e "\n${BOLD}  Pass 2/2 — Deep mop-up ($queued $mode failures, $DEEP_WORKERS workers)${RESET}"
+            "$0" "$PROJECT" --workers "$DEEP_WORKERS" --deep "$mode_flag" "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
+            local exit2=$?
+            if [[ $exit2 -eq 130 ]]; then
+                echo -e "\n  Full run interrupted during ${label} deep pass."
+                exit 130
+            fi
+        else
+            echo -e "\n${GREEN}${BOLD}  ✓ No $mode failures queued — deep pass not needed.${RESET}"
+        fi
+    }
 
-    echo -e "\n${GREEN}${BOLD}  ✓ Full run complete.${RESET}\n"
+    run_full_session "features" "--features-only" "Features"
+    echo ""
+    run_full_session "tests" "--tests-only" "Tests"
+
+    echo -e "\n${GREEN}${BOLD}  ✓ Full run complete — features then tests, never mixed.${RESET}\n"
     exit 0
 fi
 
@@ -148,20 +195,49 @@ header() {
 write_status() { echo "$1" > "$STATUS"; }
 read_status()  { cat "$STATUS" 2>/dev/null || echo "unknown"; }
 
+# Resolves to "features", "tests", or "all" based on this invocation's
+# PASS_ARGS. Used to keep has_unchecked_tasks/has_queued_tasks honest about
+# which task type they're checking, so a --tests-only loop never keeps
+# spinning on unchecked feature tasks it's not allowed to touch (and vice
+# versa) — see the never-mix-features-and-tests rule in the header above.
+resolve_task_mode() {
+    for arg in "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"; do
+        if [ "$arg" = "--features-only" ]; then echo "features"; return; fi
+        if [ "$arg" = "--tests-only" ]; then echo "tests"; return; fi
+    done
+    echo "all"
+}
+
+# Delegates to work.py's --remaining-count / --queue-remaining-count so the
+# exact same parse_all_tasks()/_is_test_task() classification is used here
+# as in the real run — no separate regex to keep in sync in bash.
 has_unchecked_tasks() {
-    grep -q '^- \[ \]' "$PROJECT/ROADMAP.md" 2>/dev/null
+    local mode count
+    mode=$(resolve_task_mode)
+    count=$("$PYTHON" "$SOVEREIGN/work.py" --project "$PROJECT" --remaining-count "$mode" 2>/dev/null)
+    [ -n "$count" ] && [ "$count" -gt 0 ]
 }
 
 # In --deep mode the workers only drain tier2_queue.jsonl, not ROADMAP.md.
 # Use this check instead of has_unchecked_tasks when running --deep.
 has_queued_tasks() {
-    local queue="$PROJECT/logs/tier2_queue.jsonl"
-    [ -f "$queue" ] && [ -s "$queue" ]
+    local mode count
+    mode=$(resolve_task_mode)
+    count=$("$PYTHON" "$SOVEREIGN/work.py" --project "$PROJECT" --queue-remaining-count "$mode" 2>/dev/null)
+    [ -n "$count" ] && [ "$count" -gt 0 ]
 }
 
 is_deep_mode() {
     for arg in "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"; do
         [ "$arg" = "--deep" ] && return 0
+    done
+    return 1
+}
+
+is_mode_scoped() {
+    for arg in "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"; do
+        [ "$arg" = "--features-only" ] && return 0
+        [ "$arg" = "--tests-only" ] && return 0
     done
     return 1
 }
@@ -198,6 +274,14 @@ trap '
 ' INT TERM
 
 header
+
+if ! is_mode_scoped; then
+    echo -e "${YELLOW}⚠  No --features-only / --tests-only given — this session may run"
+    echo -e "   feature tasks and test tasks together. Prefer ./supervisor.sh $PROJECT --full"
+    echo -e "   (runs a features session, then a tests session, never mixed), or pass"
+    echo -e "   --features-only / --tests-only explicitly.${RESET}\n"
+fi
+
 log "Supervisor started. Project=$PROJECT  Sovereign=$SOVEREIGN  Workers=$WORKERS"
 write_status "running"
 

@@ -1,0 +1,18 @@
+#!/bin/bash
+# Wrapper — GalaxicanGo run: qwen3-coder:30b (flat ladder) + Go toolchain env,
+# then work.py. Mirrors work_go, swapped to the qwen3-coder A/B test env.
+# Usage: ./work_go_qwen3coder [work.py flags]   e.g.  ./work_go_qwen3coder
+#
+# NOTE: this env's MODEL_PARAMS_TIER* are all 30 (qwen3-coder:30b's real size),
+# which sits at the --quick cutoff — quick mode will find zero eligible tiers.
+# Don't pass --quick with this wrapper; run it plain for the full tier walk.
+DIR="$(cd "$(dirname "$0")" && pwd)"
+
+if [ ! -d /Volumes/Lexar/golang/go/bin ]; then
+  echo "✗ Lexar drive not mounted (no /Volumes/Lexar/golang) — mount it first." >&2
+  exit 1
+fi
+
+source "$DIR/galaxicango_qwen3coder.env"
+source "$DIR/.venv/bin/activate"
+python "$DIR/work.py" --project ~/Code/GalaxicanGo --features-only "$@"

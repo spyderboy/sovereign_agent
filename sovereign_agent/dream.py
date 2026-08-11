@@ -42,6 +42,8 @@ except ImportError:
 
 import requests
 
+import prompt_artifacts  # grounding gate for model-written prompt text
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 OLLAMA_URL  = os.getenv("LOCAL_MODEL_URL", "http://localhost:11434")
@@ -476,6 +478,19 @@ def main():
     feedback = ""
     while rules_content is None:
         draft = draft_roorules(name, stack, vision_content, use_claude, feedback)
+        # .roorules is injected verbatim into every future prompt, so a
+        # hallucinated identifier here is permanent priming — the widest blast
+        # radius of any model-written artifact in the system. Warn rather than
+        # reject: on a greenfield tree there is no source to ground against,
+        # and a human is reviewing the draft on the next line anyway.
+        _v = prompt_artifacts.verify_prompt_artifact(
+            draft, project_path, language=stack,
+            kind=".roorules draft", mode="warn",
+        )
+        for _w in _v.warnings:
+            print(f"  {YELLOW}⚠  {_w}{RESET}")
+        if "grounding" in _v.skipped:
+            print(f"  {DIM}(grounding not checked: {_v.skipped['grounding']}){RESET}")
         accepted, feedback = review(".roorules", draft)
         if accepted is not None:
             rules_content = accepted

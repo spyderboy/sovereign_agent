@@ -1,17 +1,23 @@
 """
-Generates a multi-week roadmap from VISION.md and writes it to ROADMAP.md.
+Generates a backlog of tasks from VISION.md and writes it to ROADMAP.md.
 Reads existing ROADMAP.md to understand what's already been planned/completed.
+
+No "week" or "day" concept — tasks are generated as one flat batch (in chunks
+of --batch-size per model call, to keep prompts a sane size) and written under
+a single date header. work.py works through ROADMAP.md checkboxes in order
+regardless of date, so the date header is for human readability only.
 
 Usage:
     python plan_week.py --project /path/to/project
-    python plan_week.py --project /path/to/project --weeks 2 --tasks-per-day 22 --weekends
-    python plan_week.py --project /path/to/project --start 2026-05-06
+    python plan_week.py --project /path/to/project --tasks 20
+    python plan_week.py --project /path/to/project --tasks 500 --batch-size 25   # big RunPod batch
 """
 import os
 import sys
 import argparse
 import json
-from datetime import date, timedelta
+import math
+from datetime import date
 from dotenv import load_dotenv
 import requests
 
@@ -53,79 +59,75 @@ def ollama(system: str, user: str, timeout: int = 600) -> str:
     return "".join(content)
 
 
-def get_week_dates(start: date, include_weekends: bool) -> list[date]:
-    """Return days for a week starting from start date."""
-    n = 7 if include_weekends else 5
-    return [start + timedelta(days=i) for i in range(n)]
-
-
 def parse_existing_roadmap(path: str) -> str:
     if os.path.exists(path):
         return open(path).read()
     return ""
 
 
-def plan_one_week(
-    week_start: date,
+def plan_batch(
+    n_tasks: int,
     vision: str,
     existing_roadmap: str,
-    tasks_per_day: int,
-    include_weekends: bool,
-) -> list[dict]:
-    """Call the model to plan one week. Returns list of day dicts."""
-    days = get_week_dates(week_start, include_weekends)
-    day_names = [d.strftime("%A") for d in days]
-    day_list  = ", ".join(day_names)
-    n_days    = len(days)
-
+) -> list[str]:
+    """Call the model to generate one flat batch of n_tasks. Returns a list of task strings."""
     existing_context = (
         f"\n\nAlready planned/completed (do not repeat these tasks):\n{existing_roadmap}"
         if existing_roadmap.strip() else ""
     )
 
-    prompt = f"""You are planning a software development sprint starting {week_start.isoformat()}.
+    prompt = f"""You are planning a software development backlog.
 
 Project vision:
 {vision}
 {existing_context}
 
-Generate a {n_days}-day plan ({day_list}) with exactly {tasks_per_day} surgical, micro-tasks per day.
+Generate exactly {n_tasks} surgical, micro-tasks.
 
-STRICT TASK SIZING & DECOMPOSITION RULES:
-1. SURGICAL SCOPE: Each task must touch 1 or 2 files MAXIMUM. If a feature needs 5 files, split it into 3 tasks.
-2. NO AGGREGATE TASKS: Forbidden: "Integrate X with Y", "Implement X system", "Wire up Z".
-3. MICRO-TASKS ONLY: Allowed: "Add [method] to [class] in [file]", "Define [interface] in [file]", "Update [handler] to check [condition]".
-4. ATOMICITY: Each task must be a single, complete logical step.
-5. NAMING: Tasks must name specific classes, methods, or files.
-6. DONE-WHEN CLAUSE: Every task MUST end with a "— done when:" clause describing the observable result.
+STRICT TASK SIZING & DECOMPOSITION RULES — make every task the SMALLEST it can possibly be.
+The 150-line file-size limit is a hard ceiling, not a sizing target. A task that produces
+140 lines in one shot is still too big if it's really three unrelated changes bundled
+together — smallness means ONE unit of work, not "whatever fits under the line limit."
+
+1. ONE FILE: Each task touches exactly 1 file. Only touch a second file when the task is
+   truly impossible without it (e.g. a new class plus the one call site that must reference
+   it) — and even then, prefer splitting into two tasks if at all possible.
+2. ONE UNIT OF WORK: One task = one added/changed method, one added class, one added widget,
+   one fixed bug, one field. Never bundle multiple methods, multiple fields, or multiple
+   fixes into a single task, even if they're all in the same file and even if the combined
+   result would be well under 150 lines. If a task description contains "and" joining two
+   separate actions ("add X and update Y"), split it into two tasks.
+3. NO AGGREGATE TASKS: Forbidden: "Integrate X with Y", "Implement X system", "Wire up Z",
+   "Add X, Y, and Z to [class]".
+4. MICRO-TASKS ONLY: Allowed: "Add [method] to [class] in [file]", "Define [interface] in
+   [file]", "Update [handler] to check [condition]".
+5. ATOMICITY: Each task must be a single, complete logical step — the smallest step that is
+   still independently meaningful and testable on its own.
+6. NAMING: Tasks must name specific classes, methods, or files.
+7. DONE-WHEN CLAUSE: Every task MUST end with a "— done when:" clause describing the observable result.
    Example: "Add update(dt) to VectorComponent that moves position toward _target at speed px/s — done when: units visibly travel across the screen toward a tapped star."
    Example: "In GestureHandler.onDragUpdate, draw a selection rect overlay on the canvas — done when: dragging on the game screen shows a neon rectangle following the finger."
    Tasks without a done-when clause are rejected.
-7. NO STUBS: Tasks must result in working code, not placeholder method bodies. If the task says "implement X", the method body must contain real logic, not comments.
-6. COMPATIBILITY: Each task must be small enough for a 3B-active model to finish in 120 seconds.
+8. NO STUBS: Tasks must result in working code, not placeholder method bodies. If the task says "implement X", the method body must contain real logic, not comments.
+9. COMPATIBILITY: Each task must be small enough for a 7B model to finish in well under two minutes.
 
-Example of good decomposition for "Add sync circuit breaker":
+Example of good decomposition for "Add sync circuit breaker" — note this is FOUR tasks, not
+one and not a bundled two:
 - Task A: "Define CircuitBreaker class in lib/game/circuit_breaker.dart — done when: class exists with isClosed() returning bool."
-- Task B: "Add isClosed() check to GcpSyncHandler.sync() in lib/game/gcp_sync_handler.dart — done when: sync() returns early if circuit is open."
-- Task C: "Implement recordFailure() in CircuitBreaker and call from GcpSyncHandler catch block — done when: three consecutive failures open the circuit."
+- Task B: "Add recordFailure() to CircuitBreaker in lib/game/circuit_breaker.dart — done when: recordFailure() increments the internal failure count."
+- Task C: "Add isClosed() check to GcpSyncHandler.sync() in lib/game/gcp_sync_handler.dart — done when: sync() returns early if circuit is open."
+- Task D: "Call CircuitBreaker.recordFailure() from GcpSyncHandler's catch block in lib/game/gcp_sync_handler.dart — done when: three consecutive failures open the circuit."
 
 Example of good gameplay task:
 - "In GestureHandler.onDragUpdate in lib/game/gesture_handler.dart, accumulate drag delta into a SelectionRect and paint a neon cyan rectangle on the canvas — done when: dragging a finger on the game screen shows a glowing rectangle."
 
 Return ONLY valid JSON with this exact structure (no markdown, no explanation):
 {{
-  "days": [
-    {{
-      "date": "{days[0].isoformat()}",
-      "day": "{day_names[0]}",
-      "tasks": ["task 1 — done when: observable result", "task 2 — done when: observable result", ... {tasks_per_day} tasks total]
-    }},
-    ... one entry per day, {n_days} total
-  ]
+  "tasks": ["task 1 — done when: observable result", "task 2 — done when: observable result", ... {n_tasks} tasks total]
 }}"""
 
     raw = ollama(
-        system="You are a senior software engineer planning a development sprint. Return only valid JSON. Every task must touch 1-2 files maximum, be completable in a single coding pass, and end with a 'done when:' clause describing the observable result.",
+        system="You are a senior software engineer planning a development backlog. Return only valid JSON. Every task must touch exactly one file, be exactly one unit of work (one method, one class, one fix — never bundled), be completable in a single coding pass, and end with a 'done when:' clause describing the observable result.",
         user=prompt,
         timeout=600,
     )
@@ -134,20 +136,19 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
     end_idx   = raw.rfind("}") + 1
     try:
         plan = json.loads(raw[start_idx:end_idx])
-        return plan.get("days", [])
+        return plan.get("tasks", [])
     except Exception:
-        print(f"  ⚠  Could not parse JSON for week of {week_start}. Raw:\n{raw[:500]}")
+        print(f"  ⚠  Could not parse JSON for this batch. Raw:\n{raw[:500]}")
         return []
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate a multi-week ROADMAP.md from VISION.md")
-    parser.add_argument("--project",       help="Path to the project folder (default: current dir)", default=None)
-    parser.add_argument("--start",         help="Start date (YYYY-MM-DD, default: today)", default=None)
-    parser.add_argument("--weeks",         help="Number of weeks to plan (default: 1)", type=int, default=1)
-    parser.add_argument("--tasks-per-day", help="Tasks per day (default: 3)", type=int, default=3)
-    parser.add_argument("--weekends",      help="Include Saturday and Sunday", action="store_true")
-    parser.add_argument("--append",        help="Append to existing ROADMAP.md instead of overwriting", action="store_true")
+    parser = argparse.ArgumentParser(description="Generate a task backlog from VISION.md into ROADMAP.md")
+    parser.add_argument("--project",     help="Path to the project folder (default: current dir)", default=None)
+    parser.add_argument("--start",       help="Date to label the backlog with (YYYY-MM-DD, default: today). Cosmetic only.", default=None)
+    parser.add_argument("--tasks",       help="Total number of tasks to generate (default: 20)", type=int, default=20)
+    parser.add_argument("--batch-size",  help="Max tasks requested per model call (default: 25)", type=int, default=25)
+    parser.add_argument("--append",      help="Append to existing ROADMAP.md instead of overwriting", action="store_true")
     args = parser.parse_args()
 
     if args.project:
@@ -158,43 +159,38 @@ def main():
         os.chdir(project_path)
         print(f"Project: {project_path}")
 
-    today = date.today()
-    start = date.fromisoformat(args.start) if args.start else today
+    start = date.fromisoformat(args.start) if args.start else date.today()
 
     vision = open("VISION.md").read() if os.path.exists("VISION.md") else "No VISION.md found."
 
-    total_days  = (7 if args.weekends else 5) * args.weeks
-    total_tasks = total_days * args.tasks_per_day
-    print(f"Planning {args.weeks} week(s) × {7 if args.weekends else 5} days × {args.tasks_per_day} tasks = {total_tasks} tasks total")
-    if args.weekends:
-        print("  (including weekends)")
+    n_batches = math.ceil(args.tasks / args.batch_size)
+    print(f"Planning {args.tasks} task(s) in {n_batches} batch(es) of up to {args.batch_size}...")
 
     all_tasks = []
     rolling_roadmap = parse_existing_roadmap("ROADMAP.md")
+    remaining = args.tasks
 
-    for week_num in range(args.weeks):
-        week_start = start + timedelta(weeks=week_num)
-        print(f"\nPlanning week {week_num + 1}/{args.weeks} starting {week_start.isoformat()}...")
+    for batch_num in range(n_batches):
+        batch_size = min(args.batch_size, remaining)
+        print(f"\nBatch {batch_num + 1}/{n_batches} — requesting {batch_size} tasks...")
 
-        days = plan_one_week(
-            week_start=week_start,
+        tasks = plan_batch(
+            n_tasks=batch_size,
             vision=vision,
             existing_roadmap=rolling_roadmap,
-            tasks_per_day=args.tasks_per_day,
-            include_weekends=args.weekends,
         )
 
-        if not days:
-            print(f"  ⚠  No tasks generated for week {week_num + 1}, skipping.")
+        if not tasks:
+            print(f"  ⚠  No tasks generated for batch {batch_num + 1}, skipping.")
             continue
 
-        for day in days:
-            tasks = day.get("tasks", [])
-            if len(tasks) < args.tasks_per_day:
-                print(f"  ⚠  {day['day']}: got {len(tasks)} tasks, expected {args.tasks_per_day}")
-            all_tasks.extend(tasks)
+        if len(tasks) < batch_size:
+            print(f"  ⚠  Got {len(tasks)} tasks, expected {batch_size}")
 
-        # Feed this week's tasks back as context for the next
+        all_tasks.extend(tasks)
+        remaining -= len(tasks)
+
+        # Feed tasks generated so far back as context for the next batch.
         rolling_roadmap += "\n" + "\n".join(f"- [ ] {t}" for t in all_tasks[-100:])
 
     # All tasks go under a single date — work.py works through them in order.
@@ -217,7 +213,7 @@ def main():
         print("\n✓ ROADMAP.md written")
 
     print(f"\nTotal tasks planned: {len(all_tasks)}")
-    print("Run work.py to start. standup.py reports velocity each morning.")
+    print("Run work.py to start. standup.py reports velocity each check-in.")
 
 
 if __name__ == "__main__":

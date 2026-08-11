@@ -123,10 +123,11 @@ supervisor.sh ~/astro_flux --deep --workers 2
 supervisor.sh ~/astro_flux
 ```
 
-**How `--full` works:**
-1. Pass 1 (quick): all unchecked `[ ]` tasks in ROADMAP.md, N workers, tier-1 model
-2. Pass 2 (deep): only tasks that failed pass 1, DEEP_WORKERS workers, tier-2 model
+**How `--full` works** (updated 2026-07-10 — feature and test tasks are never run in the same session):
+1. Features session: quick sweep over unchecked feature tasks (N workers), then a deep mop-up over any that failed
+2. Tests session: same two-pass quick+deep cycle, but only over test tasks — runs only after the features session finishes completely
 3. Tasks marked `[x]` in ROADMAP.md are skipped — safe to interrupt and resume
+4. Running `work.py`/`supervisor.sh` directly without `--full`? Always pass `--features-only` or `--tests-only` yourself — see the "General Rules" section of `sovereign_agent/CLAUDE.md`.
 
 ---
 

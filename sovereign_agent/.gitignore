@@ -1,0 +1,6 @@
+*.env
+*.env.*
+*.bak
+.probe/
+__pycache__/
+*.pyc

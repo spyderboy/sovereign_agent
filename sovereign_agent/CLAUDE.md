@@ -12,8 +12,51 @@ The **sovereign_agent** harness (`plan_week.py` / `work.py` / `supervisor.sh` / 
 **To answer "how is the run going?" always inspect the *active project's* `logs/`, never assume Flutter.** Sections below that name Dart files, `lib/`, `pubspec.yaml`, iOS/Android, Flame, `BlendMode.add`, etc. are **examples from the Flutter incarnation** — translate them to the active project's stack (e.g. TypeScript: `src/`, `package.json`, `tsc`/`vitest`, `npm run typecheck:sim`).
 
 ### Active project (update when it changes)
-- **GalaxicanJS** — TypeScript/React port. Path: `~/Code/GalaxicanJS`. Validate via `npm run typecheck:sim` / `npm run test:locked` / `vitest`. This is the current focus as of 2026-07-16.
-- Prior incarnations: **galaxican** (Flutter/Dart, `~/Code/galaxican`) and a **Go** build. Same game design (below), different stacks.
+- **galaxican** — Flutter/Flame, **fresh clean pure-Dart sim core** ported from the tested TS sim. Path: `~/Code/galaxican`. **Integration branch is `master`, not `main`** — always pass `MAIN_BRANCH=master` (the pre-run guard checks it). Validate via `flutter analyze` + `flutter test` (see the project's `.sovereign_config.json` `validate_commands`). Current focus as of 2026-07-18.
+  - **Strategy (decided 2026-07-18):** the game design + mechanics are proven in the TS port (`~/Code/GalaxicanJS`: 50 pure-fn sim files, 57 conformance cases, all green). We are porting that sim structure-for-structure into pure Dart (`lib/sim`, `lib/ai`, `lib/level`), gated by the SAME conformance behavior ported to `flutter test`. Flame is used for RENDERING only (its strength; where qwen3 is accurate) — the sim core imports NO Flame/Flutter/Riverpod. The old 593-file Riverpod app is legacy/removed, not a foundation.
+  - The canonical **contract is `spec/`** (copied from GalaxicanJS, locked). Port tasks are written against it exactly.
+  - **Reference-source injection (reliability lever for PORTS):** the TS source is mirrored read-only in `reference/ts/src/…` and `work.py` auto-includes the file a task names ("port from `src/sim/setTarget.ts`" → injects `reference/ts/src/sim/setTarget.ts` into the worker's context). Without this the worker can't see the source it's told to port and *guesses* APIs (e.g. inventing `Vec2.normalize()`). For any port project, mirror the source into `reference/` — it turns "invent" into "translate" and is the single biggest reliability win on trivial port tasks.
+- Prior incarnations: **GalaxicanJS** (TS/React — the reference sim + the source of the portable harness lessons) and a **Go** build. Same game design (below), different stacks.
+
+### Current run mode — SINGLE MODEL (set 2026-07-17)
+- **qwen3-coder:30b is the ONLY model in use.** All four tiers + planner + advisor + race are pinned to `qwen3-coder:30b` in `~/Code/Xanadu/sovereign_agent/.env`. Claude escalation stays OFF (`CLAUDE_ENABLED=0`), race is OFF. The escalation ladder therefore just retries the same model — no Gemma, no qwen2.5, no cloud.
+- To change models: edit the `SINGLE-MODEL MODE` block in `.env` (or delete the block to restore work.py's multi-model ladder defaults). Do not scatter model overrides elsewhere.
+- Tag must match `ollama list` exactly — it is `qwen3-coder:30b` (18 GB), not `qwen3.6:35b` or `qwen2.5-coder:*`.
+
+### Run hygiene rules (enforced by work.py pre-run guards — do not defeat them)
+- **NEVER edit/commit the project repo while a run is live — and a run is "live" until `pkill` confirms it.** The harness cycles `git checkout -f <MAIN_BRANCH>` + `git clean -fd` between every task; any uncommitted work in the tree is wiped, and commits race the harness's git ops and get stranded. Ctrl-C in the terminal only kills the FOREGROUND process — the supervisor + workers survive and keep touching the repo. So a stop is NOT done until: `pkill -9 -f work.py; sleep 1; ps aux | grep '[w]ork.py' | wc -l` reads **0**. Whenever you ask the user to Ctrl-C, ALWAYS pair it with that pkill+verify. Only scaffold/commit once processes are confirmed dead. (Learned 2026-07-18: a full p3–p9 scaffold was wiped because a "stopped" run still had 4 live work.py processes.)
+- **`logs/` is generated, untracked, and gitignored — never commit it, never let it block a run.** The dirty-tree guard explicitly ignores `logs/`. Logs stay on disk so the harness can learn from them; discard them only when explicitly done with a run.
+- **Never regenerate `task_graph.json` mid-run.** work.py drives off `ROADMAP.md` (`parse_all_tasks()`); the graph is the durable DAG record maintained only by `make_graph.py` / `plan_week.py`. Regenerating it during a run clobbers completed-phase state and desyncs it from ROADMAP.
+- **Commit setup edits (ROADMAP, config, locked-test fixes) to `main` immediately.** Uncommitted edits get wiped by the next task branch's forced `git checkout -f main`.
+
+## Task Discipline (READ BEFORE WRITING ANY TASK — applies to every project/stack)
+> **A task is right-sized when the worker cannot fail on design or integration —
+> only on correctness — because every input, output, and dependency it needs is
+> named explicitly and it has exactly one thing to do.**
+
+This is not Galaxican-specific; it is how you write tasks for any coding agent in
+any language. The model rarely fails because it can't code — it fails because the
+*task* let it guess. Do not keep re-asking for smaller, clearer tasks; write them
+that way the first time. The four reflexes:
+1. **One file, one concern.** If the description needs an "and", split it.
+2. **Exact contracts.** Name the input signature, the output signature, the exact
+   import (module path + symbol) for every dependency, and the real fields of any
+   type touched — then forbid the known-bad guesses by name.
+3. **Isolate glue into pure functions.** Integration logic (framework↔domain,
+   UI↔state) hallucinates most; give it a fixed signature in its own file and keep
+   shells thin (they only compose things that already exist).
+4. **Concrete done-gate that actually runs.** A command/test that passes — never
+   "renders nicely". In this harness a per-task behavioural gate is only executed
+   when written as a `task gate: <cmd> passes` clause at the END of the task line
+   (parsed by `_extract_task_gate`); a gate mentioned in "done when:" prose is
+   NOT run, so the task can be marked done on typecheck alone. Typecheck passes
+   broken string/geometry output — pure functions that return strings/data need a
+   `task gate:` behavioural test. After adding a gate, confirm it fails on the
+   current broken output before trusting a green.
+
+The tell that a task is wrong (not the model): a worker fails 2+ times on "X
+doesn't exist" or on the same integration seam. Rewrite/split the task; don't just
+retry a bigger model. **Full doctrine + worked example: `docs/TASK_DISCIPLINE.md`.**
 
 ## General Rules
 - **NEVER use `mv` for moving files or directories.** Always use `rsync` instead. `mv` across devices/drives can behave unexpectedly, appear to hang, and is not resumable. Use:
@@ -35,6 +78,20 @@ The **sovereign_agent** harness (`plan_week.py` / `work.py` / `supervisor.sh` / 
   - ✓ DO: "Wire React Native touch events to lasso detector"
 
   The goal: **each task should be so small that the worker can't introduce cross-cutting concerns, can't invent new APIs, and can only fail on correctness (which the test gate catches), not design.**
+
+- **ALWAYS write tasks with three elements: SPECIFIC inputs, SPECIFIC outputs, and CLEAR DEFINITION OF DONE.** A vague task causes hallucination. Every task must name:
+  1. **Input contract**: exact types/signatures of what the worker receives (e.g. "accepts `(g: GameState, pos: Vec2)`, no other args")
+  2. **Output contract**: exact types/signatures of what the worker must produce (e.g. "returns `string` (SVG path data), never null")
+  3. **Done criteria**: a specific test or acceptance gate, not a vague instruction (e.g. "done when: `npm run test:locked` passes for p10_render.test.ts", NOT "done when: component renders nicely")
+
+  **Examples:**
+  - ✗ BAD: "Implement the Star renderer component" (What props? What does it render? What counts as 'done'?)
+  - ✓ GOOD: "Implement StarDisplay(props: {star: Star; game: GameState}): ReactNode. Renders star circle + glow via drawStar; pulsing glow animation from spec/08-presentation.md §3. — done when: npm run typecheck:sim passes, p10_render.test.ts has no render errors on start"
+  - ✗ BAD: "Write a draw function for game entities" (Too many entities, no specificity)
+  - ✓ GOOD: "Implement drawStar(s: Star, color: string): string — returns SVG path data string per spec/08-presentation.md §3. Includes glow circle (radius+4), and if owned, production arc + HP ring. — done when: npm run typecheck:sim passes, function returns valid SVG path strings in all test cases"
+
+  Vague tasks force models to guess at inputs/outputs/APIs, which causes import errors, type mismatches, and hallucinated function calls. Specific tasks with clear gates let workers fail obviously and fast.
+
 - **NEVER run feature tasks and test tasks in the same worker session.** There's features, and there's tests — a test task must never run in the same session as the feature task it depends on, whether sequential or parallel. Mixing them lets a test execute against an implementation that hasn't landed yet (or that a different parallel worker is still mid-edit on).
   - `./supervisor.sh <project> --full` enforces this automatically — it runs a complete features-only session (quick sweep + deep mop-up) to completion, then a complete tests-only session. Never interleaved.
   - If invoking `work.py` or `supervisor.sh` directly (not via `--full`), always pass `--features-only` or `--tests-only` explicitly.
@@ -49,6 +106,14 @@ Every code snippet must be labelled with one of:
 - **[L4 VM | venv]** — Inside the L4 VM with venv active: `cd ~/sovereign_agent/sovereign_agent && source ../.venv/bin/activate`
 
 **Formatting rule:** The environment label goes in plain text BEFORE the code block, never as a comment inside it. Code blocks must be clean and copy-pasteable with no inline comments added by Claude.
+
+**CRITICAL:** DO NOT include comments in code blocks users will copy-paste. Comments break shell interpretation, Python heredocs, and multiline commands. If the code needs explanation, write it in plain text *outside* the code block, not inside it. This applies especially to:
+- Bash scripts with `# comment` lines (break command interpretation in some contexts)
+- Python scripts pasted into heredoc (`<< 'EOF'`) — comments inside cause parsing errors
+- Any multiline command where # might be interpreted as end-of-statement
+
+Bad: code block with `# this is a comment` inside  
+Good: explanation text before the block, then clean code with zero comments
 
 ---
 

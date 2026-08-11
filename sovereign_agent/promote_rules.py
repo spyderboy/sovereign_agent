@@ -15,7 +15,6 @@ this is the "training" step in the learning loop.
 """
 
 import os
-import re
 import json
 import argparse
 import requests
@@ -87,7 +86,9 @@ def qwen_review_rules(rules: list[str], existing_roorules: str) -> list[str]:
     if not rules:
         return []
 
-    prompt = f"""You are reviewing candidate additions to a Dart/Flutter coding rules file (.roorules).
+    prompt = f"""You are reviewing candidate additions to a project's coding rules file (.roorules).
+The project's language/framework is whatever the candidate rules themselves reference (e.g. Go,
+Dart/Flutter, Python) — do not assume a specific language; judge each rule on its own terms.
 
 Existing .roorules (excerpt):
 {existing_roorules[:1500]}
@@ -124,8 +125,24 @@ No markdown, no explanation."""
     return rules
 
 
+# Grounding and foreign-vocabulary checks moved to prompt_artifacts.py
+# (2026-07-25) so the advisor hint path and dream.py's drafted .roorules get
+# the same gate. The 2026-07-14 post-mortem that motivated both checks is
+# preserved in that module's docstring. Behaviour here is unchanged: a rule is
+# rejected if it speaks another stack's dialect, or references identifiers
+# found nowhere in the project, its stdlib, or its framework.
+import prompt_artifacts
+
+
 def append_to_roorules(rules: list[str], project_root: str, dry_run: bool) -> int:
     """Append promoted rules to .roorules under the Learned Rules section."""
+    accepted, rejected = prompt_artifacts.partition(
+        rules, project_root, kind="rule", mode="reject"
+    )
+    for rule, verdict in rejected:
+        for reason in verdict.reasons:
+            print(f"  ✗ REJECTED — {reason}: {rule[:90]}")
+    rules = accepted
     if not rules:
         return 0
     path = os.path.join(project_root, ROORULES)

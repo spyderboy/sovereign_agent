@@ -6,3 +6,4 @@ sovereign_agent/__pycache__/
 sovereign_agent/logs/
 sovereign_agent/lib/
 
+.aider*

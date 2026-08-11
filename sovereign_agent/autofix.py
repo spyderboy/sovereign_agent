@@ -16,6 +16,8 @@ Fixable rules:
 
 import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 # dart:ui classes that require an explicit import
@@ -175,6 +177,62 @@ def _dispatch(error: dict, project_root: str) -> bool:
         return fix_missing_dart_ui(path, error['message'])
 
     return False
+
+
+# ── Go mechanical fixer ─────────────────────────────────────────────────────────
+
+def apply_go_mechanical_fixes(project_root: str, files_written: list[str]) -> tuple[int, list[str]]:
+    """
+    Deterministic fixer for Go formatting — runs `gofmt -l -w .` across the
+    WHOLE project root, not just the files this task wrote.
+
+    This has to match the scope of the validate gate: `test -z "$(gofmt -l .)"`
+    scans the entire repo and is unbaselined (a Go build/format either passes
+    or it doesn't, tree-wide) — there's no per-task "new errors only" filtering
+    like the Flutter path has. So a single leftover misformatted file from an
+    EARLIER task (very commonly: local models omitting the trailing newline at
+    EOF) permanently fails every later task's validation, no matter how clean
+    that task's own new file is. A fixer scoped to files_written alone cannot
+    repair that pre-existing debt — it has to sweep the same scope the gate
+    checks. `files_written` is accepted for logging/back-compat but no longer
+    used to narrow the sweep.
+
+    Returns (fixed_count, remaining) — remaining lists any .go files gofmt
+    still flags after -w (e.g. a real syntax error it can't safely rewrite),
+    so the caller knows the failure is real and not just formatting.
+    """
+    if shutil.which("gofmt") is None:
+        return 0, []
+
+    try:
+        before = subprocess.run(
+            ["gofmt", "-l", "."], capture_output=True, text=True,
+            timeout=30, cwd=project_root,
+        )
+        flagged_before = {l.strip() for l in before.stdout.splitlines() if l.strip()}
+    except Exception:
+        return 0, []
+
+    if not flagged_before:
+        return 0, []
+
+    try:
+        subprocess.run(["gofmt", "-l", "-w", "."], capture_output=True,
+                        timeout=30, cwd=project_root)
+    except Exception:
+        return 0, sorted(flagged_before)
+
+    try:
+        after = subprocess.run(
+            ["gofmt", "-l", "."], capture_output=True, text=True,
+            timeout=30, cwd=project_root,
+        )
+        remaining = {l.strip() for l in after.stdout.splitlines() if l.strip()}
+    except Exception:
+        remaining = flagged_before
+
+    fixed = flagged_before - remaining
+    return len(fixed), sorted(remaining)
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────

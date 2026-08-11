@@ -460,11 +460,24 @@ def all_source_files(project_root: str) -> list[str]:
     hallucinated field names, math helpers, and imports.
     """
     exts = {".dart", ".py", ".js", ".ts", ".go"}
-    skip = {"build", ".dart_tool", ".git", "node_modules", ".fvm", ".venv", "logs"}
+    skip = {"build", ".dart_tool", ".git", "node_modules", ".fvm", ".venv", "venv",
+            "logs", "site-packages", "dist-packages", ".tox", "vendor",
+            "Pods", ".gradle", "reference", ".pub-cache"}
+    # A virtualenv can be named anything (2026-08-11: `mlx_env` inside
+    # witches_bricks put 4,722 transformers files into the planner prompt —
+    # 92k tokens, 757% of context, so the planner silently fell back to
+    # keywords on EVERY task). Name-based skipping cannot catch that; the
+    # marker file can.
+    roots = {p.parent.name for p in Path(project_root).glob("*/pyvenv.cfg")}
+    skip |= roots
     result = []
     for p in Path(project_root).rglob("*"):
         if p.suffix in exts and not any(s in p.parts for s in skip):
             result.append(str(p.relative_to(project_root)))
+    if len(result) > 1200:
+        print(f"  {YELLOW}⚠ {len(result)} source files — the planner prompt will "
+              f"be large. Check for a vendored dependency tree in the project."
+              f"{RESET}")
     return sorted(result)
 
 
@@ -1500,6 +1513,10 @@ def _load_project_config(project_root: str) -> dict:
         PROJECT_ALWAYS_INCLUDE = list(ai)
         if ai:
             print(f"  {DIM}Loaded {len(ai)} always-include context file(s){RESET}")
+            # The ladder is now data (profiles/*.toml + env). Print which one
+            # is actually in force — otherwise the only way to know is to
+            # wait for a model name to scroll past on the first attempt.
+            print(f"  {DIM}{_describe_config()}{RESET}")
 
     # ── Per-project validation commands + language ────────────────────────────
     global PROJECT_VALIDATE_COMMANDS, PROJECT_LANGUAGE, PROJECT_ID

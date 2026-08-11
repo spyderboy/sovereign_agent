@@ -238,8 +238,20 @@ def log_error_pattern(
 
 
 def log_rule_draft(rule: str, source_task: int, project_root: str):
-    """Append a candidate .roorules entry to logs/rule_drafts.jsonl."""
-    if not rule or rule == "null":
+    """Append a candidate .roorules entry to logs/rule_drafts.jsonl.
+
+    `rule` arrives from model-generated JSON, so its type is whatever the model
+    felt like emitting. Coerce rather than trust: an uncaught AttributeError
+    here kills the whole advisor call, and the advisor is the ONLY feedback the
+    next attempt receives. The task then retries blind and escalates a tier over
+    a type mismatch in a logging helper.
+    """
+    if isinstance(rule, (list, tuple)):
+        rule = "; ".join(str(r).strip() for r in rule if str(r).strip())
+    elif not isinstance(rule, str):
+        rule = "" if rule is None else str(rule)
+    rule = rule.strip()
+    if not rule or rule.lower() in {"null", "none"}:
         return
     path = os.path.join(project_root, RULE_DRAFTS_LOG)
     os.makedirs(os.path.dirname(path), exist_ok=True)

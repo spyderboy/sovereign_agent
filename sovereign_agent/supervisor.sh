@@ -260,6 +260,7 @@ run_promote_rules() {
 MAX_ESCALATIONS=8
 ESCALATION_COUNT=0
 LAST_ESCALATION_TASK=0
+FAST_EXITS=0
 
 # All live worker PIDs — used by the Ctrl+C trap
 declare -a WORK_PIDS=()
@@ -313,8 +314,9 @@ if [[ "$WORKERS" -gt 1 ]]; then
         any_interrupted=0
         any_escalation=0
         for ((w=0; w<WORKERS; w++)); do
-            wait "${WORK_PIDS[$w]}" || true
-            WORKER_EXITS[$w]=$?
+            # Same trap as the sequential path: `wait || true` reports true's
+            # status, so every worker looked like a clean exit.
+            if wait "${WORK_PIDS[$w]}"; then WORKER_EXITS[$w]=0; else WORKER_EXITS[$w]=$?; fi
             log "Worker $w finished (exit ${WORKER_EXITS[$w]})"
 
             if [ "${WORKER_EXITS[$w]}" -eq 130 ]; then
@@ -403,10 +405,31 @@ while true; do
     "$PYTHON" "$SOVEREIGN/work.py" --project "$PROJECT" --start-at "$START_AT" \
         "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}" &
     WORK_PIDS=($!)
-    wait "${WORK_PIDS[0]}" || true
-    EXIT=$?
+    ITER_START=$SECONDS
+    # `wait ... || true` sets $? to true's status, so EXIT was ALWAYS 0 and every
+    # hard refusal from work.py — dirty tree, wrong branch, leftover task branch
+    # — was read below as "batch finished cleanly", relaunching instantly forever.
+    if wait "${WORK_PIDS[0]}"; then EXIT=0; else EXIT=$?; fi
+    ITER_SECS=$((SECONDS - ITER_START))
     WORK_PIDS=()
     log "work.py exited with code $EXIT"
+
+    # A precondition refusal returns in under a second and changes nothing, so
+    # looping cannot help — only an operator can. Three in a row is a stop.
+    if [ "$ITER_SECS" -lt 10 ]; then
+        FAST_EXITS=$((FAST_EXITS + 1))
+    else
+        FAST_EXITS=0
+    fi
+    if [ "$FAST_EXITS" -ge 3 ]; then
+        log "${RED}work.py returned in <10s three times running — refusing to spin${RESET}"
+        write_status "stuck:$START_AT"
+        echo -e "\n${RED}${BOLD}  ✗ STOPPED — work.py is failing a precondition, not working.${RESET}"
+        echo -e "  The reason is the FIRST line of its output above, not the last."
+        echo -e "  Most often: uncommitted or untracked files, or a leftover task-* branch.\n"
+        echo -e "    cd $PROJECT && git status --short && git branch\n"
+        break
+    fi
 
     if [ $EXIT -eq 130 ]; then
         echo -e "\n  Supervisor interrupted."

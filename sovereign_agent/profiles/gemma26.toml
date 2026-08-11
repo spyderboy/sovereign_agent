@@ -1,0 +1,46 @@
+# Gemma 4 26B (MoE) as tier 1, escalating into the dense Qwen models.
+#
+# The bet: ~17 GB resident but only a few billion parameters active per token,
+# so wall-clock per attempt should beat the 21 GB dense models while staying
+# under a 32 GB machine's swap threshold.
+#
+# The risk, stated so it can be measured: this project's binding constraint is
+# strict contract-following, not raw reasoning. Qwen's coder line is trained
+# hard on that; Gemma is a general model. Watch the first five tasks for
+# invented API — Player.player1, activePlayerId, g.removeUnit(...), redeclared
+# locked types. If those run hotter than the 14B's rate, the MoE speed is not
+# buying anything.
+#
+# Baseline to beat (qwen2.5-coder:14b, 2026-08-09, after the instruction fixes):
+# median 1 attempt, ~130s per task, six consecutive attempt-1 landings.
+
+[tiers.1]
+model  = "gemma4:26b"
+params = 26
+ctx    = 16384
+
+[tiers.2]
+model  = "qwen2.5-coder:32b"
+params = 32
+ctx    = 16384
+
+[tiers.3]
+model  = "qwen3.6:35b-a3b-coding-nvfp4"
+params = 35
+ctx    = 16384
+
+[tiers.4]
+model  = "qwen3.6:35b-a3b-coding-nvfp4"
+params = 35
+ctx    = 16384
+
+[budget]
+task_ceiling_s      = 3600
+attempts_tier1      = 3
+attempts_mid        = 2
+attempts_last       = 2
+foreign_park        = 2
+quick_param_limit_b = 30
+
+[run]
+main_branch = "main"

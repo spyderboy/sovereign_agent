@@ -58,32 +58,27 @@ class PromptTooLargeError(Exception):
         )
 
 
-OLLAMA_URL      = os.getenv("LOCAL_MODEL_URL",  "http://localhost:11434")
-# Integration branch. Tasks fork from and merge back to this. Override for
-# projects whose integration branch isn't 'main' (e.g. galaxican uses 'master').
-# The branch helpers below MUST use this, not a hardcoded 'main', or work merges
-# to a divergent 'main' while the real integration branch is left behind.
-MAIN_BRANCH     = os.getenv("MAIN_BRANCH", "main")
-TIER1_MODEL     = os.getenv("TIER1_MODEL",      "qwen2.5-coder:32b")  # 7B dense  — fast, strong on Dart
-TIER2_MODEL     = os.getenv("TIER2_MODEL",      "qwen2.5-coder:32b")                          # 26B MoE (4B active) — quick second opinion
-TIER3_MODEL     = os.getenv("TIER3_MODEL",      "qwen2.5-coder:32b")                    # 30B dense — Qwen3, spatial reasoning
-TIER4_MODEL     = os.getenv("TIER4_MODEL",      "qwen2.5-coder:32b")                  # 32B dense — heavy hitter before Claude
-TIER_MODELS     = [TIER1_MODEL, TIER2_MODEL, TIER3_MODEL, TIER4_MODEL]   # Claude handles final escalation
+# ── Configuration ─────────────────────────────────────────────────────────────
+# Models, tiers, attempts and budgets now live in sov/config.py, selected by a
+# profile file (profiles/<name>.toml) via SOVEREIGN_PROFILE, with environment
+# variables overriding both. Changing the ladder is a data edit, not a code
+# edit to this file.
+from sov.config import (                                        # noqa: E402
+    OLLAMA_URL, MAIN_BRANCH,
+    TIER1_MODEL, TIER2_MODEL, TIER3_MODEL, TIER4_MODEL, TIER_MODELS,
+    QUICK_PARAM_LIMIT_B, MODEL_PARAMS, MODEL_CTX,
+    PLANNER_MODEL, ADVISOR_MODEL, RACE_MODEL, RACE_ENABLED, GIT_BRANCHES,
+    CLAUDE_MODEL, CLAUDE_ENABLED,
+    PHASE_STRIKE_LIMIT, PHASE_MAX_ATTEMPTS, TIER2_MAX_ATTEMPTS, TIER4_MAX_ATTEMPTS,
+    BUDGET_SAMPLES, BUDGET_MULTIPLIER, BUDGET_FLOOR_S, BUDGET_CEILING_S,
+    RETRY_BUDGET_MULT, MAX_TASK_SECONDS, FOREIGN_PARK_LIMIT,
+    ctx_conflicts as _ctx_conflicts, describe as _describe_config,
+)
 
-# ── Quick-mode parameter gate ─────────────────────────────────────────────────
-# POLICY: --quick must only use models whose total parameter count is < 30B.
-# This is enforced at runtime by QUICK_MAX_TIER_IDX, derived from MODEL_PARAMS.
-# When adding or swapping a model, update MODEL_PARAMS with its total param count
-# (in billions, as a float). Unknown models default to float('inf') → excluded.
-# Override individual entries via env: MODEL_PARAMS_TIER1=7 etc.
-QUICK_PARAM_LIMIT_B: float = float(os.getenv("QUICK_PARAM_LIMIT_B", "30"))
+_cw = _ctx_conflicts()
+if _cw:
+    print(_cw)
 
-MODEL_PARAMS: dict[str, float] = {
-    TIER1_MODEL:   float(os.getenv("MODEL_PARAMS_TIER1",   "7")),    #  7B dense
-    TIER2_MODEL:   float(os.getenv("MODEL_PARAMS_TIER2",   "26")),   # 26B MoE
-    TIER3_MODEL:   float(os.getenv("MODEL_PARAMS_TIER3",   "30")),   # 30B dense
-    TIER4_MODEL:   float(os.getenv("MODEL_PARAMS_TIER4",   "32")),   # 32B dense
-}
 
 def _quick_max_tier_idx(models: list[str], params: dict[str, float], limit_b: float) -> int:
     """Return the exclusive upper bound for --quick mode.
@@ -99,85 +94,6 @@ def _quick_max_tier_idx(models: list[str], params: dict[str, float], limit_b: fl
         if params.get(model, float("inf")) >= limit_b:
             return i
     return len(models)
-
-QUICK_MAX_TIER_IDX: int = _quick_max_tier_idx(TIER_MODELS, MODEL_PARAMS, QUICK_PARAM_LIMIT_B)
-RACE_MODEL      = os.getenv("RACE_MODEL",       "qwen2.5-coder:7b-instruct-q4_K_M")  # kept for future A/B experiments
-RACE_ENABLED    = os.getenv("RACE_ENABLED", "0") == "1"   # off by default; enable with RACE_ENABLED=1
-GIT_BRANCHES    = os.getenv("GIT_BRANCHES",  "1") == "1"  # branch-per-task; disable with GIT_BRANCHES=0
-PLANNER_MODEL   = os.getenv("PLANNER_MODEL",    "qwen2.5-coder:7b-instruct-q4_K_M")
-ADVISOR_MODEL   = os.getenv("ADVISOR_MODEL",    "qwen2.5-coder:7b-instruct-q4_K_M")
-
-# Claude API escalation (final tier after all local models exhausted)
-CLAUDE_MODEL        = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
-CLAUDE_ENABLED      = os.getenv("CLAUDE_ENABLED", "0") == "1"   # opt-in only; set CLAUDE_ENABLED=1 to re-enable
-
-# ── Per-model context windows ─────────────────────────────────────────────────
-# Larger context = more files visible per task, but more VRAM for KV cache.
-# Sized for M4 32 GB: small models get more context since their weights are cheaper.
-# Override any entry via env vars (e.g. CTX_TIER1=16384).
-#
-# IMPORTANT: this dict is keyed by MODEL NAME, not by role. TIER1_MODEL,
-# PLANNER_MODEL, and ADVISOR_MODEL are the same model string by default
-# (qwen2.5-coder:7b-instruct-q4_K_M), so CTX_TIER1/CTX_PLANNER/CTX_ADVISOR are
-# NOT three independent settings — a Python dict literal silently lets the
-# last duplicate key win, so only ONE of them actually takes effect for all
-# three roles (whichever line is listed last below). Keep all three env vars
-# equal unless TIER1/PLANNER/ADVISOR are ever pointed at genuinely different
-# models. Fixed 2026-07-10: previously defaulted to 32768 while RACE_MODEL
-# defaulted to 65536 — an unfair race, and backwards, since qwen2.5-coder:7b
-# (4.7GB) is the SMALLEST model in the whole lineup, smaller than
-# gemma4:12b-mlx (7.7GB) which was getting the bigger context window.
-MODEL_CTX: dict[str, int] = {
-    TIER1_MODEL:   int(os.getenv("CTX_TIER1",   "24576")),  # 7B dense  — smallest model, most headroom
-    TIER2_MODEL:   int(os.getenv("CTX_TIER2",   "24576")),  # 26B MoE   — DOUBLED 2026-07-11: same
-    # silent-overflow suspect as tier4 (fixed below) — tier2/3 "no output" failures
-    # were untraceable until the trace-logging gap was closed this session; real
-    # prompts run in the same 14-16k token range that overflowed tier4 at 16384.
-    TIER3_MODEL:   int(os.getenv("CTX_TIER3",   "24576")),  # 35B MoE   — DOUBLED 2026-07-11, same reasoning
-    # 2026-07-10: doubled 16384→32768 — this was the "last resort" tier failing
-    # on every single escalated task in a real run, hitting "prompt too large"
-    # even after trimming to 3 files (real prompts were running 14.5k-15.7k
-    # tokens). A tier that can't accept the prompt isn't a safety net, it's a
-    # guaranteed dead end. Watch VRAM on 32GB Macs — this is the one tier where
-    # the ceiling really was sized tight on purpose, so if this causes OOM
-    # thrashing it may need to come back down and get its file-trimming logic
-    # tightened instead.
-    TIER4_MODEL:   int(os.getenv("CTX_TIER4",   "24576")),  # 32B dense
-    PLANNER_MODEL: int(os.getenv("CTX_PLANNER", "24576")),  # same model as TIER1_MODEL — see note above
-    ADVISOR_MODEL: int(os.getenv("CTX_ADVISOR", "24576")),  # same model as TIER1_MODEL — see note above
-    # RACE_MODEL wasn't in this table before (2026-07-10) — it silently fell through
-    # to the OLLAMA_CONTEXT_LENGTH default of 16384, which caused it to truncate on
-    # ~31% of race attempts (compound/multi-file prompts ran 91-107% of that limit).
-    # Now matches TIER1_MODEL's 65536 so the two raced models get equal footing.
-    RACE_MODEL:    int(os.getenv("CTX_RACE",    "24576")),
-}
-
-# The TIER1/PLANNER/ADVISOR collision above is silent by design (a dict can only
-# hold one value per key) — this check makes it loud instead, in case someone
-# sets the env vars inconsistently expecting three independent values.
-if len({TIER1_MODEL, PLANNER_MODEL, ADVISOR_MODEL}) == 1:
-    _ctx_vals = {os.getenv("CTX_TIER1", "24576"), os.getenv("CTX_PLANNER", "24576"), os.getenv("CTX_ADVISOR", "24576")}
-    if len(_ctx_vals) > 1:
-        print(f"⚠  CTX_TIER1/CTX_PLANNER/CTX_ADVISOR are set to different values "
-              f"({_ctx_vals}) but TIER1_MODEL/PLANNER_MODEL/ADVISOR_MODEL are the "
-              f"same model ({TIER1_MODEL}) — only one value actually applies "
-              f"(MODEL_CTX[{TIER1_MODEL!r}] = {MODEL_CTX[TIER1_MODEL]}). "
-              f"Set all three env vars to the same value.")
-
-# Strikes before advancing to the next tier (same error repeated)
-PHASE_STRIKE_LIMIT = 2
-
-# Hard cap on total validation failures per tier — catches thrashing (all-different errors).
-# 2026-07-10: tier 1 lowered from 6→3 — a task that isn't solved in 3 tries on the fast,
-# cheap tier is better off escalating sooner than grinding. Tiers 2-3 stay tight at 2 (they
-# already were). Tier 4 — the LAST tier, the automated system's final resort before a task
-# needs a human's attention — gets its own named constant instead of being lumped in with
-# tiers 2-3 under one "tier_idx > 0" check, so it can be tuned independently of them.
-PHASE_MAX_ATTEMPTS = 3
-TIER2_MAX_ATTEMPTS = 2
-TIER4_MAX_ATTEMPTS = 2
-
-
 def _max_attempts_for_tier(idx: int) -> int:
     """Single source of truth for the attempt ceiling — tier 1 / last tier / everything
     in between each get their own budget. Also used for the printed 'Attempt X/N' label,
@@ -188,24 +104,8 @@ def _max_attempts_for_tier(idx: int) -> int:
         return TIER4_MAX_ATTEMPTS
     return TIER2_MAX_ATTEMPTS
 
-# ── Time budget ────────────────────────────────────────────────────────────────
-# Max wall-clock seconds a single task may run before being skipped.
-# Computed dynamically from rolling average of recently completed tasks.
-BUDGET_SAMPLES    = 20    # recent completed tasks to include in average
-BUDGET_MULTIPLIER = 1.7   # first pass: ~1.7× rolling average (6 min avg → 10 min budget)
-BUDGET_FLOOR_S    = 120   # never cut off before 2 min regardless of average
-BUDGET_CEILING_S  = 1200  # first-pass hard cap: 20 min
-RETRY_BUDGET_MULT = 2.0   # retry pass ceiling: 2× first-pass ceiling = 40 min
+QUICK_MAX_TIER_IDX: int = _quick_max_tier_idx(TIER_MODELS, MODEL_PARAMS, QUICK_PARAM_LIMIT_B)
 
-# Absolute hard ceiling — no exceptions. Unlike BUDGET_CEILING_S / RETRY_BUDGET_MULT
-# (which only apply in the "wrote code, validation failed" path and can be pushed out
-# by the +300s "bonus" granted on each tier escalation), this is checked at the very
-# top of every attempt, on every code path (timeout, bad-pattern loop, no-output,
-# stale-error thrash). 2026-07-12: a single task ran 25,769s (~7.2h) because repeated
-# tier escalations each got their own 300s bonus and the bad-pattern/no-output
-# branches never consulted the budget check at all. This caps total wall-clock time
-# per task regardless of how many tiers remain or how the bonus math works out.
-MAX_TASK_SECONDS  = 3600  # 1 hour, hard stop — no bonuses, no tier-availability escape hatch
 
 # Lazy imports — only loaded on first validation failure to avoid startup cost
 _autofix = None
@@ -216,6 +116,14 @@ def _get_autofix():
     if _autofix is None:
         import autofix as _autofix
     return _autofix
+
+_dart_import_fixer = None
+
+def _get_dart_import_fixer():
+    global _dart_import_fixer
+    if _dart_import_fixer is None:
+        import dart_import_fixer as _dart_import_fixer
+    return _dart_import_fixer
 
 def _get_advisor():
     global _advisor
@@ -1872,6 +1780,31 @@ def _extract_task_gate(task: str | None) -> str | None:
     return None
 
 
+def _park_for_review(project_root: str, task_idx: int, task: str, model: str,
+                     written: list[str], foreign: list[str], output: str) -> None:
+    """Append a human-readable diagnosis to logs/needs_review.md."""
+    path = os.path.join(project_root, REVIEW_LOG)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fresh = not os.path.exists(path)
+    with open(path, "a") as f:
+        if fresh:
+            f.write("# Tasks parked for review\n\n"
+                    "Each entry failed repeatedly with errors naming no file the\n"
+                    "task wrote. A larger model cannot fix these — the cause is an\n"
+                    "earlier merge or a gate that cannot pass.\n")
+        f.write(f"\n---\n\n## {date.today().isoformat()} — task {task_idx}\n\n")
+        f.write(f"**Task:** {task[:300]}\n\n")
+        f.write(f"**Last model:** {model}\n\n")
+        f.write(f"**This task wrote:** {', '.join(written) or '(nothing)'}\n\n")
+        f.write(f"**Errors named these instead:** {', '.join(foreign[:8])}\n\n")
+        f.write("**Likely cause:** a file merged by an earlier task is wrong, or\n"
+                "this task's gate cannot pass on the current tree. Check whether\n"
+                "the blamed file was gated on `analyze` only — that proves it\n"
+                "compiles, not that it is correct.\n\n")
+        f.write("<details><summary>Validator output</summary>\n\n```\n")
+        f.write(output[-2000:].rstrip() + "\n```\n\n</details>\n")
+
+
 def validate(
     baseline_errors: frozenset[str] | None = None,
     files_written: list[str] | None = None,
@@ -2024,6 +1957,17 @@ def print_timing_report(project_root: str, session_start: float) -> None:
 
 VELOCITY_LOG   = "logs/velocity.jsonl"
 ESCALATE_LOG   = "logs/escalate.md"
+REVIEW_LOG     = "logs/needs_review.md"
+
+# Validation failures naming NO file this task wrote, before the task is parked
+# for a human instead of climbing the model ladder.
+#
+# CUMULATIVE, not consecutive. A consecutive rule almost never fires: a worker
+# whose file still has its own compile errors interleaves them with the foreign
+# gate failures, and every own-file error resets the streak. A gate that failed
+# on someone else's file once will fail that way again — the evidence does not
+# expire because the next attempt failed differently.
+FOREIGN_PARK_LIMIT = 2
 TRACES_LOG     = "logs/task_traces.jsonl"
 RACE_LOG       = "logs/race.jsonl"
 
@@ -2644,6 +2588,7 @@ def run_task(task: str, project_root: str, log_file: str,
 
     task_start    = time.time()
     errors_seen: list[str] = []
+    foreign_streak = 0
     last_written: list[str] = []
     last_skipped: list[str] = []
 
@@ -3005,6 +2950,18 @@ def run_task(task: str, project_root: str, log_file: str,
             except Exception as _e:
                 print(f"  {DIM}(import-fix error: {_e}){RESET}")
 
+        # Mechanically repair Dart imports BEFORE validation. The dominant
+        # local-model failure in Dart is correct code referencing a real project
+        # symbol the model could not locate. Adding the import costs zero tokens;
+        # re-prompting to regenerate the file to add one line costs an attempt.
+        if any(x.endswith(".dart") for x in written):
+            try:
+                _fixes = _get_dart_import_fixer().fix_dart_imports(project_root, written)
+                for _f in _fixes:
+                    print(f"  {DIM}import fix: {_f}{RESET}")
+            except Exception:
+                pass
+
         print(f"  {DIM}Validating...{RESET}", end="", flush=True)
         passed, output = validate(baseline_errors, files_written=written, task_gate=_extract_task_gate(task))
 
@@ -3045,6 +3002,58 @@ def run_task(task: str, project_root: str, log_file: str,
         first_error = next((l for l in output.splitlines() if "error" in l.lower()), output[:120])
         print(f" {RED}✗ {first_error[:100]}{RESET}")
         errors_seen.extend(_extract_error_codes(output))
+
+        # Whose failure is this, actually? A gate can fail because of a file a
+        # PREVIOUS task merged — the classic is a worker that redeclared a locked
+        # type or guessed a locked constant. That lands green on an analyze-only
+        # gate and detonates in the first conformance gate that imports it. The
+        # harness then blames the task that happens to be running, escalates ITS
+        # model, and burns ITS budget on a file it never wrote and cannot fix.
+        try:
+            _foreign = sorted({
+                m for m in re.findall(r"[\w./-]+\.dart", output)
+                if not any(w.replace("\\", "/").endswith(m.lstrip("./"))
+                           or m.endswith(w.replace("\\", "/")) for w in written)
+                and "/flutter/" not in m and not m.startswith("package:")
+            })
+            _mine = [w for w in written
+                     if w.replace("\\", "/") in output.replace("\\", "/")]
+            if _foreign and not _mine:
+                foreign_streak += 1
+                print(f"  {YELLOW}⚠  No error names a file this task wrote. "
+                      f"Blamed files: {', '.join(_foreign[:3])}{RESET}")
+                print(f"  {DIM}   The cause is probably an earlier merge or an "
+                      f"unsatisfiable gate, not this task. Escalating the model "
+                      f"cannot fix it.{RESET}")
+                errors_seen.append("foreign_failure")
+        except Exception:
+            pass
+
+        # Park instead of climbing the ladder. Non-blocking: it records the
+        # diagnosis, skips the task, and lets the run carry on, so an overnight
+        # session is not held hostage by one bad merge.
+        if foreign_streak >= FOREIGN_PARK_LIMIT:
+            elapsed_park = time.time() - task_start
+            print(f"\n  {RED}⏸  Parked for review — {foreign_streak} failures "
+                  f"naming no file this task wrote{RESET}")
+            print(f"  {DIM}   Wrote {REVIEW_LOG}. Not escalating; a larger model "
+                  f"cannot reach this.{RESET}")
+            try:
+                _park_for_review(project_root, task_idx, task, current_model,
+                                 written, _foreign, output)
+            except Exception:
+                pass
+            restore_files(backups, project_root)
+            _append_velocity(project_root, {
+                "date": date.today().isoformat(), "task": task[:120],
+                "outcome": "needs_review", "attempts": attempt,
+                "duration_s": round(elapsed_park, 1),
+                "error_types": list(dict.fromkeys(errors_seen)),
+                "model": current_model,
+            })
+            _log_task_summary(project_root, task_idx, task, "needs_review",
+                              attempt, current_model, task_start)
+            return "skipped"
 
         # Step 1: Mechanical auto-fixer
         try:

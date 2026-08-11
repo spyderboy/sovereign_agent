@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Xanadu — Owner's Manual</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d212a; --line:#272c37;
+    --text:#e6e8ee; --dim:#9aa3b2; --accent:#7dd3a0; --warn:#f0b866; --bad:#f08c8c;
+    --code:#0b0d11;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+  header{position:sticky;top:0;z-index:10;background:rgba(15,17,21,.97);
+         border-bottom:1px solid var(--line);padding:14px 22px;backdrop-filter:blur(6px)}
+  h1{margin:0 0 2px;font-size:17px;letter-spacing:.2px}
+  .sub{color:var(--dim);font-size:12.5px}
+  #q{width:100%;margin-top:11px;padding:10px 12px;border-radius:8px;
+     border:1px solid var(--line);background:var(--panel);color:var(--text);font-size:14px}
+  #q:focus{outline:none;border-color:var(--accent)}
+  main{padding:20px 22px 80px;max-width:1020px;margin:0 auto}
+  .chips{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 20px}
+  .chip{padding:5px 11px;border:1px solid var(--line);border-radius:999px;background:var(--panel);
+        color:var(--dim);font-size:12.5px;cursor:pointer;user-select:none}
+  .chip:hover,.chip.on{border-color:var(--accent);color:var(--accent)}
+  section{border:1px solid var(--line);border-radius:11px;background:var(--panel);
+          margin-bottom:14px;overflow:hidden}
+  .head{padding:13px 16px;cursor:pointer;display:flex;align-items:center;gap:10px}
+  .head:hover{background:var(--panel2)}
+  .head h2{margin:0;font-size:15px;font-weight:600;flex:1}
+  .when{color:var(--dim);font-size:12.5px;font-weight:400;display:block;margin-top:3px}
+  .arrow{color:var(--dim);font-size:12px;transition:transform .15s}
+  section.open .arrow{transform:rotate(90deg)}
+  .body{display:none;padding:0 16px 15px}
+  section.open .body{display:block}
+  .note{color:var(--dim);font-size:13.5px;margin:0 0 11px}
+  .note b{color:var(--text);font-weight:600}
+  .warn{border-left:3px solid var(--warn);padding:9px 12px;background:#1e1a12;
+        border-radius:0 7px 7px 0;margin:11px 0;font-size:13.5px}
+  .stop{border-left:3px solid var(--bad);padding:9px 12px;background:#1e1414;
+        border-radius:0 7px 7px 0;margin:11px 0;font-size:13.5px}
+  .block{position:relative;margin:10px 0}
+  pre{margin:0;background:var(--code);border:1px solid var(--line);border-radius:8px;
+      padding:13px 15px;overflow-x:auto;font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
+      color:#dfe4ee;white-space:pre}
+  .cp{position:absolute;top:8px;right:8px;border:1px solid var(--line);background:var(--panel2);
+      color:var(--dim);border-radius:6px;padding:4px 9px;font-size:11.5px;cursor:pointer}
+  .cp:hover{color:var(--accent);border-color:var(--accent)}
+  .cp.done{color:var(--accent);border-color:var(--accent)}
+  .expect{color:var(--accent);font-size:12.5px;margin:6px 0 0;font-family:ui-monospace,Menlo,monospace}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin:10px 0}
+  td,th{border-bottom:1px solid var(--line);padding:7px 9px;text-align:left;vertical-align:top}
+  th{color:var(--dim);font-weight:600;font-size:12.5px}
+  code{background:var(--code);padding:1.5px 5px;border-radius:4px;
+       font:12.5px ui-monospace,Menlo,monospace;color:#c8d3e6}
+  .none{color:var(--dim);padding:26px 4px;text-align:center;display:none}
+  footer{color:var(--dim);font-size:12px;text-align:center;padding:26px 0 0;border-top:1px solid var(--line);margin-top:26px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Xanadu — Owner's Manual</h1>
+  <div class="sub">Frequently used commands, by situation. Click a card to open, click a block to copy.</div>
+  <input id="q" placeholder="Search: dirty tree, looping, park, ollama, overnight, branch…" autocomplete="off">
+</header>
+
+<main>
+<div class="chips" id="chips"></div>
+
+<section data-tags="stop kill pkill panic emergency">
+  <div class="head"><span class="arrow">▶</span><div><h2>Stop everything</h2>
+    <span class="when">First move for almost any problem. Ctrl-C is not enough.</span></div></div>
+  <div class="body">
+    <p class="note">Ctrl-C kills the foreground process but leaves <b>supervisor and worker alive</b>, and they keep resetting your repo underneath you. Kill the supervisor first or it just relaunches the worker.</p>
+    <div class="block"><pre>pkill -9 -f supervisor.sh
+pkill -9 -f work.py
+sleep 1
+ps aux | grep -E '[w]ork.py|[s]upervisor.sh' | wc -l</pre></div>
+    <p class="expect">must print 0</p>
+    <p class="note">Free the model from memory too, if you're switching models or need the RAM:</p>
+    <div class="block"><pre>ollama stop qwen2.5-coder:14b
+ollama ps</pre></div>
+    <p class="expect">ollama ps should come back empty — otherwise it holds ~9–21 GB for 30 minutes</p>
+  </div>
+</section>
+
+<section data-tags="clean restart branch dirty tree reset git start over">
+  <div class="head"><span class="arrow">▶</span><div><h2>Clean restart (the standard block)</h2>
+    <span class="when">Any time a run has been interrupted, or before launching.</span></div></div>
+  <div class="body">
+    <p class="note">Run <b>Stop everything</b> first. Then:</p>
+    <div class="block"><pre>cd ~/Code/witches_bricks
+find .git -name '*.lock' -delete
+git checkout -f main
+git clean -fd
+git for-each-ref --format='%(refname:short)' 'refs/heads/task-*' | xargs -r git branch -D
+git status --short
+git branch</pre></div>
+    <p class="expect">git status --short must print NOTHING — a ?? line is as fatal as a modified file</p>
+    <p class="expect">git branch must show only main</p>
+    <div class="warn"><b>Why each line is there.</b> <code>checkout -f</code> restores tracked files but leaves untracked ones, so a file a failed task wrote survives every clean and blocks every start — that's what <code>git clean -fd</code> is for. The refspec must be <b>quoted</b> or zsh glob-expands it, fails with "no matches found", and deletes no branches at all.</div>
+  </div>
+</section>
+
+<section data-tags="launch run start supervisor profile model gemma qwen overnight">
+  <div class="head"><span class="arrow">▶</span><div><h2>Launch a run</h2>
+    <span class="when">After a clean restart. Always from sovereign_agent, never the project.</span></div></div>
+  <div class="body">
+    <div class="block"><pre>cd ~/Code/Xanadu/sovereign_agent
+SOVEREIGN_PROFILE=gemma26 ./supervisor.sh ~/Code/witches_bricks --features-only</pre></div>
+    <p class="note">Overnight — <code>caffeinate -i</code> blocks idle sleep, but <b>not lid-close sleep</b>. Leave the lid open.</p>
+    <div class="block"><pre>cd ~/Code/Xanadu/sovereign_agent
+SOVEREIGN_PROFILE=gemma26 caffeinate -i ./supervisor.sh ~/Code/witches_bricks --features-only</pre></div>
+    <p class="note"><b>Read the banner before walking away.</b> It is the receipt for everything you just committed:</p>
+    <table>
+      <tr><th>Banner line</th><th>What it proves</th></tr>
+      <tr><td><code>Loaded N always-include context file(s)</code></td><td>your config edit landed — if N is wrong, the commit didn't</td></tr>
+      <tr><td><code>config: profile 'gemma26' | …</code></td><td>which ladder is actually running</td></tr>
+      <tr><td><code>N locked paths</code></td><td>the locked contract is in force</td></tr>
+    </table>
+  </div>
+</section>
+
+<section data-tags="looping loop spinning dirty tree banner scroll wall repeat">
+  <div class="head"><span class="arrow">▶</span><div><h2>It's looping / scrolling banners forever</h2>
+    <span class="when">Same startup text over and over, no attempts happening.</span></div></div>
+  <div class="body">
+    <div class="stop"><b>Read the FIRST lines of the scroll, not the last.</b> <code>work.py</code> refused a precondition and exited; the reason is one line near the top and it names the file. Everything after is the supervisor relaunching.</div>
+    <p class="note">The three causes, in order of frequency:</p>
+    <table>
+      <tr><th>Message</th><th>Fix</th></tr>
+      <tr><td><code>Working tree is dirty</code></td><td>Clean restart block — note a <code>??</code> untracked line counts</td></tr>
+      <tr><td><code>On branch 'task-…', not 'main'</code></td><td>Clean restart block — deletes leftover task branches</td></tr>
+      <tr><td><code>index.lock / packed-refs.lock exists</code></td><td><code>find .git -name '*.lock' -delete</code></td></tr>
+    </table>
+    <p class="note">Stop, then run the clean restart block. If the harness is current, it stops itself after three sub-10-second exits instead of spinning.</p>
+  </div>
+</section>
+
+<section data-tags="how did it go overnight progress results morning check status review">
+  <div class="head"><span class="arrow">▶</span><div><h2>How did the run go?</h2>
+    <span class="when">First thing in the morning, or after any long run.</span></div></div>
+  <div class="body">
+    <p class="note"><b>Parked tasks first.</b> These stopped for a reason no model could fix, and each entry names the file actually at fault:</p>
+    <div class="block"><pre>cd ~/Code/witches_bricks
+cat logs/needs_review.md</pre></div>
+    <p class="note">Then progress and per-task outcomes:</p>
+    <div class="block"><pre>cd ~/Code/witches_bricks
+echo "$(grep -c '^- \[x\]' ROADMAP.md) / $(grep -cE '^- \[[ x]\]' ROADMAP.md) done"
+python3 -c "
+import json
+rows=[json.loads(l) for l in open('logs/velocity.jsonl')][-15:]
+for r in rows:
+    print(f\"{r.get('outcome','?'):12} {r['attempts']:2}a {r['duration_s']:7.0f}s  {r['task'][:52]}\")"</pre></div>
+    <table>
+      <tr><th>outcome</th><th>meaning</th></tr>
+      <tr><td><code>done</code></td><td>merged. attempts=1 is the healthy case</td></tr>
+      <tr><td><code>needs_review</code></td><td>parked — failures named no file it wrote</td></tr>
+      <tr><td><code>budget</code></td><td>hit the 3600s hard ceiling and was skipped</td></tr>
+    </table>
+    <p class="note">Is it still alive? The supervisor only logs at batch boundaries, so silence there proves nothing:</p>
+    <div class="block"><pre>cd ~/Code/witches_bricks
+ls -l logs/task_traces.jsonl; sleep 10; ls -l logs/task_traces.jsonl</pre></div>
+    <p class="expect">size changed = running · unchanged = dead or stuck</p>
+  </div>
+</section>
+
+<section data-tags="stalled stuck task failing diagnose debug why escalating tier logs">
+  <div class="head"><span class="arrow">▶</span><div><h2>A task is stuck or escalating</h2>
+    <span class="when">Same error repeating, or climbing the model ladder.</span></div></div>
+  <div class="body">
+    <p class="note"><b>Ask in this order.</b> Getting the order wrong is what turns five minutes into six hours.</p>
+    <table>
+      <tr><th>1</th><td><b>Whose failure is it?</b> If no error names a file this task wrote, the cause is an earlier merge or an unsatisfiable gate. A bigger model cannot reach it. Look for the <code>⚠ No error names a file this task wrote</code> line.</td></tr>
+      <tr><th>2</th><td><b>Read the record, not the console.</b> The console truncates to the first error at 100 characters and routinely hides the cause.</td></tr>
+      <tr><th>3</th><td><b>Repetition means diagnose; variation means escalate.</b> The same error every attempt is a constant in the environment. Different errors each time is a model out of its depth.</td></tr>
+    </table>
+    <div class="block"><pre>cd ~/Code/witches_bricks
+tail -60 logs/$(date +%Y-%m-%d)-work.log</pre></div>
+    <table>
+      <tr><th>file</th><th>holds</th></tr>
+      <tr><td><code>logs/&lt;date&gt;-work.log</code></td><td>full validator output for every attempt</td></tr>
+      <tr><td><code>logs/task_traces.jsonl</code></td><td>prompt + raw model output per attempt</td></tr>
+      <tr><td><code>logs/needs_review.md</code></td><td>parked tasks with diagnosis</td></tr>
+      <tr><td><code>logs/velocity.jsonl</code></td><td>one line per task outcome</td></tr>
+    </table>
+  </div>
+</section>
+
+<section data-tags="edit fix project file mid-run commit config roadmap ordering rule">
+  <div class="head"><span class="arrow">▶</span><div><h2>Change a project file while working</h2>
+    <span class="when">Editing config, ROADMAP, API.md, or fixing a merged file by hand.</span></div></div>
+  <div class="body">
+    <div class="stop"><b>The ordering rule.</b> A <code>git checkout -f</code> must never appear AFTER an edit and BEFORE its commit. <code>work.py</code> runs <code>checkout -f</code> and <code>clean -fd</code> between every task, so an uncommitted edit is discarded within seconds. Never edit a project file while a run may be live.</div>
+    <p class="note">Safe order — <b>kill → clean → edit → commit in the same block → verify → launch</b>:</p>
+    <div class="block"><pre>cd ~/Code/witches_bricks
+&lt;your edit here&gt;
+git add -A
+git commit -m "what changed"
+git show HEAD:&lt;the file&gt; | &lt;print the changed value&gt;</pre></div>
+    <p class="note">Example — proving a config edit actually landed:</p>
+    <div class="block"><pre>cd ~/Code/witches_bricks
+git show HEAD:.sovereign_config.json | python3 -c "import json,sys; print('COMMITTED:', len(json.load(sys.stdin)['context_always_include']))"</pre></div>
+    <p class="expect">on disk but not in HEAD does not exist as far as the next task is concerned</p>
+  </div>
+</section>
+
+<section data-tags="model switch profile ab test gemma qwen tier ladder change env">
+  <div class="head"><span class="arrow">▶</span><div><h2>Switch models / A-B test</h2>
+    <span class="when">Trying a different ladder without touching work.py.</span></div></div>
+  <div class="body">
+    <p class="note">Model choice lives in <code>profiles/&lt;name&gt;.toml</code>. Copy a file, change two lines, run it:</p>
+    <div class="block"><pre>cd ~/Code/Xanadu/sovereign_agent
+ls profiles/
+SOVEREIGN_PROFILE=qwen25  ./supervisor.sh ~/Code/witches_bricks --features-only</pre></div>
+    <p class="note">One-off override without editing anything — a real env var beats the profile:</p>
+    <div class="block"><pre>TIER1_MODEL=gemma4:26b SOVEREIGN_PROFILE=qwen25 ./supervisor.sh ~/Code/witches_bricks --features-only</pre></div>
+    <div class="warn"><b>Precedence, highest first:</b> exported env var → <code>sovereign_agent/.env</code> (auto-loaded, easy to forget it exists) → <code>profiles/*.toml</code> → built-in defaults. If a profile seems ignored, check <code>.env</code> first — it should hold keys and endpoints only, not models.</div>
+    <div class="block"><pre>grep -nE "^TIER|^PLANNER|^ADVISOR|^MODEL_PARAMS" ~/Code/Xanadu/sovereign_agent/.env</pre></div>
+    <p class="expect">ideally prints nothing — model lines there silently outrank every profile</p>
+  </div>
+</section>
+
+<section data-tags="commit harness sovereign lost work reverted scripts protect">
+  <div class="head"><span class="arrow">▶</span><div><h2>Protect harness changes</h2>
+    <span class="when">After anyone edits sovereign_agent/. Do it immediately.</span></div></div>
+  <div class="body">
+    <div class="stop"><b>Xanadu is a git repo too.</b> A <code>git checkout -f</code> plus <code>git clean -fd</code> in it reverts tracked files and <b>deletes untracked ones outright</b>. On 2026-08-10 that wiped a day of harness fixes and six helper scripts with no stash and nothing recoverable in <code>fsck</code>.</div>
+    <div class="block"><pre>cd ~/Code/Xanadu
+git status --short
+git add -A
+git commit -m "harness: what changed"</pre></div>
+    <p class="note">Before any destructive git command there, see what you'd lose:</p>
+    <div class="block"><pre>cd ~/Code/Xanadu
+git clean -nd</pre></div>
+    <p class="expect">-n is a dry run: lists what -fd would delete, deletes nothing</p>
+  </div>
+</section>
+
+<section data-tags="paths where files live reference project sovereign logs">
+  <div class="head"><span class="arrow">▶</span><div><h2>Where things live</h2>
+    <span class="when">Reference.</span></div></div>
+  <div class="body">
+    <table>
+      <tr><th>path</th><th>what</th></tr>
+      <tr><td><code>~/Code/witches_bricks</code></td><td>the project — spec, ROADMAP, lib/, logs/</td></tr>
+      <tr><td><code>~/Code/Xanadu/sovereign_agent</code></td><td>the harness — work.py, supervisor.sh, profiles/</td></tr>
+      <tr><td><code>&lt;project&gt;/.sovereign_config.json</code></td><td>locked files, validate commands, bad-pattern guards</td></tr>
+      <tr><td><code>&lt;project&gt;/ROADMAP.md</code></td><td>the task list; <code>- [x]</code> means done</td></tr>
+      <tr><td><code>&lt;project&gt;/.roorules</code></td><td>injected into every worker prompt</td></tr>
+      <tr><td><code>sovereign_agent/profiles/*.toml</code></td><td>model ladders</td></tr>
+      <tr><td><code>sovereign_agent/.env</code></td><td>API keys and endpoints — <b>not</b> models</td></tr>
+    </table>
+    <p class="note">Only <code>.sovereign_config.json</code> is read. A file named <code>.sovereign_config.active.json</code> or similar is inert — to switch phases, copy over the real name.</p>
+  </div>
+</section>
+<div class="none" id="none">Nothing matches that.</div>
+
+<footer>Xanadu owner's manual · click any block to copy · press / to search</footer>
+</main>
+
+<script>
+(function(){
+  var secs = Array.prototype.slice.call(document.querySelectorAll('section'));
+  secs.forEach(function(s){
+    s.querySelector('.head').addEventListener('click', function(){ s.classList.toggle('open'); });
+  });
+  if (secs[0]) secs[0].classList.add('open');
+
+  // copy on click, with a file:// safe fallback
+  document.querySelectorAll('.block').forEach(function(b){
+    var btn = document.createElement('button');
+    btn.className = 'cp'; btn.textContent = 'copy';
+    b.appendChild(btn);
+    function copy(e){
+      e.stopPropagation();
+      var txt = b.querySelector('pre').innerText;
+      var done = function(){ btn.textContent='copied'; btn.classList.add('done');
+                             setTimeout(function(){btn.textContent='copy';btn.classList.remove('done');},1200); };
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(txt).then(done, function(){fallback(txt,done);});
+      } else { fallback(txt, done); }
+    }
+    function fallback(txt, done){
+      var ta=document.createElement('textarea'); ta.value=txt;
+      ta.style.position='fixed'; ta.style.opacity='0';
+      document.body.appendChild(ta); ta.select();
+      try{document.execCommand('copy'); done();}catch(err){}
+      document.body.removeChild(ta);
+    }
+    btn.addEventListener('click', copy);
+    b.addEventListener('click', copy);
+  });
+
+  // filter chips from tags
+  var tags = {};
+  secs.forEach(function(s){ (s.dataset.tags||'').split(/\s+/).forEach(function(t){ if(t) tags[t]=1; }); });
+  var picks = ['stop','restart','launch','looping','overnight','stuck','commit','model','paths'];
+  var wrap = document.getElementById('chips');
+  picks.forEach(function(t){
+    var c=document.createElement('div'); c.className='chip'; c.textContent=t;
+    c.addEventListener('click', function(){
+      var on=c.classList.toggle('on');
+      document.querySelectorAll('.chip').forEach(function(o){ if(o!==c) o.classList.remove('on'); });
+      q.value = on ? t : ''; run();
+    });
+    wrap.appendChild(c);
+  });
+
+  var q = document.getElementById('q'), none = document.getElementById('none');
+  function run(){
+    var v = q.value.trim().toLowerCase(), shown = 0;
+    secs.forEach(function(s){
+      var hay = (s.dataset.tags+' '+s.innerText).toLowerCase();
+      var hit = !v || hay.indexOf(v) !== -1;
+      s.style.display = hit ? '' : 'none';
+      if (hit) { shown++; if (v) s.classList.add('open'); }
+    });
+    none.style.display = shown ? 'none' : 'block';
+  }
+  q.addEventListener('input', function(){
+    document.querySelectorAll('.chip').forEach(function(o){o.classList.remove('on');});
+    run();
+  });
+  document.addEventListener('keydown', function(e){
+    if (e.key === '/' && document.activeElement !== q){ e.preventDefault(); q.focus(); }
+    if (e.key === 'Escape'){ q.value=''; run(); q.blur(); }
+  });
+})();
+</script>
+</body>
+</html>

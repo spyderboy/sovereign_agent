@@ -12,6 +12,12 @@ Fixable rules:
   depend_on_referenced_packages → add ignore_for_file header to lib/ test files
   undefined_class (dart:ui)   → add 'import dart:ui' when Color/Canvas/etc undefined
   file_names                  → add ignore_for_file: file_names to README.dart files
+  undefined_named_parameter   → strip the label from a named arg on a
+                                positional-only constructor
+
+Local models default to named arguments because most Flutter APIs use them, so
+a locked positional-only value type draws `Foo(target: c)` attempt after
+attempt. Deleting six characters is not work a 14B should be woken up for.
 """
 
 import os
@@ -150,6 +156,41 @@ def fix_file_names(file_path: str) -> bool:
     return True
 
 
+"""Rules whose fix rewrites the whole file rather than one reported line.
+
+Both PREPEND a line, so they must run after every line-anchored fix in the same
+batch. See the ordering note in apply_mechanical_fixes.
+"""
+_WHOLE_FILE_RULES = {'file_names', 'depend_on_referenced_packages'}
+
+_NAMED_ARG_MSG = re.compile(r"named parameter '(\w+)' isn't defined")
+
+
+def fix_undefined_named_parameter(file_path: str, line_no: int, col_no: int,
+                                  message: str) -> bool:
+    """Delete the `name:` label from a named argument the constructor lacks.
+
+    `SpawnAction(target: c)` becomes `SpawnAction(c)`. Only the label goes; an
+    argument in the wrong ORDER still fails validation, which is correct — that
+    one is a real mistake and the model should be told.
+    """
+    m = _NAMED_ARG_MSG.search(message)
+    if not m:
+        return False
+    name = m.group(1)
+    lines = _read_lines(file_path)
+    if not lines or line_no < 1 or line_no > len(lines):
+        return False
+    line = lines[line_no - 1]
+    col = col_no - 1
+    label = re.compile(rf"\b{re.escape(name)}\s*:\s*")
+    hit = label.match(line, col) or label.search(line)
+    if not hit:
+        return False
+    lines[line_no - 1] = line[:hit.start()] + line[hit.end():]
+    return _write_lines(file_path, lines)
+
+
 # ── Dispatch table ─────────────────────────────────────────────────────────────
 
 def _dispatch(error: dict, project_root: str) -> bool:
@@ -172,6 +213,10 @@ def _dispatch(error: dict, project_root: str) -> bool:
 
     if rule == 'file_names':
         return fix_file_names(path)
+
+    if rule == 'undefined_named_parameter':
+        return fix_undefined_named_parameter(
+            path, error['line'], error['col'], error['message'])
 
     if rule in ('undefined_class', 'creation_with_non_type', 'undefined_identifier'):
         return fix_missing_dart_ui(path, error['message'])
@@ -248,6 +293,22 @@ def apply_mechanical_fixes(analyze_output: str, project_root: str) -> tuple[int,
     errors = parse_flutter_errors(analyze_output)
     fixed_count = 0
     unfixed: list[dict] = []
+
+    # EVERY line and column below was measured against the file as it stood
+    # BEFORE any fix ran, so the order fixes are applied in is not a detail — a
+    # fix that adds or removes a whole line invalidates the coordinates of every
+    # fix that has not run yet.
+    #
+    # Whole-file header fixes go LAST (they prepend a line); everything else
+    # runs bottom-up. Getting this wrong is invisible in the log: the header fix
+    # succeeds, the count reads "Auto-fixed 1 issue(s)", and the fix that
+    # actually mattered quietly misses by one line.
+    errors.sort(key=lambda e: (
+        e['file'],
+        1 if e['rule'] in _WHOLE_FILE_RULES else 0,
+        0 if e['rule'] in _WHOLE_FILE_RULES else -e['line'],
+        0 if e['rule'] in _WHOLE_FILE_RULES else -e['col'],
+    ))
 
     # Deduplicate: depend_on_referenced_packages fires once per import per file,
     # but we only need to fix the file header once.

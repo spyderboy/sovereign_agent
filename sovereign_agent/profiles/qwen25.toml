@@ -1,0 +1,36 @@
+# The known-good ladder: qwen2.5-coder:14b tier 1, escalating to qwen3.6 35B.
+#
+# This is the configuration that landed 14 Witch's Bricks tasks, six of them on
+# attempt 1 at a ~130s median, after the instruction fixes of 2026-08-09.
+# Revert here if an experiment underperforms.
+
+[tiers.1]
+model  = "qwen2.5-coder:14b"
+params = 14
+ctx    = 16384
+
+[tiers.2]
+model  = "qwen3.6:35b-a3b-coding-nvfp4"
+params = 35
+ctx    = 16384
+
+[tiers.3]
+model  = "qwen3.6:35b-a3b-coding-nvfp4"
+params = 35
+ctx    = 16384
+
+[tiers.4]
+model  = "qwen3.6:35b-a3b-coding-nvfp4"
+params = 35
+ctx    = 16384
+
+[budget]
+task_ceiling_s      = 3600
+attempts_tier1      = 3
+attempts_mid        = 2
+attempts_last       = 2
+foreign_park        = 2
+quick_param_limit_b = 30
+
+[run]
+main_branch = "main"

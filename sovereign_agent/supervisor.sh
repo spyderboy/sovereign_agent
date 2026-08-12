@@ -527,6 +527,24 @@ while true; do
         continue
     fi
 
+    # Exit 4 is the stall watchdog, and exiting IS its recovery: a worker that
+    # made no progress for WATCHDOG_STALL_S kills itself so a fresh process can
+    # take over, usually clearing whatever it was blocked on. Treating it as
+    # fatal stopped an overnight run at the first stall and left 25 tasks
+    # untouched (2026-08-12). Relaunch, but count it — a stall that repeats is
+    # a real problem, not a hiccup.
+    if [ "$EXIT" = "4" ]; then
+        STALLS=$((${STALLS:-0} + 1))
+        log "${YELLOW}⏱  worker stalled and exited (stall $STALLS) — relaunching${RESET}"
+        if [ "$STALLS" -ge 3 ]; then
+            log "${RED}three stalls — stopping. Check ollama: it is probably wedged."
+            log "  pkill -9 ollama; sleep 3; ollama run <model> 'ok'${RESET}"
+            write_status "stalled"
+            break
+        fi
+        continue
+    fi
+
     log "${YELLOW}Unexpected exit code $EXIT — stopping${RESET}"
     write_status "done_with_failures"
     break

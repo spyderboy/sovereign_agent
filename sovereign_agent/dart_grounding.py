@@ -106,6 +106,26 @@ _DECL_MEMBER = re.compile(
     r"(?:[\w<>,\s\[\]?]+\s+)?([A-Za-z_]\w*)\s*[=;(]", re.MULTILINE)
 _DECL_PARAM = re.compile(r"(?:required\s+)?(?:this\.)([A-Za-z_]\w*)")
 
+# Names bound INSIDE a function body. Without these the grounder reports a
+# model's own local variables as hallucinated identifiers (2026-08-11:
+# scenario/load.dart, a pure JSON parser, was blocked on `unitJson`, `uJson`
+# and `playerBUnits` — its own loop variables — on every attempt at every
+# tier, so escalation could never help and no model could ever pass).
+_DECL_LOCAL = re.compile(
+    r"\b(?:final|const|var|late)\s+(?:[\w<>,\s\[\]?]+\s+)?([A-Za-z_]\w*)\s*[=;]")
+_DECL_FORIN = re.compile(
+    r"\bfor\s*\(\s*(?:final|const|var)?\s*(?:[\w<>,\s\[\]?]+\s+)?"
+    r"([A-Za-z_]\w*)\s+in\b")
+_DECL_FORC = re.compile(
+    r"\bfor\s*\(\s*(?:final|var|int|num|double)\s+([A-Za-z_]\w*)\s*=")
+_DECL_CATCH = re.compile(
+    r"\bcatch\s*\(\s*([A-Za-z_]\w*)\s*(?:,\s*([A-Za-z_]\w*)\s*)?\)")
+# Closure parameters: `(a, b) =>`, `(a) {`, and `.map((e) => …)`.
+_DECL_CLOSURE = re.compile(r"\(\s*([A-Za-z_][\w,\s]*?)\s*\)\s*(?:async\s*)?(?:=>|\{)")
+# `if (x case final Foo y)` and `case final Foo y:` pattern bindings.
+_DECL_PATTERN = re.compile(
+    r"\bcase\s+(?:final\s+|const\s+)?(?:[\w<>,\s\[\]?]+\s+)?([A-Za-z_]\w*)\s*[:)]")
+
 _SELECTOR = re.compile(r"\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)")
 
 _SKIP_DIRS = {".git", "build", "node_modules", "logs", ".dart_tool", ".venv",
@@ -316,11 +336,18 @@ def invalidate_project_cache(project_root: str) -> None:
 def declared_names(content: str) -> set[str]:
     """Names a generated file legitimately declares itself."""
     names: set[str] = set()
-    for rx in (_DECL_TYPE, _DECL_TOP_FUNC, _DECL_MEMBER, _DECL_PARAM):
+    for rx in (_DECL_TYPE, _DECL_TOP_FUNC, _DECL_MEMBER, _DECL_PARAM,
+               _DECL_LOCAL, _DECL_FORIN, _DECL_FORC, _DECL_CATCH,
+               _DECL_PATTERN):
         for m in rx.finditer(content):
             for g in m.groups():
                 if g:
                     names.add(g)
+    for m in _DECL_CLOSURE.finditer(content):
+        for part in m.group(1).split(","):
+            part = part.strip()
+            if part.isidentifier():
+                names.add(part)
     return names
 
 

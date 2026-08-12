@@ -135,7 +135,9 @@ _DECL_FORC = re.compile(
 _DECL_CATCH = re.compile(
     r"\bcatch\s*\(\s*([A-Za-z_]\w*)\s*(?:,\s*([A-Za-z_]\w*)\s*)?\)")
 # Closure parameters: `(a, b) =>`, `(a) {`, and `.map((e) => …)`.
-_DECL_CLOSURE = re.compile(r"\(\s*([A-Za-z_][\w,\s]*?)\s*\)\s*(?:async\s*)?(?:=>|\{)")
+# Any parameter list belonging to a declaration or closure: `(a, b) =>`,
+# `(a) {`, `.map((e) => …)`, and `bool unlocked(int order, int done) {`.
+_DECL_PARAMS = re.compile(r"\(([^()]*)\)\s*(?:async\s*)?(?:=>|\{)")
 # `if (x case final Foo y)` and `case final Foo y:` pattern bindings.
 _DECL_PATTERN = re.compile(
     r"\bcase\s+(?:final\s+|const\s+)?(?:[\w<>,\s\[\]?]+\s+)?([A-Za-z_]\w*)\s*[:)]")
@@ -359,11 +361,20 @@ def declared_names(content: str) -> set[str]:
             for g in m.groups():
                 if g:
                     names.add(g)
-    for m in _DECL_CLOSURE.finditer(content):
+    # Parameter lists, of closures AND of declared functions. Splitting on
+    # commas and accepting only bare identifiers loses every TYPED parameter:
+    # `bool unlocked(int order, int highestCompleted)` yielded nothing, so the
+    # function's own arguments were reported as hallucinated and no model could
+    # ever write it (2026-08-12). Take the last identifier of each part, after
+    # stripping `required`, braces, brackets and any default value.
+    for m in _DECL_PARAMS.finditer(content):
         for part in m.group(1).split(","):
-            part = part.strip()
-            if part.isidentifier():
-                names.add(part)
+            part = part.split("=")[0]
+            part = part.strip(" \t\n{}[]")
+            part = re.sub(r"^\s*required\s+", "", part)
+            tokens = re.findall(r"[A-Za-z_]\w*", part)
+            if tokens:
+                names.add(tokens[-1])
     return names
 
 

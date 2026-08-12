@@ -60,8 +60,21 @@ find .git -name '*.lock' -delete 2>/dev/null
 rm -f logs/run.lock
 git checkout -f main >/dev/null 2>&1 || die "cannot check out main"
 git clean -fd >/dev/null 2>&1
-git for-each-ref --format='%(refname:short)' 'refs/heads/task-*' \
-    | xargs -r git branch -D >/dev/null 2>&1
+# Tag anything on a task branch that main does not already have, THEN delete.
+# `git branch -D` discards unmerged commits silently, and a task branch is
+# exactly where a hand edit lands if you commit while a run is live — that is
+# how a ROADMAP fix became a dangling commit (2026-08-12). Tagging costs
+# nothing and makes the mistake recoverable with `git cherry-pick`.
+for b in $(git for-each-ref --format='%(refname:short)' 'refs/heads/task-*'); do
+    UNMERGED=$(git rev-list --count "main..$b" 2>/dev/null || echo 0)
+    if [ "${UNMERGED:-0}" != "0" ]; then
+        TAG="abandoned/$(date +%m%d-%H%M)/$b"
+        git tag -f "$TAG" "$b" >/dev/null 2>&1
+        echo -e "${YELLOW}  ⚠ $b had $UNMERGED unmerged commit(s) — kept as tag $TAG${RESET}"
+        echo -e "${DIM}     recover with: git cherry-pick $TAG${RESET}"
+    fi
+    git branch -D "$b" >/dev/null 2>&1
+done
 
 DIRTY=$(git status --porcelain | grep -vc '^?? logs/' || true)
 [ "${DIRTY:-0}" = "0" ] || { git status --short; die "tree still dirty after reset"; }

@@ -81,8 +81,13 @@ class Finding:
 
 def _obligations(text: str) -> tuple[list[str], int, int, int]:
     body = text.split("— done when:")[0]
-    sigs = sorted({m.group(1) for m in _SIG.finditer(body)}
-                  | {m.group(1) for m in _CLASS.finditer(body)})
+    classes = {m.group(1) for m in _CLASS.finditer(body)}
+    sigs = sorted({m.group(1) for m in _SIG.finditer(body)} | classes)
+    # ONE CLASS IS ONE OBLIGATION, however many methods it has. A class and its
+    # methods land in one file and reach one gate, so splitting them is not
+    # possible and flagging them is noise. Two classes in a task IS two files.
+    if len(classes) == 1:
+        sigs = sorted(classes)
     return sigs, len(_STEPS.findall(body)), body.count(";"), len(body)
 
 

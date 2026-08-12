@@ -712,7 +712,7 @@ def check_bad_patterns(rel_path: str, content) -> list[str]:
             if pattern.search(content):
                 violations.append(f"[{rel_path}] {msg}")
         else:
-            if _re.search(pattern, content):
+            if _re.search(pattern, content, _re.MULTILINE):
                 violations.append(f"[{rel_path}] {msg}")
     return violations
 
@@ -1571,7 +1571,13 @@ def _load_project_config(project_root: str) -> dict:
     extra_bad = cfg.get("additional_bad_patterns", [])
     for entry in extra_bad:
         if isinstance(entry, dict) and "pattern" in entry and "hint" in entry:
-            BAD_PATTERNS.append((_re.compile(entry["pattern"]), entry["hint"]))
+            # MULTILINE or `^` only ever matches the first line of a file.
+            # Two of this project's guards are `^`-anchored — the locked-type
+            # and locked-constant redeclare checks — and both sat inert for
+            # days while three files merged green with their own copies of
+            # locked types (2026-08-12).
+            BAD_PATTERNS.append(
+                (_re.compile(entry["pattern"], _re.MULTILINE), entry["hint"]))
 
     # ── Extra error hints ─────────────────────────────────────────────────────
     extra_hints = cfg.get("additional_error_hints", [])

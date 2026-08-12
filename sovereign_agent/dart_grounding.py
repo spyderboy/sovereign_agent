@@ -88,6 +88,20 @@ _CAP_TOKEN = re.compile(r"\b[A-Z][A-Za-z0-9_]*\b")
 # lowerCamelCase with at least one hump — Dart methods and fields. Plain
 # lowercase words are excluded: they would admit every English comment word.
 _LOWER_CAMEL = re.compile(r"\b([a-z][a-z0-9]*(?:[A-Z][A-Za-z0-9]*)+)\b")
+# A single lowercase word with no hump matches NEITHER of the two patterns
+# above, so every such member was invisible to the whitelist and any use of it
+# was rejected as hallucinated. `s.hints` was blocked twelve times running
+# against a Scenario that has a `hints` field (2026-08-12); `coord`, `text`,
+# `tiles`, `units`, `shape`, `order` and `fair` were all equally unreachable.
+#
+# These two patterns stay narrow on purpose. Whitelisting every lowercase word
+# in the tree would include prose from comments and gut the check; a name that
+# is DECLARED as a field or ACCESSED through a dot somewhere in a tree that
+# analyzes clean is a real member by construction.
+_FIELD_DECL = re.compile(
+    r"^\s*(?:static\s+|final\s+|const\s+|late\s+|var\s+|covariant\s+)*"
+    r"[\w<>,\s?\[\]]*?\b([a-z]\w*)\s*[;=]", re.MULTILINE)
+_DOTTED_MEMBER = re.compile(r"\.([a-z]\w*)\b")
 
 _IMPORT_RE = re.compile(
     r"^\s*(import|export|part)\s+['\"]([^'\"]+)['\"]", re.MULTILINE
@@ -324,6 +338,8 @@ def project_whitelist(project_root: str) -> set[str]:
             continue
         tokens |= set(_CAP_TOKEN.findall(src))
         tokens |= set(_LOWER_CAMEL.findall(src))
+        tokens |= set(_FIELD_DECL.findall(src))
+        tokens |= set(_DOTTED_MEMBER.findall(src))
     _project_cache[project_root] = (time.time(), tokens)
     return tokens
 

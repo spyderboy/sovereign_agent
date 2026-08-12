@@ -60,6 +60,35 @@ PROJECT="${1:-$(pwd)}"
 SOVEREIGN="$(cd "$(dirname "$0")" && pwd)"
 LOGDIR="$PROJECT/logs"
 STATUS="$LOGDIR/supervisor.status"
+
+# ── Refuse to start on top of a live run ─────────────────────────────────────
+# Two work.py processes on one repo do not race for the model, they deadlock on
+# git: one holds the task branch, the other waits on the index lock forever.
+# Neither the request timeout nor the task ceiling can see it — the ceiling is
+# only checked between attempts and a worker blocked on a lock never gets
+# there. Observed 2026-08-12: two orphaned workers sat six hours with the model
+# idle and nothing written to any log.
+#
+# A PID lockfile, not pgrep. `pgrep -f supervisor.sh` also matches the nohup and
+# caffeinate wrappers that LAUNCH it, so the name check refused every legitimate
+# start. The lock names one PID and asks the kernel whether it is alive.
+mkdir -p "$LOGDIR"
+LOCK="$LOGDIR/run.lock"
+if [ -f "$LOCK" ]; then
+    OLD="$(cat "$LOCK" 2>/dev/null || true)"
+    if [ -n "${OLD:-}" ] && kill -0 "$OLD" 2>/dev/null; then
+        echo "✗ a run is already in progress (supervisor PID $OLD)"
+        echo "  Two workers on one repo deadlock on the git index. Stop it first:"
+        echo "    pkill -9 -f supervisor.sh; pkill -9 -f work.py; sleep 2"
+        echo "    ps aux | grep -cE '[w]ork.py|[s]upervisor.sh'   # must print 0"
+        echo "  (ALLOW_CONCURRENT=1 overrides — only for a DIFFERENT project)"
+        [ "${ALLOW_CONCURRENT:-0}" = "1" ] || exit 1
+    else
+        echo "  (clearing stale lock from PID ${OLD:-?})"
+    fi
+fi
+echo "$$" > "$LOCK"
+trap 'rm -f "$LOCK"' EXIT
 LOG="$LOGDIR/supervisor.log"
 
 BOLD="\033[1m"; GREEN="\033[92m"; YELLOW="\033[93m"; RED="\033[91m"; DIM="\033[2m"; RESET="\033[0m"

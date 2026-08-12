@@ -141,6 +141,49 @@ RED    = "\033[91m"
 DIM    = "\033[2m"
 RESET  = "\033[0m"
 
+# ─── Stall watchdog ───────────────────────────────────────────────────────────
+# The hard task ceiling is checked at the top of each attempt, so a worker that
+# never RETURNS from a call never reaches it. On 2026-08-12 two orphaned workers
+# deadlocked on the git index and sat for six hours: model idle, ceiling never
+# evaluated, nothing written to any log.
+#
+# This detects the one thing that is unambiguous from outside — no progress at
+# all — and exits so the supervisor can relaunch. Exiting is the right recovery
+# because the usual cause (a lock held by a dead sibling) clears when the
+# process does. It deliberately does NOT enforce the task ceiling: parking does
+# not stop a retry, so a ceiling-based exit would re-hang on the same task
+# forever, which is worse than the hang it replaced.
+_HEARTBEAT = time.time()
+_HEARTBEAT_NOTE = "starting"
+STALL_LIMIT_S = float(os.environ.get("WATCHDOG_STALL_S", 2700))
+
+
+def heartbeat(note: str = "") -> None:
+    """Record that the worker is still making progress."""
+    global _HEARTBEAT, _HEARTBEAT_NOTE
+    _HEARTBEAT = time.time()
+    if note:
+        _HEARTBEAT_NOTE = note
+
+
+def _start_stall_watchdog() -> None:
+    import threading
+
+    def _watch() -> None:
+        while True:
+            time.sleep(60)
+            idle = time.time() - _HEARTBEAT
+            if idle > STALL_LIMIT_S:
+                print(f"\n{RED}⛔ STALLED — no progress for {idle/60:.0f} min "
+                      f"(last: {_HEARTBEAT_NOTE}). Exiting so the supervisor can "
+                      f"relaunch.{RESET}\n"
+                      f"   If this repeats, check for a second work.py: two "
+                      f"workers on one repo deadlock on the git index.",
+                      flush=True)
+                os._exit(4)
+
+    threading.Thread(target=_watch, daemon=True, name="stall-watchdog").start()
+
 # All unchecked tasks are worked through in one run — no daily cap.
 # Velocity (tasks completed / elapsed time) is logged and used by standup.py
 # to project throughput. The standup measures what was done, not what to allow.
@@ -2781,6 +2824,7 @@ def run_task(task: str, project_root: str, log_file: str,
         return True
 
     for attempt in range(1, MAX_RETRIES + 1):
+        heartbeat(f"task {task_idx} attempt {attempt}")
         # ── Absolute hard ceiling ────────────────────────────────────────────
         # Checked first, before any branch (timeout/bad-pattern/no-output/thrash)
         # gets a chance to `continue` past it. No bonuses, no tier-availability
@@ -2984,6 +3028,7 @@ def run_task(task: str, project_root: str, log_file: str,
                     return "skipped"
             continue
 
+        heartbeat(f"task {task_idx} wrote files")
         consecutive_bad_pattern = 0   # model wrote real code — reset bad-pattern streak
         changed_list = ", ".join(written)
         print(f" wrote {len(written)} file(s): {changed_list[:60]}")
@@ -3387,6 +3432,7 @@ def _write_incomplete_report(
 
 def main():
     parser = argparse.ArgumentParser()
+    _start_stall_watchdog()
     parser.add_argument("--project",   help="Path to project folder", default=None)
     parser.add_argument("--start-at",  type=int, default=1,
                         help="Skip to task N (1-indexed, for resuming)")

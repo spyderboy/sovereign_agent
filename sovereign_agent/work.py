@@ -330,9 +330,27 @@ def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
         resp.raise_for_status()
         content = []
         done_chunk: dict = {}
+        # WALL-CLOCK DEADLINE on the whole stream.
+        #
+        # `requests`' timeout is per socket READ, not total. A model trickling
+        # one token every few seconds resets it forever, so a 1800s timeout
+        # never fires and a single attempt can run for hours. Two 45-minute
+        # hangs on 2026-08-12 were exactly this: the 35B streaming at a crawl
+        # under memory pressure, the read timeout never tripping, and the stall
+        # watchdog eventually killing the process because no attempt ever
+        # finished. Abort the attempt instead — the tier ladder can then do its
+        # job.
+        _deadline = time.time() + timeout
         for raw_line in resp.iter_lines():
+            if time.time() > _deadline:
+                resp.close()
+                raise ReadTimeout(
+                    f"generation exceeded {timeout}s of wall clock "
+                    f"({len(''.join(content))} chars produced) — the model is "
+                    f"streaming but far too slowly")
             if not raw_line:
                 continue
+            heartbeat(f"streaming from {model}")
             try:
                 chunk = json.loads(raw_line)
             except json.JSONDecodeError:
@@ -912,6 +930,58 @@ def _module_exists(base_no_ext: str, project_root: str) -> bool:
         if os.path.exists(os.path.join(project_root, cand)):
             return True
     return False
+
+
+
+def _missing_dart_deps(task: str, project_root: str) -> list[str]:
+    """Dart files this task depends on that do not exist yet.
+
+    Two sources, both explicit — nothing is inferred:
+
+      1. the task text's own "Import x from ../board.dart" clauses, resolved
+         against the target file's directory;
+      2. the GATE's imports. A task gated on a conformance test that imports a
+         module a LATER task builds cannot pass however good the worker is.
+
+    Deferring costs nothing: the task stays unchecked and the next pass picks
+    it up once its dependency has landed. Burning its budget costs a full tier
+    ladder and, worse, produces a green-looking merge full of stubs invented to
+    satisfy the missing import.
+    """
+    tm = re.search(r"\bIn ([\w./-]+\.dart):", task)
+    if not tm:
+        return []
+    target = tm.group(1)
+    target_dir = os.path.dirname(target)
+    missing: list[str] = []
+
+    def _check(path: str) -> None:
+        path = os.path.normpath(path)
+        if path == target or path in missing:
+            return
+        if not path.startswith(("lib/", "test/")):
+            return
+        if not os.path.exists(os.path.join(project_root, path)):
+            missing.append(path)
+
+    for rel in re.findall(r"from ([\w./-]+\.dart)", task):
+        _check(rel if "/" in rel and not rel.startswith(".")
+               else os.path.join(target_dir, rel))
+
+    gm = re.search(r"task gate:.*?(test/[\w./-]+\.dart)", task)
+    if gm:
+        gate = os.path.join(project_root, gm.group(1))
+        if os.path.exists(gate):
+            pkg = ""
+            _pub = os.path.join(project_root, "pubspec.yaml")
+            if os.path.exists(_pub):
+                _nm = re.search(r"^name:\s*(\S+)", open(_pub).read(), re.M)
+                pkg = _nm.group(1) if _nm else ""
+            src = open(gate).read()
+            for uri in re.findall(r"^import '([^']+)';", src, re.M):
+                if pkg and uri.startswith(f"package:{pkg}/"):
+                    _check("lib/" + uri.split(f"package:{pkg}/", 1)[1])
+    return missing
 
 
 def _missing_local_deps(task: str, project_root: str) -> list[str]:
@@ -2747,8 +2817,13 @@ def run_task(task: str, project_root: str, log_file: str,
     # attempt (observed: GameCanvas run before useGameLoop.ts landed → "Cannot
     # find name 'useGameLoop'"). Defer to the retry pass so the dependency can
     # land first, instead of failing the task outright.
-    if PROJECT_LANGUAGE in ("typescript", "ts", "tsx"):
+    if PROJECT_LANGUAGE == "dart":
+        _missing = _missing_dart_deps(task, project_root)
+    elif PROJECT_LANGUAGE in ("typescript", "ts", "tsx"):
         _missing = _missing_local_deps(task, project_root)
+    else:
+        _missing = []
+    if True:
         if _missing:
             print(f"  {YELLOW}⏭  Deferred: depends on file(s) not yet present — "
                   f"{', '.join(_missing)}{RESET}")

@@ -1,0 +1,40 @@
+# Tier-1 only: qwen2.5-coder:14b at every tier, so a pass NEVER escalates.
+#
+# The cheap sweep of sweep.sh. Escalating inside a task is the wrong shape when
+# a roadmap has dependencies: the expensive model gets spent on a task that was
+# only blocked because a sibling had not landed yet, and the same task succeeds
+# on the 14B one pass later for free.
+#
+# Attempts are deliberately low. A pass is cheap and repeats; a task that needs
+# four tries at 14B is better handed to the escalation pass than ground at here.
+
+[tiers.1]
+model  = "qwen2.5-coder:14b"
+params = 14
+ctx    = 16384
+
+[tiers.2]
+model  = "qwen2.5-coder:14b"
+params = 14
+ctx    = 16384
+
+[tiers.3]
+model  = "qwen2.5-coder:14b"
+params = 14
+ctx    = 16384
+
+[tiers.4]
+model  = "qwen2.5-coder:14b"
+params = 14
+ctx    = 16384
+
+[budget]
+task_ceiling_s      = 900
+attempts_tier1      = 2
+attempts_mid        = 1
+attempts_last       = 1
+foreign_park        = 2
+quick_param_limit_b = 15
+
+[run]
+main_branch = "main"

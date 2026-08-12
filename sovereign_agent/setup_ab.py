@@ -129,6 +129,13 @@ def main():
                     help="challenger parameter count in billions")
     ap.add_argument("--ctx", type=int, default=16384)
     ap.add_argument("--tag", default=None)
+    ap.add_argument("--band", default=None,
+                    help="comma-separated target files to rewind instead of the "
+                         "last N — use when the last N were done by the wrong "
+                         "model or are the wrong KIND of task")
+    ap.add_argument("--keep-going", action="store_true",
+                    help="do not truncate the roadmap after the band; the arm "
+                         "will continue into every remaining task")
     args = ap.parse_args()
 
     project = os.path.abspath(os.path.expanduser(args.project))
@@ -158,10 +165,64 @@ def main():
     rm_path = os.path.join(clone, "ROADMAP.md")
     text = open(rm_path).read()
     done = completed_tasks(text)
-    if len(done) < args.tasks:
+    # Only meaningful for the "last N" path — an explicit --band names its own
+    # tasks and is validated against `done` below.
+    if not args.band and len(done) < args.tasks:
         sys.exit(f"only {len(done)} completed tasks; cannot rewind {args.tasks}")
 
-    band = done[-args.tasks:]
+    if args.band:
+        want = [b.strip() for b in args.band.split(",") if b.strip()]
+        by_target = {t: i for i, t in done if t}
+        missing = [w for w in want if not any(w in t for t in by_target)]
+        if missing:
+            sys.exit(f"--band entries not found among completed tasks: {missing}")
+        band = [(by_target[t], t) for w in want for t in by_target if w in t]
+    else:
+        band = done[-args.tasks:]
+    # REFUSE a band that later, still-present files import.
+    #
+    # Rewinding deletes the band's target files. Anything completed AFTER them
+    # survives in the clone — and if it imports a deleted file, the validate
+    # command fails on every attempt no matter what the challenger writes. That
+    # is not a model result, it is a broken arm, and it looks identical to
+    # incompetence in the summary: 0/4, twenty-one attempts, one error about a
+    # missing URI.
+    #
+    # This is why the default band is the LAST N completed tasks. --band lets
+    # you pick a middle band, so --band has to check what the default gets for
+    # free. (2026-08-11: a gemma4:26b arm scored 0/4 purely because
+    # legalActions.dart imported all four rewound rule modules.)
+    band_files = {t for _, t in band if t}
+    dependents = {}
+    lib_root = os.path.join(clone, "lib")
+    for dirpath, _d, files in os.walk(lib_root):
+        for fn in files:
+            if not fn.endswith(".dart"):
+                continue
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, clone).replace("\\", "/")
+            if rel in band_files:
+                continue
+            try:
+                src = open(full, errors="ignore").read()
+            except OSError:
+                continue
+            for bf in band_files:
+                if os.path.basename(bf) in src and bf.split("lib/")[-1] in src:
+                    dependents.setdefault(rel, []).append(bf)
+    if dependents:
+        print("\n✗ this band cannot be rewound — files that would REMAIN import it:")
+        for dep, needs in sorted(dependents.items()):
+            print(f"    {dep}")
+            for n in needs:
+                print(f"        imports {n}")
+        print("\n  Every attempt would fail on a missing import, whatever the model "
+              "writes.\n  Either add those files to --band too, or drop --band and use "
+              "--tasks N,\n  which takes the last N completed tasks and cannot have "
+              "this problem.")
+        shutil.rmtree(clone, ignore_errors=True)
+        sys.exit(1)
+
     lines = text.split("\n")
     targets = []
     for idx, target in band:
@@ -171,6 +232,19 @@ def main():
             p = os.path.join(clone, target)
             if os.path.exists(p):
                 os.remove(p)
+    # Truncate everything after the band so the arm STOPS when the experiment
+    # does. Without this the challenger rolls straight on into every remaining
+    # task, and a "4-task A/B" quietly becomes an unattended full run on an
+    # unproven model — you get your answer, then keep paying for it.
+    if not args.keep_going:
+        last = max(i for i, _ in band)
+        dropped = 0
+        for i in range(last + 1, len(lines)):
+            if lines[i].startswith("- [ ]"):
+                lines[i] = "<!-- ab-arm: out of band -- " + lines[i] + " -->"
+                dropped += 1
+        print(f"parked {dropped} later task(s) so the arm ends after the band")
+
     open(rm_path, "w").write("\n".join(lines))
 
     shutil.rmtree(os.path.join(clone, "logs"), ignore_errors=True)
@@ -179,7 +253,7 @@ def main():
     # config, so on a machine where identity is only set per-repo this commit
     # fails and leaves the arm half-built.
     sh(["git", "-c", "user.email=ab@sovereign.local", "-c", "user.name=sovereign-ab",
-        "commit", "-m", f"A/B arm {tag}: rewind {args.tasks} tasks"], cwd=clone)
+        "commit", "-m", f"A/B arm {tag}: rewind {len(targets)} tasks"], cwd=clone)
 
     os.makedirs(baseline, exist_ok=True)
     kept = {"velocity.jsonl": 0, "task_traces.jsonl": 0}
@@ -187,14 +261,27 @@ def main():
         src = os.path.join(project, "logs", fn)
         if not os.path.exists(src):
             continue
+        # Keep only the LAST record per target file.
+        #
+        # A task that failed, was reverted and re-run leaves several records,
+        # and counting them all makes the incumbent look worse than it was:
+        # a clean 4-for-4 was reported as "5/8 tasks done" with hard_ceiling
+        # errors attributed to it, because two of the band files had earlier
+        # aborted runs in the log. The last record is the one that landed.
+        latest = {}
+        for line in open(src):
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            for t in targets:
+                if t and t in rec.get("task", ""):
+                    latest[t] = line
+                    break
         with open(os.path.join(baseline, fn), "w") as out:
-            for line in open(src):
-                try:
-                    rec = json.loads(line)
-                except Exception:
-                    continue
-                if any(t and t in rec.get("task", "") for t in targets):
-                    out.write(line)
+            for t in targets:
+                if t in latest:
+                    out.write(latest[t])
                     kept[fn] += 1
 
     prof_dir = os.path.join(sovereign, "profiles")
@@ -202,11 +289,11 @@ def main():
     prof_path = os.path.join(prof_dir, f"{tag}.toml")
     with open(prof_path, "w") as f:
         f.write(PROFILE.format(model=args.model, params=args.params, ctx=args.ctx,
-                               quick=args.params + 1, n=args.tasks,
+                               quick=args.params + 1, n=len(targets),
                                targets="\n# ".join(targets)))
 
     print(f"\nclone     {clone}")
-    print(f"rewound   {args.tasks} task(s): {', '.join(targets)}")
+    print(f"rewound   {len(targets)} task(s): {', '.join(targets)}")
     print(f"baseline  {baseline}  ({kept['velocity.jsonl']} velocity, "
           f"{kept['task_traces.jsonl']} trace records)")
     print(f"profile   {prof_path}")

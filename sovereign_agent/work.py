@@ -572,6 +572,55 @@ def _unplanned_new_files(written: list[str], task: str, project_root: str) -> li
     return suspects
 
 
+def _missing_promised_symbol(written: list[str], task: str,
+                             project_root: str) -> str | None:
+    """The task named a symbol; the file it wrote does not declare it.
+
+    2026-08-13: gem_shading.dart and gem_body.dart were each written containing
+    exactly `// No changes needed for this file.` — one comment, nothing else.
+    A file that is entirely a comment ANALYZES CLEAN, so the gate passed, the
+    merge landed and both tasks were ticked done. gem_painter then failed at
+    every tier importing paintGemBody from a file that does not define it, and
+    every log blamed gem_painter, which was innocent.
+
+    This is the same class of bug as the invented stub file, arrived at from the
+    other side: there the model wrote a definition nobody asked for, here it
+    wrote nothing at all where one was required. Analyze proves compilation and
+    never obligation. The signature in the task text is the only machine-
+    readable statement of what the task was FOR, so check it before merging.
+    """
+    m = re.search(r"\bIn ([\w./-]+\.\w+):\s*implement\s+`([^`]+)`", task)
+    if not m:
+        return None
+    target, sig = m.group(1), m.group(2).strip()
+    if target not in written:
+        return None
+    sig = re.sub(r"^(?:abstract |sealed |base |final |export |static )*"
+                 r"(?:class|enum|mixin|extension|typedef|interface|func|def|"
+                 r"function)\s+", "", sig)
+    n = re.search(r"([A-Za-z_]\w*)\s*(?:<[^(]*>)?\s*\(", sig) or \
+        re.search(r"([A-Za-z_]\w*)\s*$", sig.split("{")[0].strip())
+    if not n:
+        return None
+    name = n.group(1)
+    try:
+        src = open(os.path.join(project_root, target), errors="ignore").read()
+    except OSError:
+        return None
+    # Strip line comments so a commented-out definition cannot satisfy this.
+    body = "\n".join(ln for ln in src.splitlines()
+                     if not ln.lstrip().startswith("//"))
+    if re.search(rf"\b{re.escape(name)}\b\s*[({{=<]", body) or \
+            re.search(rf"\bget\s+{re.escape(name)}\b", body):
+        return None
+    return (f"MISSING PROMISED SYMBOL: {target} does not declare `{name}`, which "
+            f"is the entire point of this task. Writing a comment, an empty "
+            f"file, or 'no changes needed' is NOT completing the task — such a "
+            f"file compiles and every later file that imports `{name}` then "
+            f"fails, and the blame lands on them instead of here. Write the "
+            f"full definition `{sig}` with a real body.")
+
+
 def _heuristic_files(task: str, files: list[str]) -> list[str]:
     """Keyword-based fallback when the planner model is unavailable."""
     keywords = re.findall(r"[A-Za-z][a-z]+(?:[A-Z][a-z]+)*|[a-z_]{4,}", task)
@@ -3079,6 +3128,11 @@ def run_task(task: str, project_root: str, log_file: str,
                 except OSError:
                     pass
             print(f"  {RED}(blocked invented file: {', '.join(_unplanned)}){RESET}")
+
+        _nosym = _missing_promised_symbol(written, task, project_root)
+        if _nosym:
+            pattern_errs = list(pattern_errs) + [_nosym]
+            print(f"  {RED}(blocked: promised symbol not declared){RESET}")
 
         if pattern_errs:
             errors = pattern_errs + ("\n\n" + errors if errors else "")

@@ -100,6 +100,64 @@ def main() -> int:
                         f"{cfg_name} guard /{pat[:36]}/ fires on committed "
                         f"{rel}: {m.group(0)[:50]!r}")
 
+    # ── guards must not contradict each other ────────────────────────────────
+    # A guard's hint is a repair prompt: the model reads it and writes what it
+    # says. If guard A's hint recommends a form that guard B forbids, the model
+    # is trapped — blocked, told to write X, blocked again for writing X, at
+    # every tier, forever. From outside it is indistinguishable from a model
+    # that cannot code.
+    #
+    # 2026-08-13 cost an afternoon to this. Three prefix-era hints said to write
+    # `Paint()..shader = ui.Gradient.linear(...)` while a newer guard blocked
+    # `ui.` under a bare dart:ui import. Both were right about their own case
+    # and neither knew about the other.
+    #
+    # Only the RECOMMENDED snippets are checked. A hint naming the wrong form to
+    # warn against it is doing its job, so anything introduced by never/not/
+    # instead of/rather than is skipped.
+    _NEGATED = re.compile(
+        r"(?:never|not|instead of|rather than|no exception|avoid|"
+        r"do not|don't|wrong|deprecated)[^.]{0,60}$", re.I)
+    for cfg_name in (".sovereign_config.json", ".sovereign_config.render.json",
+                     ".sovereign_config.sim.json"):
+        cfg_path = os.path.join(project, cfg_name)
+        if not os.path.exists(cfg_path):
+            continue
+        guards = json.load(open(cfg_path)).get("additional_bad_patterns", [])
+        for g in guards:
+            for m in re.finditer(r"`([^`]+)`", g.get("hint", "")):
+                if _NEGATED.search(g["hint"][:m.start()]):
+                    continue
+                snippet = m.group(1)
+                # Test the snippet AS IT WOULD APPEAR IN A FILE, not bare. Guards
+                # that span an import and its usage — `import 'dart:ui';` ... then
+                # `ui.` — never match a naked fragment, so the first version of
+                # this check could not see the very contradiction it was written
+                # for. The default file shape in this layer is a bare dart:ui
+                # import; a hint that recommends something illegal there must say
+                # it is for a widget file, or it will be followed in the wrong one.
+                prefix = "import 'dart:ui';\n"
+                probe = prefix + snippet
+                if "widget" in g.get("hint", "").lower():
+                    continue
+                for other in guards:
+                    if other is g:
+                        continue
+                    try:
+                        # The match must reach INTO the snippet. Without this the
+                        # injected prefix is itself the violation — every hint in
+                        # the sim config was flagged because that layer bans
+                        # dart:ui outright, and the probe had just imported it.
+                        hit = re.search(other["pattern"], probe, re.M)
+                        if hit and hit.end() > len(prefix):
+                            failures.append(
+                                f"{cfg_name} guards CONTRADICT: a hint tells the "
+                                f"model to write `{snippet[:44]}`, which guard "
+                                f"/{other['pattern'][:34]}/ then blocks. It will "
+                                f"loop until the ladder runs out")
+                    except re.error:
+                        pass
+
     # ── preflight's own hygiene heuristics ───────────────────────────────────
     # Preflight guesses too. Its unused-import check works from a hand-listed
     # set of identifiers per SDK library, and material re-exports painting and

@@ -142,6 +142,14 @@ _DECL_PARAMS = re.compile(r"\(([^()]*)\)\s*(?:async\s*)?(?:=>|\{)")
 _DECL_PATTERN = re.compile(
     r"\bcase\s+(?:final\s+|const\s+)?(?:[\w<>,\s\[\]?]+\s+)?([A-Za-z_]\w*)\s*[:)]")
 
+# An enum's own CONSTANTS. `_DECL_TYPE` captures `SocketState` and stops, so a
+# file that declares `enum SocketState { empty, legalTarget, selected }` and
+# then writes `SocketState.legalTarget` had its own constant rejected as
+# hallucinated — and the task text was what told it to declare them
+# (2026-08-12, socket.dart, blocked at every tier).
+_DECL_ENUM_BODY = re.compile(
+    r"\benum\s+[A-Za-z_]\w*\s*\{([^}]*)\}", re.DOTALL)
+
 _SELECTOR = re.compile(r"\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)")
 
 _SKIP_DIRS = {".git", "build", "node_modules", "logs", ".dart_tool", ".venv",
@@ -367,6 +375,12 @@ def declared_names(content: str) -> set[str]:
     # function's own arguments were reported as hallucinated and no model could
     # ever write it (2026-08-12). Take the last identifier of each part, after
     # stripping `required`, braces, brackets and any default value.
+    for m in _DECL_ENUM_BODY.finditer(content):
+        for part in m.group(1).split(","):
+            part = part.split("(")[0].strip()
+            if part.isidentifier():
+                names.add(part)
+
     for m in _DECL_PARAMS.finditer(content):
         for part in m.group(1).split(","):
             part = part.split("=")[0]

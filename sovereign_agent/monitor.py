@@ -109,105 +109,156 @@ def files_named(block: str) -> set[str]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("project")
-    ap.add_argument("--every", type=int, default=60, help="status interval (s)")
+    ap.add_argument("--every", type=int, default=15,
+                    help="how often to poll the logs (s)")
+    ap.add_argument("--quiet-after", type=int, default=10,
+                    help="minutes of silence before saying so")
     args = ap.parse_args()
     root = os.path.abspath(os.path.expanduser(args.project))
+    console = os.path.join("/tmp", f"{os.path.basename(root)}-run.log")
 
-    print(f"{BOLD}monitoring {root}{RESET}   (Ctrl-C to stop)\n")
+    print(f"{BOLD}watching {root}{RESET}  {DIM}(events only — silence means nothing "
+          f"changed){RESET}\n", flush=True)
 
-    offset = os.path.getsize(work_log_path(root)) if os.path.exists(work_log_path(root)) else 0
-    done0, total = counts(root)
-    last_done = done0
-    last_growth = time.time()
-    last_merge = time.time()
-    seen_alerts: set[str] = set()
+    wl = work_log_path(root)
+    offset = os.path.getsize(wl) if os.path.exists(wl) else 0
+    coffset = os.path.getsize(console) if os.path.exists(console) else 0
+    done, total = counts(root)
+    print(f"{DIM}start{RESET}  {GRN}{done}{RESET}/{total}", flush=True)
+
+    last_event = time.time()
+    last_task = None
+    attempt_n = 0
+    last_sig: tuple = ()
+    repeats = 0
+    blocked = 0
     attempts_since_merge = 0
+    said_quiet = 0
+    fired: set[str] = set()
+
+    def stamp() -> str:
+        return f"{DIM}{time.strftime('%H:%M')}{RESET}"
 
     def alert(key: str, msg: str, action: str) -> None:
-        if key in seen_alerts:
+        if key in fired:
             return
-        seen_alerts.add(key)
-        print(f"\n{ALERT} {BOLD}{msg}{RESET}\n   {DIM}{action}{RESET}\n", flush=True)
+        fired.add(key)
+        print(f"       {ALERT} {BOLD}{msg}{RESET}\n          {DIM}{action}{RESET}",
+              flush=True)
 
     while True:
         time.sleep(args.every)
         text, offset = parse_tail(root, offset)
-        done, total = counts(root)
-        now = time.strftime("%H:%M:%S")
+        ctext, coffset = (parse_tail_file(console, coffset)
+                          if os.path.exists(console) else ("", coffset))
 
-        if text.strip():
-            last_growth = time.time()
+        for line in ctext.splitlines():
+            if "Deferred" in line:
+                dep = line.split("—")[-1].strip()
+                print(f"{stamp()}  {DIM}⏭  deferred: {dep[:70]}{RESET}", flush=True)
+                last_event = time.time()
+            elif "Attempt" in line and "coding" in line:
+                am = re.search(r"Attempt (\d+)/(\d+).*?coding \(([^)]+)\)", line)
+                if am:
+                    print(f"{stamp()}    {DIM}attempt {am.group(1)}/{am.group(2)} "
+                          f"generating ({am.group(3)}){RESET}", flush=True)
+                    last_event = time.time()
+            elif "escalating to tier" in line:
+                print(f"{stamp()}  {YEL}⚡ {line.strip()[:90]}{RESET}", flush=True)
+                last_event = time.time()
+            elif "blocked bad pattern" in line:
+                blocked += 1
+                why = re.sub(r".*blocked bad pattern: ", "", line).strip()[:80]
+                print(f"{stamp()}    {YEL}blocked{RESET} {DIM}{why}{RESET}", flush=True)
+                last_event = time.time()
+                if blocked >= 4:
+                    alert(f"guard:{last_task}",
+                          f"{blocked} bad-pattern blocks — validation never ran",
+                          "A guard may be rejecting correct code; four have. Write "
+                          "the file by hand and run it past the guards.")
+            elif "STALLED" in line or "stalled and exited" in line:
+                print(f"{stamp()}  {RED}⏱  worker stalled{RESET}", flush=True)
+                last_event = time.time()
 
-        # ── per-task analysis of whatever arrived this interval ──────────────
-        blocks = re.split(r"^## Task ", text, flags=re.M)
-        for b in blocks:
-            tm = re.search(r"In (\S+?):", b)
-            target = tm.group(1) if tm else None
-            attempts = re.findall(r"### Attempt \d+(.*?)(?=### Attempt|\Z)", b, re.S)
-            attempts_since_merge += len(attempts)
-
-            sigs = [tuple(error_signature(a)) for a in attempts if a.strip()]
-            sigs = [s for s in sigs if s]
-            if len(sigs) >= 3 and len(set(sigs)) == 1:
-                alert(f"rep:{target}",
-                      f"{target}: the SAME error {len(sigs)} attempts running",
-                      "Repetition means a constant in the environment, not model "
-                      "weakness — escalating cannot help. Read the error and ask "
-                      "whether a gate, guard or task text is wrong.")
-
-            blocked = b.count("blocked bad pattern")
-            if blocked >= 4:
-                alert(f"guard:{target}",
-                      f"{target}: {blocked} bad-pattern blocks, validation never ran",
-                      "A guard may be rejecting correct code — four have. Write the "
-                      "file by hand and run it past the guards before blaming the model.")
-
-            if target and attempts:
-                named = files_named("\n".join(attempts))
-                if named and target not in named:
-                    alert(f"foreign:{target}",
-                          f"{target}: every error names some OTHER file "
-                          f"({', '.join(sorted(named)[:3])})",
-                          "The cause landed in an earlier merge. This task is "
-                          "innocent and no ladder reaches the real bug — fix the "
-                          "file the errors actually name.")
-
-        # ── whole-run signals ────────────────────────────────────────────────
-        if done > last_done:
-            last_merge = time.time()
-            attempts_since_merge = 0
-            seen_alerts = {k for k in seen_alerts if not k.startswith("nomerge")}
-            last_done = done
-
-        idle_min = (time.time() - last_growth) / 60
-        if idle_min > 10:
-            alert(f"stall:{int(idle_min//10)}",
-                  f"no log output for {idle_min:.0f} minutes",
-                  "A stream trickling or a wedged server. The watchdog exits at 45 "
-                  "min; check `ollama ps` and whether a model shows 'Stopping...' "
-                  "while the worker still waits.")
+        for raw in text.splitlines():
+            m = re.match(r"## Task \d+: In (\S+?):", raw)
+            if m:
+                last_task = m.group(1)
+                attempt_n, last_sig, repeats, blocked = 0, (), 0, 0
+                print(f"{stamp()}  {BOLD}▶ {last_task}{RESET}", flush=True)
+                last_event = time.time()
+                continue
+            if raw.startswith("### Attempt"):
+                attempt_n = int(re.search(r"\d+", raw).group())
+                continue
+            if raw.startswith("Validation:"):
+                ok_ = "PASSED" in raw
+                if ok_:
+                    done, total = counts(root)
+                    attempts_since_merge = 0
+                    fired = {k for k in fired if not k.startswith("nomerge")}
+                    print(f"{stamp()}  {GRN}✓ {last_task} merged{RESET}  "
+                          f"{GRN}{done}{RESET}/{total}", flush=True)
+                else:
+                    attempts_since_merge += 1
+                last_event = time.time()
+                continue
+            em = re.match(r"\s+(?:error|warning) • (.+?) •", raw)
+            if em and attempt_n:
+                sig = (em.group(1)[:70],)
+                same = sig == last_sig
+                repeats = repeats + 1 if same else 1
+                last_sig = sig
+                tag = f"{DIM}(same){RESET}" if same else ""
+                print(f"{stamp()}    attempt {attempt_n} {RED}failed{RESET}  "
+                      f"{sig[0]} {tag}", flush=True)
+                if repeats >= 3:
+                    alert(f"rep:{last_task}:{sig[0][:20]}",
+                          f"same error {repeats} attempts running",
+                          "Repetition means a constant in the environment, not "
+                          "model weakness — escalation cannot fix it. Check the "
+                          "gate, the guards and the task text.")
+                if last_task:
+                    named = files_named(raw)
+                    if named and last_task not in named:
+                        alert(f"foreign:{last_task}",
+                              f"errors name {', '.join(sorted(named)[:2])}, not "
+                              f"{last_task}",
+                              "The cause landed in an earlier merge. This task is "
+                              "innocent — fix the file the errors name.")
+                attempt_n = 0
 
         if attempts_since_merge >= 8:
-            alert(f"nomerge:{attempts_since_merge//8}",
-                  f"{attempts_since_merge} attempts since anything last merged",
+            alert(f"nomerge:{attempts_since_merge // 8}",
+                  f"{attempts_since_merge} attempts since anything merged",
                   "Systemic, not per-task. Check the validate command passes on a "
-                  "clean tree, and that the active config unlocks the layer being "
-                  "written.")
+                  "clean tree and that the active config unlocks this layer.")
 
         ph = phantom_done(root)
         if ph:
             alert("phantom",
                   f"{len(ph)} task(s) ticked done with no file: {', '.join(ph[:3])}",
-                  "The merge discarded them — usually the target sits under a "
-                  "locked_prefix in the ACTIVE config. Stop; nothing after this "
-                  "is trustworthy.")
+                  "The merge discarded them — usually a locked_prefix in the "
+                  "ACTIVE config. Stop; nothing after this is trustworthy.")
 
-        lock = os.path.join(root, "logs", "run.lock")
-        live = "live" if os.path.exists(lock) else f"{YEL}no lock{RESET}"
-        bar = f"{GRN}{done}{RESET}/{total}"
-        print(f"{DIM}[{now}]{RESET} {bar}  {live}  "
-              f"{DIM}idle {idle_min:.0f}m  attempts since merge {attempts_since_merge}{RESET}",
-              flush=True)
+        quiet = (time.time() - last_event) / 60
+        if quiet >= args.quiet_after and int(quiet) // args.quiet_after > said_quiet:
+            said_quiet = int(quiet) // args.quiet_after
+            live = "worker alive" if os.path.exists(
+                os.path.join(root, "logs", "run.lock")) else f"{YEL}no run.lock{RESET}"
+            print(f"{stamp()}  {YEL}… {quiet:.0f} min with no events{RESET} "
+                  f"{DIM}({live}; watchdog exits at 45){RESET}", flush=True)
+        elif quiet < 1:
+            said_quiet = 0
+
+
+def parse_tail_file(path: str, since: int) -> tuple[str, int]:
+    size = os.path.getsize(path)
+    if size < since:
+        since = 0
+    with open(path, errors="ignore") as f:
+        f.seek(since)
+        return f.read(), size
 
 
 if __name__ == "__main__":

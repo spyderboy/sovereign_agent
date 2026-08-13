@@ -100,6 +100,36 @@ def main() -> int:
                         f"{cfg_name} guard /{pat[:36]}/ fires on committed "
                         f"{rel}: {m.group(0)[:50]!r}")
 
+    # ── preflight's own hygiene heuristics ───────────────────────────────────
+    # Preflight guesses too. Its unused-import check works from a hand-listed
+    # set of identifiers per SDK library, and material re-exports painting and
+    # animation — so a file holding `final Curve curve` and nothing else looked
+    # like an unused import and blocked a launch (2026-08-13).
+    #
+    # ONLY unused-import findings are treated as false positives here. The rest
+    # of check_dart_hygiene is exact rather than heuristic — a 200-line file or
+    # a Flutter import inside lib/sim is a REAL violation and must keep failing.
+    # An unused import cannot be real: the tree analyzes clean, and the analyzer
+    # would have caught it.
+    pf = os.path.join(project, "tool", "preflight.py")
+    if os.path.exists(pf):
+        import importlib.util
+        cwd = os.getcwd()
+        try:
+            os.chdir(project)
+            spec = importlib.util.spec_from_file_location("_pf_selftest", pf)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            mod.FAIL.clear()
+            mod.check_dart_hygiene()
+            for f in mod.FAIL:
+                if "unused import" in f:
+                    failures.append(f"preflight calls a USED import unused: {f}")
+        except Exception as e:
+            print(f"(could not run preflight hygiene: {e})")
+        finally:
+            os.chdir(cwd)
+
     if failures:
         print(f"{len(failures)} GATE(S) REJECT CORRECT CODE:\n")
         for f in failures:

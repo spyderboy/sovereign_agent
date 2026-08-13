@@ -536,6 +536,16 @@ while true; do
     if [ "$EXIT" = "4" ]; then
         STALLS=$((${STALLS:-0} + 1))
         log "${YELLOW}⏱  worker stalled and exited (stall $STALLS) — relaunching${RESET}"
+        # A stalled worker dies mid-task, so the tree is left on its task branch
+        # and the NEXT work.py refuses to start ("not on main") one second
+        # later — the recovery defeating itself. Reset before relaunching.
+        ( cd "$PROJECT" \
+          && find .git -name '*.lock' -delete \
+          && git checkout -f main \
+          && git clean -fd \
+          && git for-each-ref --format='%(refname:short)' 'refs/heads/task-*' \
+             | xargs -r git branch -D ) >/dev/null 2>&1
+        rm -f "$LOGDIR/run.lock"
         if [ "$STALLS" -ge 3 ]; then
             log "${RED}three stalls — stopping. Check ollama: it is probably wedged."
             log "  pkill -9 ollama; sleep 3; ollama run <model> 'ok'${RESET}"

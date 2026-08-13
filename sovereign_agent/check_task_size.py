@@ -88,7 +88,12 @@ def _obligations(text: str) -> tuple[list[str], int, int, int]:
     # possible and flagging them is noise. Two classes in a task IS two files.
     if len(classes) == 1:
         sigs = sorted(classes)
-    return sigs, len(_STEPS.findall(body)), body.count(";"), len(body)
+    # A semicolon inside `backticks` is Dart punctuation, not a clause boundary.
+    # Task text showing `import 'dart:ui';` alongside two other imports read as
+    # three separate obligations and reported three well-sized tasks oversized
+    # (2026-08-13). Count clauses in the PROSE only.
+    prose = re.sub(r"`[^`]*`", "", body)
+    return sigs, len(_STEPS.findall(body)), prose.count(";"), len(body)
 
 
 def oversized(roadmap_text: str, include_done: bool = False) -> list[Finding]:

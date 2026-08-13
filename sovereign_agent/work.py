@@ -572,6 +572,103 @@ def _unplanned_new_files(written: list[str], task: str, project_root: str) -> li
     return suspects
 
 
+_PLACEHOLDER_PROSE = re.compile(
+    r"^[ \t]*(?://|#)[ \t]*(?:"
+    r"implement\b|placeholder\b|todo\b|fixme\b|no changes? needed\b|"
+    r"for simplicity\b|actual\b[^\n]{0,40}\blogic\b|fill (?:this |it )?in\b|"
+    r"left as an exercise\b|assume |stub\b|not implemented\b|"
+    r"add (?:the )?(?:real )?(?:implementation|logic)\b)", re.I | re.M)
+
+def _decommented(src: str) -> str:
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    return "\n".join(re.sub(r"//.*$", "", ln) for ln in src.splitlines())
+
+
+def _all_cases_empty(src: str) -> str | None:
+    """A switch whose EVERY branch is empty, decommented.
+
+    Not "any empty branch". `case DamageTier.clean: break;` is correct — the
+    spec says a clean gem draws nothing — and a guard flagging it would block
+    that file at every tier forever, which is the exact false-positive shape
+    that has cost this project five runs. A switch where NO branch produces
+    anything is a stub; one where some do is a real implementation with a
+    legitimate no-op.
+    """
+    body = _decommented(src)
+    for m in re.finditer(r"\bswitch\s*\([^)]*\)\s*\{", body):
+        depth, end = 0, len(body)
+        for i in range(m.end() - 1, len(body)):
+            if body[i] == "{":
+                depth += 1
+            elif body[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        inner = body[m.end():end]
+        arms = re.split(r"\bcase\b|\bdefault\b", inner)[1:]
+        if len(arms) < 2:
+            continue
+        stripped = [re.sub(r"^[^:]*:", "", a, count=1) for a in arms]
+        if all(not re.sub(r"\bbreak\s*;|\s", "", a) for a in stripped):
+            return re.sub(r"\s+", " ", inner).strip()[:70]
+    return None
+
+
+def _placeholder_body(written: list[str], task: str,
+                      project_root: str) -> str | None:
+    """A file that compiles, declares the right name, and does nothing.
+
+    2026-08-13, the sequel. After the promised-symbol check landed, the run
+    produced the SAME failure one level subtler: gem_shapes.dart declared
+    `gemGeometry` with the right signature, cached correctly, and returned an
+    empty `Path()` with zero facets because all three switch cases were
+
+        case WitchType.earth:
+          // Implement the path for Earth gem
+          break;
+
+    damage_overlay.dart opened with `// Placeholder implementation for the
+    task`. Both merged green and were ticked done, because 47 of the 64 tasks
+    are gated on `flutter analyze lib` and an empty body analyzes perfectly.
+
+    The tell is always in the prose: the model NARRATES the hole it is leaving.
+    That narration is the cheapest possible signal and it is nearly free to
+    check. When it is absent this cannot help, and only a behavioural gate can
+    — but it was present in all three files that got through.
+    """
+    m = re.search(r"\bIn ([\w./-]+\.\w+):", task)
+    if not m:
+        return None
+    target = m.group(1)
+    if target not in written:
+        return None
+    try:
+        src = open(os.path.join(project_root, target), errors="ignore").read()
+    except OSError:
+        return None
+
+    p = _PLACEHOLDER_PROSE.search(src)
+    if p:
+        return (f"PLACEHOLDER LEFT IN {target}: the line "
+                f"`{p.group(0).strip()}` says you did not finish. A file that "
+                f"compiles is not a file that works, and `flutter analyze` "
+                f"cannot tell the difference — an empty function body passes it "
+                f"perfectly. Write the real implementation. If you do not know "
+                f"how, say so instead of emitting a shell; a task that fails "
+                f"loudly costs one attempt, a hollow one that merges costs "
+                f"every task downstream of it.")
+
+    c = _all_cases_empty(src)
+    if c:
+        return (f"EMPTY SWITCH IN {target}: every branch of `switch {{{c}}}` "
+                f"does nothing at all, so the function returns whatever it was "
+                f"initialised with. Each branch the task describes must build "
+                f"its own result. This analyzes clean, so nothing downstream "
+                f"will catch it.")
+    return None
+
+
 def _missing_promised_symbol(written: list[str], task: str,
                              project_root: str) -> str | None:
     """The task named a symbol; the file it wrote does not declare it.
@@ -3129,10 +3226,11 @@ def run_task(task: str, project_root: str, log_file: str,
                     pass
             print(f"  {RED}(blocked invented file: {', '.join(_unplanned)}){RESET}")
 
-        _nosym = _missing_promised_symbol(written, task, project_root)
+        _nosym = _missing_promised_symbol(written, task, project_root) or \
+            _placeholder_body(written, task, project_root)
         if _nosym:
             pattern_errs = list(pattern_errs) + [_nosym]
-            print(f"  {RED}(blocked: promised symbol not declared){RESET}")
+            print(f"  {RED}(blocked: task not actually implemented){RESET}")
 
         if pattern_errs:
             errors = pattern_errs + ("\n\n" + errors if errors else "")

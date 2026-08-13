@@ -53,10 +53,19 @@ reset_tree() {
     # up with exactly the broken config it had just been stopped to fix.
     # Refusing is always right here — a human edit is never something this
     # script should be throwing away on its own initiative.
+    #
+    # STRICT ONLY ON THE FIRST CALL. run_pass() calls reset_tree before every
+    # pass, and by then the dirty files are the previous pass's abandoned
+    # worker output — which is precisely what a reset exists to clear. Refusing
+    # there killed the 17:07 run at its first pass boundary, 30 minutes in,
+    # with no error the user would ever see. Only the launch-time call, before
+    # any worker has run, can distinguish a human edit from debris.
     local pre
+    if [ "${1:-}" = "strict" ]; then
     pre=$(cd "$PROJECT" && git status --porcelain \
           | grep -v '^?? logs/' | grep -v '^ M ROADMAP.md' || true)
-    if [ -n "$pre" ]; then
+    fi
+    if [ -n "${pre:-}" ]; then
         echo -e "${RED}✗ refusing to start: $PROJECT has uncommitted changes${RESET}"
         echo "$pre"
         echo -e "${DIM}  Commit them, or discard them deliberately:"
@@ -128,6 +137,10 @@ if [ -f "$PROJECT/tool/preflight.py" ]; then
     fi
     say "preflight clean"
 fi
+
+# The one moment a dirty tree means a HUMAN edit rather than worker debris:
+# before any worker has run. Every later reset_tree is deliberately permissive.
+reset_tree strict
 
 START_DONE=$(done_count)
 SUMMARY=""

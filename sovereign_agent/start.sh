@@ -56,6 +56,16 @@ fi
 
 echo "  resetting the tree"
 cd "$PROJECT" || die "cannot cd to $PROJECT"
+# Refuse rather than reset. See the note in sweep.sh reset_tree(): `git
+# checkout -f` cannot distinguish an abandoned worker edit from an hour of
+# hand-tuned config, and it chose wrong once, relaunching the run with the very
+# config it had been stopped to repair.
+DIRTY=$(git status --porcelain | grep -v '^?? logs/' | grep -v '^ M ROADMAP.md' || true)
+if [ -n "$DIRTY" ]; then
+    echo -e "${RED}✗ $PROJECT has uncommitted changes — commit or discard first${RESET}"
+    echo "$DIRTY"
+    exit 1
+fi
 find .git -name '*.lock' -delete 2>/dev/null
 rm -f logs/run.lock
 git checkout -f main >/dev/null 2>&1 || die "cannot check out main"

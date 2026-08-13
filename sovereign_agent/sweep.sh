@@ -46,6 +46,24 @@ reset_tree() {
     pkill -9 -f work.py 2>/dev/null
     sleep 2
     rm -f "$PROJECT/logs/run.lock"
+    # UNCOMMITTED WORK IS NOT DEBRIS. `git checkout -f` below cannot tell a
+    # half-finished worker branch from an hour of hand-tuned config, and on
+    # 2026-08-13 it silently destroyed the second: guard-hint fixes, a context
+    # change and a new preflight check, all gone at launch, so the run came back
+    # up with exactly the broken config it had just been stopped to fix.
+    # Refusing is always right here — a human edit is never something this
+    # script should be throwing away on its own initiative.
+    local pre
+    pre=$(cd "$PROJECT" && git status --porcelain \
+          | grep -v '^?? logs/' | grep -v '^ M ROADMAP.md' || true)
+    if [ -n "$pre" ]; then
+        echo -e "${RED}✗ refusing to start: $PROJECT has uncommitted changes${RESET}"
+        echo "$pre"
+        echo -e "${DIM}  Commit them, or discard them deliberately:"
+        echo -e "    git -C $PROJECT add -A && git -C $PROJECT commit -m '...'"
+        echo -e "    git -C $PROJECT checkout -f main && git -C $PROJECT clean -fd${RESET}"
+        exit 1
+    fi
     ( cd "$PROJECT" \
       && find .git -name '*.lock' -delete \
       && git checkout -f main \

@@ -74,6 +74,55 @@ SDK_IDENTS_STATIC = {
     "setState", "initState", "dispose", "build", "toString", "hashCode",
     "noSuchMethod", "runtimeType", "copyWith", "toJson", "fromJson",
     "removeFromParent", "addToParent", "onLoad", "onMount", "update", "render",
+
+    # ── dart:math ────────────────────────────────────────────────────────────
+    # The SDK scan walks package roots from .dart_tool/package_config.json, and
+    # the dart: core libraries are NOT packages — so nothing here is ever
+    # harvested, and every one of these names reads as invented. `math.tan` was
+    # blocked in arena.dart on 2026-08-13 with "tan is not defined anywhere in
+    # this project, its dependencies, or the Dart SDK. Did you mean: tap, can?"
+    # A render layer that cannot use trigonometry cannot draw an axonometric
+    # board, so this was unwinnable at every tier.
+    #
+    # Adding names can only make the grounder MORE permissive. It cannot create
+    # a false positive, only remove them — which is why this list is safe to
+    # extend generously whenever a real SDK name turns up flagged.
+    "min", "max", "sqrt", "pow", "exp", "log", "sin", "cos", "tan",
+    "asin", "acos", "atan", "atan2", "pi", "e", "ln2", "ln10", "log2e",
+    "log10e", "sqrt1_2", "sqrt2", "Point", "Rectangle", "MutableRectangle",
+
+    # ── num / int / double members ───────────────────────────────────────────
+    "abs", "clamp", "round", "floor", "ceil", "truncate", "remainder",
+    "toInt", "toDouble", "toStringAsFixed", "roundToDouble", "floorToDouble",
+    "ceilToDouble", "truncateToDouble", "isFinite", "isNaN", "isNegative",
+    "isInfinite", "sign", "compareTo",
+
+    # ── dart:ui painting surface ─────────────────────────────────────────────
+    "PictureRecorder", "Picture", "Gradient", "Shader", "BlendMode",
+    "StrokeCap", "StrokeJoin", "PaintingStyle", "RRect", "RSTransform",
+    "Radius", "Vertices", "TextBox", "ParagraphBuilder", "ParagraphStyle",
+    "FontWeight", "TextDirection", "TextAlign", "FilterQuality", "MaskFilter",
+    "ImageFilter", "ColorFilter", "TileMode", "PathFillType", "PathOperation",
+    "drawRect", "drawRRect", "drawPath", "drawCircle", "drawOval", "drawLine",
+    "drawPicture", "drawParagraph", "drawPoints", "drawShadow", "drawArc",
+    "save", "restore", "translate", "rotate", "scale", "transform", "clipRect",
+    "clipRRect", "clipPath", "moveTo", "lineTo", "cubicTo", "quadraticBezierTo",
+    "arcTo", "addPolygon", "addOval", "addRect", "addRRect", "addPath", "close",
+    "getBounds", "shift", "contains", "endRecording", "withValues", "withAlpha",
+    "fromARGB", "fromRGBO", "lerp", "inflate", "deflate", "expandToInclude",
+
+    # ── named constructors ───────────────────────────────────────────────────
+    # `RRect.fromRectXY(...)` is a real dart:ui constructor and read as invented,
+    # because the whitelist only ever held type names. Named constructors are a
+    # separate namespace and every geometry type in this layer uses them.
+    "fromRectXY", "fromRectAndRadius", "fromRectAndCorners", "fromLTRBXY",
+    "fromLTRBAndCorners", "fromLTRB", "fromLTWH", "fromCircle", "fromCenter",
+    "fromPoints", "fromDirection", "circular", "elliptical", "zero",
+    "fromRGBO", "fromARGB", "square", "all", "only", "symmetric",
+
+    # ── typed_data / collection ──────────────────────────────────────────────
+    "Float32List", "Float64List", "Int32List", "Uint8List",
+    "identical", "identityHashCode", "print",
 }
 
 _CACHE_DIR = os.path.expanduser("~/.cache/sovereign_grounding")
@@ -302,12 +351,15 @@ def sdk_whitelist(project_root: str) -> tuple[set[str], set[str]]:
 
         if not idents:
             deadline = time.time() + _SDK_SCAN_BUDGET_S
+            truncated = False
             for lib_dir in roots.values():
                 if time.time() > deadline:
+                    truncated = True
                     break
                 try:
                     for p in Path(lib_dir).rglob("*.dart"):
                         if time.time() > deadline:
+                            truncated = True
                             break
                         try:
                             src = p.read_text(errors="ignore")
@@ -317,7 +369,12 @@ def sdk_whitelist(project_root: str) -> tuple[set[str], set[str]]:
                         idents |= set(_LOWER_CAMEL.findall(src))
                 except Exception:
                     continue
-            if idents:
+            # NEVER CACHE A TRUNCATED SCAN. The budget exists so a slow disk
+            # cannot stall a run, but writing the partial result meant one slow
+            # scan poisoned every later run from the cache — the missing names
+            # look exactly like invented ones and there is no way to tell from
+            # the outside. Degrade for this run, retry the next.
+            if idents and not truncated:
                 try:
                     with open(cache_file, "w") as f:
                         json.dump(sorted(idents), f)

@@ -1337,6 +1337,38 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
         return {}, call_info
 
 
+_REWRITES: list[tuple[str, str, str]] = [
+    # (pattern, replacement, why) — each must be UNCONDITIONALLY correct.
+    (r"\.withOpacity\(\s*([^()]*?)\s*\)", r".withValues(alpha: \1)",
+     "withOpacity is deprecated in this Flutter; withValues(alpha:) is the "
+     "exact replacement"),
+]
+
+
+def _mechanical_rewrites(rel_path: str, content: str) -> str:
+    """Fix what a guard would only have rejected.
+
+    A bad-pattern guard can say no, and saying no costs a whole generation
+    cycle: the model regenerates the entire file, usually reintroducing the
+    same construct because the construct is what its training data is full of.
+    `.withOpacity()` was blocked five times on one file on 2026-08-13 and
+    consumed arena.dart's entire task budget without `flutter analyze` ever
+    running once — while the correct spelling sat three times over in
+    socket.dart, which was in the model's context the whole time.
+
+    When the repair is a deterministic text transformation, doing it is
+    strictly better than refusing. The bar for entry here is high and narrow:
+    a rewrite must be correct in EVERY context, with no judgement, or it does
+    not belong in this list — a wrong rewrite is far worse than a block,
+    because it lands silently and analyzes clean.
+    """
+    if not rel_path.endswith(".dart"):
+        return content
+    for pattern, repl, _why in _REWRITES:
+        content = re.sub(pattern, repl, content)
+    return content
+
+
 def write_changes(changes: dict[str, str], project_root: str,
                   test_only: bool = False,
                   required_file: str | None = None) -> tuple[list[str], str]:
@@ -1351,6 +1383,7 @@ def write_changes(changes: dict[str, str], project_root: str,
     """
     written = []
     pattern_errors: list[str] = []
+    changes = {p: _mechanical_rewrites(p, c) for p, c in changes.items()}
     for rel_path, content in changes.items():
         # Target-file enforcement (2026-07-15): Go tasks name exactly one
         # file ("In game/tick.go: ..."). The model sometimes writes a

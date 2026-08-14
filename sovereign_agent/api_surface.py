@@ -106,7 +106,26 @@ def mine(project: str) -> list[dict]:
     for (typ, member), kind in sorted(facts.items()):
         info = known.get(typ)
         if not info:
-            continue                      # not our type; SDK or invented wholesale
+            # AN SDK TYPE IS STILL A FACT. `There's no constant named 'add' in
+            # 'BlendMode'` is exactly as permanent and as machine-readable as
+            # the same sentence about one of our own classes — the analyzer has
+            # settled it forever. Skipping these threw away half the harvest and
+            # left gem_painter blocked on BlendMode.add through seven attempts
+            # and a whole task budget (2026-08-14).
+            #
+            # We cannot list the real surface for an SDK type without scanning
+            # it, so the hint says less. It still says the one thing that
+            # matters: this member does not exist, stop reaching for it.
+            guards.append({
+                "pattern": rf"\b{typ}\.{member}\b",
+                "hint": (f"`{typ}.{member}` does not exist — the analyzer has "
+                         f"already reported it as no such {kind} on {typ}. It "
+                         f"is an SDK type, so check its real surface rather "
+                         f"than assuming the name from another framework. "
+                         f"(dart:ui's BlendMode, for one, spells additive "
+                         f"blending `plus`, not `add`.)"),
+            })
+            continue
         real = info["fields"] or info["constants"]
         if member in real:
             continue                      # it exists now — the error was transient

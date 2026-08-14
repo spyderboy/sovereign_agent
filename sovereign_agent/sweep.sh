@@ -35,8 +35,22 @@ MAX_CYCLES="${MAX_CYCLES:-5}"
 RESULTS="$HOME/sweep-$(date +%m%d-%H%M)"
 
 BOLD="\033[1m"; GREEN="\033[92m"; YELLOW="\033[93m"; RED="\033[91m"; DIM="\033[2m"; RESET="\033[0m"
-say() { echo -e "[$(date '+%H:%M:%S')] $*"; }
-mkdir -p "$RESULTS"
+mkdir -p "$RESULTS" "$PROJECT/logs"
+
+# Mirror the sweep's own narration into the PROJECT's logs, beside every other
+# log. $RESULTS lives under $HOME, where nothing that reads this project ever
+# looks — so when a sweep exited early the only evidence was a missing lockfile,
+# and two separate diagnoses on 2026-08-14 were guesswork for want of one line
+# that was being written the whole time. A run should be explicable from the
+# directory it ran against.
+SWEEP_LOG="$PROJECT/logs/sweep.log"
+say() {
+    local line
+    line="[$(date '+%H:%M:%S')] $*"
+    echo -e "$line"
+    echo -e "$line" | sed 's/\x1b\[[0-9;]*m//g' >>"$SWEEP_LOG"
+}
+say "sweep starting — project=$PROJECT cheap=$CHEAP strong=$STRONG results=$RESULTS"
 
 done_count() { grep -c '^- \[x\]' "$PROJECT/ROADMAP.md" 2>/dev/null || echo 0; }
 open_count() { grep -c '^- \[ \]' "$PROJECT/ROADMAP.md" 2>/dev/null || echo 0; }

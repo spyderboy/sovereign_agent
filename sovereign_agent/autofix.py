@@ -31,6 +31,14 @@ DART_UI_CLASSES = {
     'Color', 'Canvas', 'Offset', 'Paint', 'Rect', 'Size',
     'MaskFilter', 'BlendMode', 'PaintingStyle', 'BlurStyle',
     'TextStyle', 'Shadow', 'Gradient', 'ImageFilter',
+    'Path', 'RRect', 'Radius', 'Picture', 'PictureRecorder',
+    'StrokeCap', 'StrokeJoin', 'Shader', 'TileMode', 'Vertices',
+}
+
+# dart:math members that require an explicit import
+DART_MATH_MEMBERS = {
+    'min', 'max', 'sqrt', 'pow', 'exp', 'log', 'sin', 'cos', 'tan',
+    'asin', 'acos', 'atan', 'atan2', 'pi', 'Random', 'Point',
 }
 
 
@@ -136,6 +144,34 @@ def fix_missing_dart_ui(file_path: str, message: str) -> bool:
     return _write_lines(file_path, lines)
 
 
+def fix_missing_dart_math(file_path: str, message: str) -> bool:
+    """Add 'import dart:math' when a dart:math member is reported undefined.
+
+    The sibling of fix_missing_dart_ui, and needed for the same reason. A
+    painting file told to copy socket.dart's imports gets no `dart:math`,
+    because socket.dart happens not to need one — so `max`, `pow` and `sqrt`
+    came back undefined on gem_shading.dart at every attempt (2026-08-14).
+
+    Adding an import is deterministic and safe: the name is already used in
+    the file, the analyzer has already confirmed it resolves nowhere else, and
+    an unused import would be caught by the check right below this one.
+    """
+    if not any(f"'{m}'" in message for m in DART_MATH_MEMBERS):
+        return False
+    content = open(file_path).read()
+    if "import 'dart:math'" in content:
+        return False
+    lines = content.splitlines(keepends=True)
+    insert_at = 0
+    for i, line in enumerate(lines):
+        if line.startswith("import 'dart:"):
+            insert_at = i + 1
+        elif line.startswith('import ') and insert_at == 0:
+            insert_at = i
+    lines.insert(insert_at, "import 'dart:math';\n")
+    return _write_lines(file_path, lines)
+
+
 def fix_depend_on_referenced_packages(file_path: str) -> bool:
     """Prepend the ignore_for_file directive for depend_on_referenced_packages."""
     content = open(file_path).read()
@@ -218,8 +254,13 @@ def _dispatch(error: dict, project_root: str) -> bool:
         return fix_undefined_named_parameter(
             path, error['line'], error['col'], error['message'])
 
-    if rule in ('undefined_class', 'creation_with_non_type', 'undefined_identifier'):
-        return fix_missing_dart_ui(path, error['message'])
+    if rule in ('undefined_class', 'creation_with_non_type', 'undefined_identifier',
+                'undefined_function'):
+        # dart:ui first — it covers the larger surface — then dart:math. Both
+        # are no-ops when the import is already present, so the order only
+        # decides which one gets the chance to fix a given error.
+        return (fix_missing_dart_ui(path, error['message'])
+                or fix_missing_dart_math(path, error['message']))
 
     return False
 

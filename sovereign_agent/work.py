@@ -1245,7 +1245,40 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
     locked_list = "\n".join(
         f"  {d}/: {', '.join(names)}" for d, names in sorted(locked_dirs.items())
     )
-    error_block = f"\n\nPrevious attempt failed with these errors — fix them:\n{errors}" if errors else ""
+    # ── Repair, don't rewrite ────────────────────────────────────────────────
+    # The failed file stays on disk between attempts and is re-read into
+    # `context` above, so the model can already SEE its previous attempt — it
+    # was simply never told that is what it was looking at, and "implement the
+    # task, return complete file contents" reads as an instruction to start
+    # over. So it did, every time, and each attempt re-rolled the dice on
+    # everything that was already right.
+    #
+    # The cost is visible in the logs as non-monotonic error counts:
+    #   arena.dart      12 → 5 → 3 → 1 → 9      (one error away, then undone)
+    #   hp_pill.dart     5 → 10 → 2 → 5 → 3 → 4  (ten attempts, no convergence)
+    #   gem_painter      2 → 3                   (budget spent going backwards)
+    # A model that is right 3 times in 4 per construct will essentially never
+    # get twenty constructs right simultaneously, and one shot at a time is all
+    # the loop was asking for. Naming the file as its own prior work and asking
+    # for a minimal delta turns twenty independent coin flips into one.
+    _tgt = re.search(r"\bIn ([\w./-]+\.\w+):", task)
+    _target = _tgt.group(1) if _tgt else None
+    _has_prior = bool(_target and _target in editable and editable[_target].strip())
+    if errors and _has_prior:
+        error_block = (
+            f"\n\n=== THIS IS A REPAIR, NOT A REWRITE ===\n"
+            f"`{_target}` in 'Current files' above is YOUR OWN PREVIOUS ATTEMPT. "
+            f"It is mostly correct — it failed only on the errors below.\n\n"
+            f"Start from that exact file and change ONLY what these errors "
+            f"require. Keep every import, helper, constant, structure and name "
+            f"that is not implicated. Do not restructure, do not rename, do not "
+            f"re-derive the parts that already work. Return the complete file, "
+            f"but as the previous file with the smallest possible edit applied.\n\n"
+            f"Errors to fix:\n{errors}"
+        )
+    else:
+        error_block = (f"\n\nPrevious attempt failed with these errors — fix them:\n{errors}"
+                       if errors else "")
 
     # Test tasks get an extra hard constraint injected into the system prompt
     # so the model understands scope BEFORE it generates any code.

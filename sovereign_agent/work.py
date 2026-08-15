@@ -3020,6 +3020,22 @@ def run_task(task: str, project_root: str, log_file: str,
             pkg_ctx += [os.path.join(_d, f) for f in _fs]
     forced = [f for f in PROJECT_ALWAYS_INCLUDE + spec_refs + ref_refs + pkg_ctx
               if os.path.exists(os.path.join(project_root, f))]
+
+    # THE TASK'S OWN TARGET FILE. rel_files is planned ONCE, here, from files
+    # that already exist — so a task creating a new file never had that file in
+    # its context, and after attempt 1 wrote it, attempt 2 still could not see
+    # it. Every attempt therefore started from a blank page and re-rolled every
+    # decision that was already right, which is what the error counts show:
+    #   arena       12 → 5 → 3 → 1 → 9
+    #   hp_pill      5 → 10 → 2 → 5 → 3 → 4
+    #   effects      3 → 3 → 9 → 7
+    #   effects_beam 2 → 4
+    # read_files skips paths that do not exist, so including it unconditionally
+    # is a no-op on attempt 1 and the whole point from attempt 2 onward.
+    _target_m = re.search(r"\bIn ([\w./-]+\.\w+):", task)
+    if _target_m:
+        forced.append(_target_m.group(1))
+
     rel_files = list(dict.fromkeys(forced + rel_files))
     print(f"  Files: {', '.join(rel_files) or '(none found)'}")
 

@@ -54,6 +54,20 @@ from dataclasses import dataclass
 # a parenthesis late in it, inventing obligations named `it` and `end`.
 _SIG = re.compile(r"`(?:[\w<>,\[\]?]+ ){0,2}[\w<>,\[\]?]+\s+(\w+)\s*\(")
 _CLASS = re.compile(r"`class\s+(\w+)")
+# A BARE BACKTICKED NAME IS STILL AN OBLIGATION. The effects task listed five —
+# `paintChargeRibbons`, `paintLightningBeam`, `paintBlastRing`, `paintEmbers`,
+# `paintShatter` — with no parentheses and no return types, so _SIG matched none
+# of them and the task scored as ONE obligation. Five painters in one file under
+# a 150-line limit is roughly 25 lines each including hashed bolt forks and
+# shard fans; the model correctly tried to split the file and the harness
+# rejected the split as an invented file, leaving it nowhere to go for ten
+# attempts (2026-08-15).
+#
+# Restricted to verb-shaped lowerCamel names so that a task merely MENTIONING a
+# type or a constant in backticks does not read as an instruction to build it.
+_BARE_FN = re.compile(
+    r"`((?:paint|draw|build|make|render|compute|apply|resolve|sample|paint)"
+    r"[A-Z]\w*)`")
 _STEPS = re.compile(r"\(\d\)")
 _GATE = re.compile(r"task gate:\s*(.+?)\s*$")
 _TARGET = re.compile(r"In (\S+?):")
@@ -82,7 +96,9 @@ class Finding:
 def _obligations(text: str) -> tuple[list[str], int, int, int]:
     body = text.split("— done when:")[0]
     classes = {m.group(1) for m in _CLASS.finditer(body)}
-    sigs = sorted({m.group(1) for m in _SIG.finditer(body)} | classes)
+    sigs = sorted({m.group(1) for m in _SIG.finditer(body)}
+                  | {m.group(1) for m in _BARE_FN.finditer(body)}
+                  | classes)
     # ONE CLASS IS ONE OBLIGATION, however many methods it has. A class and its
     # methods land in one file and reach one gate, so splitting them is not
     # possible and flagging them is noise. Two classes in a task IS two files.

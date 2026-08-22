@@ -94,8 +94,28 @@ foreign_park        = 2
 quick_param_limit_b = {quick}
 
 [run]
-main_branch = "main"
+main_branch = "{main_branch}"
 """
+
+
+def main_branch_of(project: str) -> str:
+    """The project's integration branch, from .sovereign_config.json.
+
+    Hardcoding "main" made this script unusable on any project that predates
+    the rename — galaxican is on `master`, so `git clone --branch main` failed
+    before a single task ran, and the generated profile would have handed
+    work.py the wrong branch even if the clone had succeeded. NOTE: nothing else reads
+    `main_branch` from this file — work.py and config.py resolve it from
+    MAIN_BRANCH in the env, then a profile's [run] main_branch, then "main".
+    This reads the project config so a generated profile carries the right
+    branch; a non-A/B run still needs MAIN_BRANCH set in its .env.
+    """
+    cfg = os.path.join(project, ".sovereign_config.json")
+    try:
+        with open(cfg) as f:
+            return json.load(f).get("main_branch") or "main"
+    except Exception:
+        return "main"
 
 
 def sh(args, cwd=None, check=True):
@@ -149,18 +169,19 @@ def main():
     if os.path.exists(clone):
         sys.exit(f"{clone} already exists — remove it or pass a different --tag")
 
+    MAIN = main_branch_of(project)
     branch = sh(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project)
-    head = sh(["git", "rev-parse", "--short", "main"], cwd=project)
-    if branch != "main":
-        print(f"note: source is on '{branch}' — a run is live. Cloning main "
+    head = sh(["git", "rev-parse", "--short", MAIN], cwd=project)
+    if branch != MAIN:
+        print(f"note: source is on '{branch}' — a run is live. Cloning {MAIN} "
               f"@ {head}, which is a completed-task boundary.")
     else:
-        print(f"cloning {project} main @ {head}")
-    sh(["git", "clone", "--no-hardlinks", "--branch", "main", "--single-branch",
+        print(f"cloning {project} {MAIN} @ {head}")
+    sh(["git", "clone", "--no-hardlinks", "--branch", MAIN, "--single-branch",
         project, clone])
     on = sh(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=clone)
-    if on != "main":
-        sys.exit(f"clone landed on '{on}', expected main")
+    if on != MAIN:
+        sys.exit(f"clone landed on '{on}', expected {MAIN}")
 
     rm_path = os.path.join(clone, "ROADMAP.md")
     text = open(rm_path).read()
@@ -290,6 +311,7 @@ def main():
     with open(prof_path, "w") as f:
         f.write(PROFILE.format(model=args.model, params=args.params, ctx=args.ctx,
                                quick=args.params + 1, n=len(targets),
+                               main_branch=MAIN,
                                targets="\n# ".join(targets)))
 
     print(f"\nclone     {clone}")

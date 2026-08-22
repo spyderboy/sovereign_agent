@@ -66,8 +66,15 @@ def build_symbol_index(project_root: str, src_rel: str = "src"):
     exports: dict[str, set[str]] = {}
     root = os.path.join(project_root, src_rel)
     if not os.path.isdir(root):
-        return index, exports
+        for candidate in ("lib", "."):
+            root = os.path.join(project_root, candidate)
+            if os.path.isdir(root):
+                break
+        else:
+            return index, exports
+    _SKIP_DIRS = {"node_modules", ".git", ".next", "dist", "build", ".venv", "venv"}
     for dirpath, _dirs, files in os.walk(root):
+        _dirs[:] = [d for d in _dirs if d not in _SKIP_DIRS]
         for fn in files:
             if not fn.endswith((".ts", ".tsx")) or fn.endswith(".d.ts"):
                 continue
@@ -150,8 +157,15 @@ def build_signature_index(project_root: str, src_rel: str = "src") -> dict[str, 
     sigs: dict[str, str] = {}
     root = os.path.join(project_root, src_rel)
     if not os.path.isdir(root):
-        return sigs
+        for candidate in ("lib", "."):
+            root = os.path.join(project_root, candidate)
+            if os.path.isdir(root):
+                break
+        else:
+            return sigs
+    _SKIP_DIRS = {"node_modules", ".git", ".next", "dist", "build", ".venv", "venv"}
     for dirpath, _dirs, files in os.walk(root):
+        _dirs[:] = [d for d in _dirs if d not in _SKIP_DIRS]
         for fn in files:
             if not fn.endswith((".ts", ".tsx")) or fn.endswith(".d.ts"):
                 continue
@@ -185,7 +199,10 @@ def _spec_from(importer_relpath: str, target_modrel: str) -> str:
 
 def fix_ts_imports(project_root: str, written_files: list[str], index=None, exports=None):
     """Rewrite relative named-imports in each written .ts file so every symbol
-    is imported from its true module; drop symbols that exist nowhere.
+    is imported from its true module, drop symbols that exist nowhere, and add
+    an import for any known project symbol that's used but never imported at
+    all (the model referenced a real helper as a bare identifier and wrote no
+    import statement for it whatsoever).
 
     Returns a list of human-readable notes describing what was corrected.
     Safe: on any parse trouble a file is left untouched.
@@ -208,6 +225,40 @@ def fix_ts_imports(project_root: str, written_files: list[str], index=None, expo
             except Exception:
                 pass
     return notes
+
+
+_LOCAL_DECL_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?"
+    r"(?:function\*?|const|let|var|class|abstract\s+class|interface|type|enum|namespace)\s+"
+    r"([A-Za-z_$][\w$]*)",
+    re.M,
+)
+
+
+def _bound_import_names(text: str) -> set[str]:
+    names: set[str] = set()
+    for m in re.finditer(r"^\s*import\s+(?:type\s+)?(.+?)\s+from\s+['\"][^'\"]+['\"]", text, re.M):
+        clause = m.group(1).strip()
+        ns = re.match(r"\*\s+as\s+([A-Za-z_$][\w$]*)", clause)
+        if ns:
+            names.add(ns.group(1))
+            continue
+        brace = re.search(r"\{([^}]*)\}", clause)
+        before = clause[:brace.start()] if brace else clause
+        default_name = before.strip().rstrip(",").strip()
+        if default_name and re.match(r"^[A-Za-z_$][\w$]*$", default_name):
+            names.add(default_name)
+        if brace:
+            for part in brace.group(1).split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                if part.startswith("type "):
+                    part = part[5:].strip()
+                bare = part.split(" as ")[-1].strip()
+                if bare:
+                    names.add(bare)
+    return names
 
 
 def _rewrite_file(rel: str, text: str, index, exports, notes: list[str]):
@@ -244,6 +295,20 @@ def _rewrite_file(rel: str, text: str, index, exports, notes: list[str]):
         return ""  # remove this statement; consolidated block re-emitted later
 
     body_removed = _NAMED_IMPORT_RE.sub(collect, text)
+
+    own_modrel = re.sub(r"\.tsx?$", "", rel)
+    known = {b for mod_bares in desired.values() for b in mod_bares}
+    known |= _bound_import_names(text)
+    known |= set(_LOCAL_DECL_RE.findall(body_removed))
+    for name, modrel in index.items():
+        if name in known or modrel == own_modrel:
+            continue
+        if re.search(r"(?<![\w$.])" + re.escape(name) + r"\s*\(", body_removed):
+            desired.setdefault(modrel, {}).setdefault(name, name)
+            known.add(name)
+            changed = True
+            notes.append(f"{rel}: added missing import '{name}' from {_spec_from(rel, modrel)}")
+
     if not changed:
         return text, False
 

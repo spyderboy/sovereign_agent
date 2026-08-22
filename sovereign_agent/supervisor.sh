@@ -76,7 +76,10 @@ mkdir -p "$LOGDIR"
 LOCK="$LOGDIR/run.lock"
 if [ -f "$LOCK" ]; then
     OLD="$(cat "$LOCK" 2>/dev/null || true)"
-    if [ -n "${OLD:-}" ] && kill -0 "$OLD" 2>/dev/null; then
+    # A --full orchestrator writes its own PID here, then recursively invokes
+    # itself for the quick/deep passes; the child's $PPID is that orchestrator,
+    # not a genuinely concurrent run, so it must not be refused on that PID.
+    if [ -n "${OLD:-}" ] && kill -0 "$OLD" 2>/dev/null && [ "$OLD" != "${PPID:-}" ]; then
         echo "✗ a run is already in progress (supervisor PID $OLD)"
         echo "  Two workers on one repo deadlock on the git index. Stop it first:"
         echo "    pkill -9 -f supervisor.sh; pkill -9 -f work.py; sleep 2"

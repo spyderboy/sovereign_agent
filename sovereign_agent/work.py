@@ -912,13 +912,30 @@ def check_bad_patterns(rel_path: str, content) -> list[str]:
     """Return list of violation messages found in content.
 
     Accepts str or list[str] (models sometimes return file lines as a JSON array).
+
+    BAD_PATTERNS entries are normally a (pattern, msg) 2-tuple. An optional
+    3rd element, except_paths (a tuple of rel_paths), exempts those specific
+    files from that one pattern — added 2026-08-22 after projectsdash's own
+    "child_process" guard got stuck blocking its OWN intended exception: the
+    hint text said "Only lib/ops/spawn.ts is allowed to import
+    child_process", but nothing enforced that — the pattern matched every
+    file unconditionally, including spawn.ts itself, whose entire job is to
+    call child_process.spawn(). That is a permanently unsatisfiable gate: an
+    attempt that correctly implements the task is guaranteed to trip its own
+    guard, every time, forever (see xanadu-run-control's "whose failure is
+    it" diagnostic — the file the guard names IS the file the task targets).
+    2-tuples are unaffected; this is purely additive.
     """
     if isinstance(content, list):
         content = "\n".join(str(line) for line in content)
     elif not isinstance(content, str):
         content = str(content)
     violations = []
-    for pattern, msg in BAD_PATTERNS:
+    for entry in BAD_PATTERNS:
+        pattern, msg = entry[0], entry[1]
+        except_paths = entry[2] if len(entry) > 2 else ()
+        if rel_path in except_paths:
+            continue
         if isinstance(pattern, _re.Pattern):
             if pattern.search(content):
                 violations.append(f"[{rel_path}] {msg}")
@@ -2035,8 +2052,17 @@ def _load_project_config(project_root: str) -> dict:
             # and locked-constant redeclare checks — and both sat inert for
             # days while three files merged green with their own copies of
             # locked types (2026-08-12).
-            BAD_PATTERNS.append(
-                (_re.compile(entry["pattern"], _re.MULTILINE), entry["hint"]))
+            compiled = _re.compile(entry["pattern"], _re.MULTILINE)
+            # Optional except_paths (2026-08-22): see check_bad_patterns'
+            # docstring — a guard can legitimately need to exempt the one
+            # file whose job is to do the thing it otherwise forbids.
+            except_paths = entry.get("except_paths") or entry.get("except_path")
+            if isinstance(except_paths, str):
+                except_paths = [except_paths]
+            if except_paths:
+                BAD_PATTERNS.append((compiled, entry["hint"], tuple(except_paths)))
+            else:
+                BAD_PATTERNS.append((compiled, entry["hint"]))
 
     # ── Extra error hints ─────────────────────────────────────────────────────
     extra_hints = cfg.get("additional_error_hints", [])

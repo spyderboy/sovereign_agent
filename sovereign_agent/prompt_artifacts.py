@@ -68,6 +68,70 @@ LANGUAGE_ALIASES = {
     "next": "typescript", "react": "typescript",
     "python": "python", "py": "python",
     "swift": "swift", "swiftui": "swift",
+    # 2026-08-22: languages beyond the original 5 no longer need an entry here
+    # to work (see normalise_language / EXTENSION_LANGUAGE_MAP below), but a
+    # few common aliases are still worth normalising for consistency.
+    "java": "java",
+    "kotlin": "kotlin", "kt": "kotlin",
+    "csharp": "csharp", "c#": "csharp", "cs": "csharp", "dotnet": "csharp",
+    "php": "php",
+    "ruby": "ruby", "rb": "ruby",
+    "rust": "rust", "rs": "rust",
+    "c": "c",
+    "cpp": "cpp", "c++": "cpp", "cxx": "cpp",
+    "cobol": "cobol",
+    "vb": "vbnet", "vbnet": "vbnet", "vb.net": "vbnet", "visualbasic": "vbnet",
+    "vbscript": "vbscript", "vbs": "vbscript",
+    "perl": "perl",
+    "scala": "scala",
+    "objectivec": "objective-c", "objective-c": "objective-c", "objc": "objective-c",
+    "shell": "shell", "bash": "shell", "sh": "shell",
+    "sql": "sql",
+}
+
+# Extension (without the leading dot, lowercased) -> canonical language key.
+# This is the auto-detection map: detect_project_languages() walks the
+# project tree and buckets files by this table, so a language works here the
+# moment its extensions are listed — it does not also need a LANGUAGE_SPECS
+# or LANGUAGE_ALIASES entry to be *detected*, only to get the richer
+# vocab/frameworks grounding those provide. Anything absent from this map is
+# simply not counted (unknown extensions, config files, etc.).
+EXTENSION_LANGUAGE_MAP: dict[str, str] = {
+    "go": "go",
+    "dart": "dart",
+    "ts": "typescript", "tsx": "typescript", "js": "typescript",
+    "jsx": "typescript", "mjs": "typescript", "cjs": "typescript",
+    "py": "python", "pyi": "python",
+    "swift": "swift",
+    "java": "java",
+    "kt": "kotlin", "kts": "kotlin",
+    "cs": "csharp",
+    "php": "php", "phtml": "php",
+    "rb": "ruby", "erb": "ruby",
+    "rs": "rust",
+    "c": "c", "h": "c",
+    "cpp": "cpp", "cc": "cpp", "cxx": "cpp", "hpp": "cpp", "hh": "cpp",
+    # COBOL: .cpy (copybooks) is COBOL-specific in this context, distinct
+    # from unrelated uses of the same extension elsewhere.
+    "cbl": "cobol", "cob": "cobol", "cobol": "cobol", "cpy": "cobol",
+    "vb": "vbnet", "bas": "vbnet",
+    "vbs": "vbscript",
+    "pl": "perl", "pm": "perl",
+    "scala": "scala",
+    "clj": "clojure", "cljs": "clojure",
+    "ex": "elixir", "exs": "elixir",
+    "hs": "haskell",
+    "lua": "lua",
+    "sh": "shell", "bash": "shell", "zsh": "shell",
+    "sql": "sql",
+    "r": "r",
+    # .m is ambiguous (Objective-C vs MATLAB); Objective-C is far more common
+    # in the kind of software projects this harness targets.
+    "m": "objective-c", "mm": "objective-c",
+    "groovy": "groovy",
+    "erl": "erlang",
+    "fs": "fsharp", "fsx": "fsharp",
+    "jl": "julia",
 }
 
 LANGUAGE_SPECS: dict[str, dict] = {
@@ -241,19 +305,104 @@ class Verdict:
 # ── Language resolution ──────────────────────────────────────────────────────
 
 def normalise_language(lang: str | None) -> str:
+    """Normalise a language name.
+
+    2026-08-22: this used to collapse anything not in LANGUAGE_ALIASES to
+    "generic" — meaning a project whose language wasn't one of the original
+    5 (go/dart/typescript/python/swift) lost its identity entirely and every
+    language-aware prompt (advisor persona, coding-agent role line, etc.)
+    silently fell back to whatever the code's "not go" default happened to
+    be, which was usually Dart. A known alias still maps to its canonical
+    key; anything else now passes through as its own lowercased, stripped
+    string instead of being erased — LANGUAGE_SPECS.get(x, {}) and friends
+    already default gracefully for keys with no curated entry, so an unlisted
+    language degrades to "no extra vocab/frameworks list" rather than "no
+    identity". Only empty/None input still means "generic".
+    """
     if not lang:
         return "generic"
-    return LANGUAGE_ALIASES.get(str(lang).strip().lower(), "generic")
+    key = str(lang).strip().lower()
+    if not key or key == "auto":
+        return "generic"
+    return LANGUAGE_ALIASES.get(key, key)
+
+
+# Directories to skip during a language-detection filesystem walk. Reuses the
+# same exclusions as the grounding whitelist scan below.
+_DETECT_SKIP_DIRS = _SKIP_DIRS
+
+
+def detect_project_languages(project_root: str, max_files: int = 20000) -> list[tuple[str, int]]:
+    """Walk project_root and count source files by language, via
+    EXTENSION_LANGUAGE_MAP. Returns [(language, file_count), ...] sorted
+    most-common first. Caps the walk at max_files to bound cost on a huge
+    tree (vendored deps etc. are already excluded by _DETECT_SKIP_DIRS, but
+    this is a hard backstop). Never raises — an unreadable project_root just
+    yields no results, same as an empty project.
+    """
+    from collections import Counter
+    counts: Counter[str] = Counter()
+    try:
+        root = Path(project_root)
+        n = 0
+        for p in root.rglob("*"):
+            if any(part in _DETECT_SKIP_DIRS for part in p.parts):
+                continue
+            if not p.is_file():
+                continue
+            n += 1
+            if n > max_files:
+                break
+            lang = EXTENSION_LANGUAGE_MAP.get(p.suffix.lstrip(".").lower())
+            if lang:
+                counts[lang] += 1
+    except Exception:
+        return []
+    return counts.most_common()
 
 
 def project_language(project_root: str) -> str:
-    """Read `language` from .sovereign_config.json. Falls back to 'generic'."""
+    """The project's dominant language.
+
+    Precedence:
+      1. An explicit, non-empty, non-"auto" `language` in .sovereign_config.json
+         — a human override always wins, so an existing project's configured
+         value never changes behavior under this function.
+      2. Auto-detected from the file tree (most common source-file extension,
+         via EXTENSION_LANGUAGE_MAP) — covers any project that hasn't set the
+         field, or has set it to "auto", regardless of language.
+      3. "generic" if config is unreadable/absent AND nothing recognizable
+         is found on disk (e.g. a brand new, still-empty project).
+    """
+    configured = None
     try:
         cfg_path = os.path.join(project_root, ".sovereign_config.json")
         with open(cfg_path) as f:
-            return normalise_language(json.load(f).get("language"))
+            configured = json.load(f).get("language")
     except Exception:
-        return "generic"
+        pass
+    if configured and str(configured).strip().lower() not in ("", "auto"):
+        return normalise_language(configured)
+
+    detected = detect_project_languages(project_root)
+    if detected:
+        return detected[0][0]
+    return "generic"
+
+
+def project_languages(project_root: str, min_files: int = 3) -> list[str]:
+    """All languages present in significant quantity (>= min_files) in the
+    project tree, dominant first — for genuinely polyglot projects (e.g. a
+    TypeScript frontend with a handful of Python scripts) where a single
+    project_language() call would only ever surface the majority one. Falls
+    back to [project_language(project_root)] if detection finds nothing
+    significant (e.g. a language configured explicitly with no matching
+    files on disk yet, or a project too small to clear min_files)."""
+    detected = detect_project_languages(project_root)
+    significant = [lang for lang, n in detected if n >= min_files]
+    if significant:
+        return significant
+    return [project_language(project_root)]
 
 
 # ── Whitelist construction ───────────────────────────────────────────────────

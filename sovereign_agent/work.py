@@ -380,6 +380,49 @@ def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
 
 # ─── JSON extraction helper ───────────────────────────────────────────────────
 
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
+
+
+def _extract_json_candidate(raw: str) -> str:
+    """Return the text to search for a JSON object in a raw model response.
+
+    Prefers the LAST ```json fenced block when the response contains one or
+    more. Two things break a naive "first { to last }" scan of the whole raw
+    text, and both were observed back-to-back on the same task (qwen2.5-coder
+    then qwen3.8): (1) explanatory prose before/around the fence routinely
+    contains a stray brace, e.g. an inline "`{ heading: string }`" type
+    description, which a naive scan latches onto as the start; (2) a model
+    that thinks out loud and revises itself emits more than one JSON block,
+    and the span from the first block's "{" to the last block's "}" crosses
+    both blocks plus everything in between, which is not valid JSON at any
+    length. Scoping to just the last fenced block sidesteps both. Falls back
+    to the raw text unchanged when there is no fence, for models that emit
+    bare JSON with no markdown at all -- unchanged from the prior behavior.
+    """
+    fences = _JSON_FENCE_RE.findall(raw)
+    return fences[-1] if fences else raw
+
+
+def _normalize_backtick_strings(text: str) -> str:
+    """Convert JS/TS template-literal (backtick) values into properly
+    escaped JSON string literals.
+
+    Seen on both qwen2.5-coder and qwen3.8: despite an explicit "values must
+    be JSON-escaped strings, no markdown" instruction, the model sometimes
+    writes file content as a backtick-delimited template literal instead of
+    a quoted JSON string. That is invalid JSON -- json.loads rejects the
+    whole object outright even though the file content itself is fine --
+    and the failure was silently swallowed as "no output" with the raw text
+    only visible in task_traces.jsonl. \` is treated as an escaped literal
+    backtick inside the span. Safe to apply as a fallback after strict
+    parsing has already failed: valid JSON never contains a bare backtick.
+    """
+    def repl(m: re.Match) -> str:
+        content = m.group(1).replace("\\`", "`")
+        return json.dumps(content)
+    return re.sub(r"`((?:\\.|[^`\\])*)`", repl, text, flags=re.DOTALL)
+
+
 def _extract_first_json_object(text: str) -> dict:
     """Extract the first complete, balanced JSON object from text.
 
@@ -387,6 +430,7 @@ def _extract_first_json_object(text: str) -> dict:
     second JSON block) doesn't cause 'Extra data' errors.  Returns {} on any
     parse failure.
     """
+    text = _extract_json_candidate(text)
     start = text.find("{")
     if start == -1:
         return {}
@@ -413,7 +457,10 @@ def _extract_first_json_object(text: str) -> dict:
                 try:
                     return json.loads(text[start : i + 1])
                 except json.JSONDecodeError:
-                    return {}
+                    try:
+                        return json.loads(_normalize_backtick_strings(text[start : i + 1]))
+                    except json.JSONDecodeError:
+                        return {}
     return {}
 
 
@@ -1175,6 +1222,99 @@ def _missing_local_deps(task: str, project_root: str) -> list[str]:
     return missing
 
 
+# Per-language role-line specs for the coding-agent system prompt (2026-08-22).
+# This used to be `if PROJECT_LANGUAGE == "go" else <Dart text, unconditionally>`
+# inline in implement_task() — every language other than Go silently got told
+# "You are a Dart/Flutter coding agent" and shown a .dart example path. Same
+# bug already found and fixed in qwen_advisor.py's persona line (see that
+# file's 2026-08-22 note) — this is the same fix applied to the ACTUAL coding
+# prompt, which matters far more than the advisor hint does. go and dart
+# entries are copied verbatim from the original inline code (regression-safe,
+# see test/test_role_specs.py-style checks run before this shipped);
+# typescript/python/swift are new; anything else falls through to
+# _generic_role_spec(), which builds an honest persona from PROJECT_LANGUAGE
+# itself instead of defaulting to Dart.
+_ROLE_SPECS: dict[str, dict] = {
+    "go": {
+        "persona": "You are a Go coding agent. Implement the given task.\n",
+        "example_path": "sim/mote_move.go",
+        "file_count_line": "This task changes EXACTLY ONE file — the one named in the task. Return exactly one key.\n",
+        "completeness_block": (
+            "COMPLETENESS: the file must be complete and compilable — every opened brace closed, "
+            "no trailing truncation. Before finishing, verify the final character of the file "
+            "content is the closing brace of the last function.\n"
+            "NESTING: keep nesting depth <= 3. Use early `continue`/`return` guard clauses "
+            "instead of nested if-blocks — deep nesting causes brace-count errors.\n"
+        ),
+    },
+    "dart": {
+        "persona": "You are a Dart/Flutter coding agent. Implement the given task.\n",
+        "example_path": "lib/game/game_core.dart",
+        "file_count_line": "Typical task requires 1-3 files. If you find yourself changing more than 5, stop and reconsider.\n",
+        "completeness_block": "",
+    },
+    "typescript": {
+        "persona": "You are a TypeScript coding agent. Implement the given task.\n",
+        "example_path": "lib/ops/spawn.ts",
+        "file_count_line": "Typical task requires 1-3 files. If you find yourself changing more than 5, stop and reconsider.\n",
+        "completeness_block": (
+            "COMPLETENESS: the file must be complete and compilable — every opened brace closed, "
+            "no trailing truncation. Before finishing, verify the final character of the file "
+            "content is the closing brace of the last function.\n"
+        ),
+    },
+    "python": {
+        "persona": "You are a Python coding agent. Implement the given task.\n",
+        "example_path": "lib/ops/spawn.py",
+        "file_count_line": "Typical task requires 1-3 files. If you find yourself changing more than 5, stop and reconsider.\n",
+        "completeness_block": "",
+    },
+    "swift": {
+        "persona": "You are a Swift coding agent. Implement the given task.\n",
+        "example_path": "Sources/App/GameCore.swift",
+        "file_count_line": "Typical task requires 1-3 files. If you find yourself changing more than 5, stop and reconsider.\n",
+        "completeness_block": (
+            "COMPLETENESS: the file must be complete and compilable — every opened brace closed, "
+            "no trailing truncation. Before finishing, verify the final character of the file "
+            "content is the closing brace of the last function.\n"
+        ),
+    },
+}
+
+# Brace-delimited languages — decides whether an unlisted language's generic
+# spec includes the brace-completeness reminder (wrong advice for
+# indentation/END-delimited languages like Python, COBOL, VB).
+_BRACE_LANGUAGES = {
+    "go", "dart", "typescript", "java", "kotlin", "csharp", "cpp", "c",
+    "php", "rust", "scala", "groovy", "swift", "objective-c", "javascript",
+}
+
+
+def _generic_role_spec(language: str) -> dict:
+    """Role spec for a language with no hand-authored entry above — built
+    from the language's own name so e.g. COBOL/VB/PHP/Java get an accurate
+    persona instead of silently inheriting Dart's."""
+    display = (
+        language.replace("-", " ").replace("_", " ").title()
+        if language and language != "generic" else "software"
+    )
+    completeness = (
+        "COMPLETENESS: the file must be complete and compilable — every "
+        "opened brace closed, no trailing truncation.\n"
+        if language in _BRACE_LANGUAGES else ""
+    )
+    return {
+        "persona": f"You are a {display} coding agent. Implement the given task.\n",
+        "example_path": None,  # no fabricated example for a language we don't know real paths for
+        "file_count_line": "Typical task requires 1-3 files. If you find yourself changing more than 5, stop and reconsider.\n",
+        "completeness_block": completeness,
+    }
+
+
+def _role_spec_for(language: str) -> dict:
+    return _ROLE_SPECS.get(language) or _generic_role_spec(language)
+
+
 def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
                    model: str | None = None,
                    is_test: bool = False,
@@ -1295,32 +1435,24 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
         if is_test else ""
     )
 
+    _role = _role_spec_for(PROJECT_LANGUAGE)
+    _example_line = (
+        f"  - Keys are file paths exactly as given (e.g. '{_role['example_path']}')\n"
+        if _role["example_path"]
+        else "  - Keys are file paths exactly as given (e.g. the path named in the task)\n"
+    )
     system_prompt = (
-        # Language-aware role line (2026-07-13): this said "Dart/Flutter coding
-        # agent" unconditionally — on Go projects the model was primed with the
-        # wrong language, wrong example paths, and Dart idioms.
-        (f"You are a Go coding agent. Implement the given task.\n"
-           if PROJECT_LANGUAGE == "go" else
-           "You are a Dart/Flutter coding agent. Implement the given task.\n")
+        _role["persona"]
         + "Return ONLY a JSON object where:\n"
-        + ("  - Keys are file paths exactly as given (e.g. 'sim/mote_move.go')\n"
-           if PROJECT_LANGUAGE == "go" else
-           "  - Keys are file paths exactly as given (e.g. 'lib/game/game_core.dart')\n")
+        + _example_line
         + "  - Values are the COMPLETE new file contents (not diffs, not snippets)\n"
         "Only include files that DIRECTLY change to implement this specific task.\n"
         "DO NOT touch files that are not required. DO NOT refactor or improve unrelated files.\n"
         "DO NOT create new files unless the task explicitly says to create one.\n"
-        + ("This task changes EXACTLY ONE file — the one named in the task. Return exactly one key.\n"
-           if PROJECT_LANGUAGE == "go" else
-           "Typical task requires 1-3 files. If you find yourself changing more than 5, stop and reconsider.\n")
+        + _role["file_count_line"]
         + "Keep implementations MINIMAL — write the fewest lines that make the task work. "
         "Do not add elaborate systems, helpers, or abstractions unless required.\n"
-        + ("COMPLETENESS: the file must be complete and compilable — every opened brace closed, "
-           "no trailing truncation. Before finishing, verify the final character of the file "
-           "content is the closing brace of the last function.\n"
-           "NESTING: keep nesting depth <= 3. Use early `continue`/`return` guard clauses "
-           "instead of nested if-blocks — deep nesting causes brace-count errors.\n"
-           if PROJECT_LANGUAGE == "go" else "")
+        + _role["completeness_block"]
         + "No explanation or markdown outside the JSON object.\n\n"
         "CRITICAL — these files are LOCKED and will be silently ignored if returned:\n"
         f"{locked_list}\n\n"
@@ -1361,11 +1493,17 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
     raw = ollama(model, system_prompt, user_prompt, timeout=coding_timeout)
     call_info = {"system": system_prompt, "user": user_prompt, "raw": raw}
 
-    start, end = raw.find("{"), raw.rfind("}") + 1
+    json_text = _extract_json_candidate(raw)
+    start, end = json_text.find("{"), json_text.rfind("}") + 1
     if start == -1:
         return {}, call_info
+    candidate = json_text[start:end]
     try:
-        return json.loads(raw[start:end]), call_info
+        return json.loads(candidate), call_info
+    except Exception:
+        pass
+    try:
+        return json.loads(_normalize_backtick_strings(candidate)), call_info
     except Exception:
         return {}, call_info
 
@@ -1674,11 +1812,50 @@ def _branch_start(project_root: str, task_idx: int, task: str) -> str | None:
 
 
 def _branch_merge(project_root: str, branch: str, task_idx: int, task: str) -> None:
-    """Commit the task changes, merge to the integration branch, delete the branch."""
-    _git(["add", "-A"], project_root)
-    _git(["commit", "-m", f"task {task_idx}: {task[:72]}"], project_root)
+    """Commit the task changes, merge to the integration branch, delete the branch.
+
+    Every step here is load-bearing: if `commit` or `merge` silently fails
+    (index.lock contention is the usual cause — seen 2026-08-21: a single
+    un-retried commit here lost a brief lock race and nothing checked the
+    return code, so two gate-passing tasks' worth of work sat uncommitted
+    until the *next* task's `_branch_start` ran `git clean -fd` and wiped
+    them — meanwhile `_commit_roadmap_mark`'s retry loop happened to outlast
+    the same contention, so ROADMAP.md showed both tasks done while the code
+    itself had silently vanished), the task must not be allowed to silently
+    disappear. Retry briefly like `_commit_roadmap_mark` does, then fail
+    loudly and stop rather than losing validated work.
+    """
+    def _run_with_retry(args: list[str], step_name: str, attempts: int = 4) -> subprocess.CompletedProcess:
+        r = _git(args, project_root)
+        for i in range(attempts - 1):
+            if r.returncode == 0:
+                return r
+            time.sleep(0.5 * (i + 1))
+            r = _git(args, project_root)
+        if r.returncode != 0:
+            print(f"  {RED}FATAL: git {step_name} failed for task {task_idx} after "
+                  f"{attempts} attempts — refusing to continue and risk losing this "
+                  f"task's work.{RESET}")
+            print(f"  {DIM}{r.stderr.strip()}{RESET}")
+            print(f"  Check for a stale .git/index.lock (lock contention or a prior "
+                  f"killed git/work.py process can leave one behind) and remove it, "
+                  f"then retry.")
+            sys.exit(1)
+        return r
+
+    _run_with_retry(["add", "-A"], "add")
+    _run_with_retry(["commit", "-m", f"task {task_idx}: {task[:72]}"], "commit")
     _git(["checkout", "-f", MAIN_BRANCH], project_root)
-    _git(["merge", "--no-ff", branch, "-m", f"Merge task-{task_idx}"], project_root)
+
+    merge_r = _run_with_retry(
+        ["merge", "--no-ff", branch, "-m", f"Merge task-{task_idx}"], "merge"
+    )
+    if merge_r.returncode != 0:
+        # _run_with_retry already exited on failure; this branch is
+        # unreachable but kept for clarity if that behavior ever changes.
+        print(f"  Resolve manually: git checkout {MAIN_BRANCH} && git merge {branch}")
+        sys.exit(1)
+
     _git(["branch", "-D", branch], project_root)
 
 
@@ -3827,7 +4004,11 @@ def main():
     #      gitignored per project — they must never block or dirty a run).
     if not (args.remaining_count or args.queue_remaining_count) \
             and os.path.exists(os.path.join(project_root, ".git")):
-        main_branch = os.getenv("MAIN_BRANCH", "main")
+        # Use the resolved config value, NOT a second os.getenv: config.py
+        # already layers env over the profile's [run] main_branch over "main".
+        # Reading the env alone here meant a profile that set main_branch
+        # satisfied config.MAIN_BRANCH and then failed this guard anyway.
+        main_branch = MAIN_BRANCH
         cur = _git(["rev-parse", "--abbrev-ref", "HEAD"], project_root).stdout.strip()
         if cur and cur != main_branch:
             print(f"{RED}✗ On branch '{cur}', not '{main_branch}'.{RESET}")

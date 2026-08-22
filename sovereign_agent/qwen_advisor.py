@@ -30,6 +30,80 @@ Learning loop:
 
 import os
 import re
+
+import prompt_artifacts
+
+# ── Language-aware advisor persona (2026-08-22) ─────────────────────────────
+# This module originally shipped for a single Dart/Flutter project and hardcoded
+# that framing everywhere: the persona line, the "FLUTTER ANALYZE OUTPUT" label,
+# the .roorules section headers it excerpts, and the deterministic import-hint
+# pre-check all assumed Dart. On a TypeScript project (projectsdash) this meant
+# every tier-1 advisor call told the local model "you are a Dart/Flutter expert"
+# and pulled zero .roorules grounding (none of the hardcoded headers exist in a
+# non-Dart .roorules) — degraded hint quality every time, and the occasional
+# fully Dart-flavored hint that prompt_artifacts.verify_prompt_artifact correctly
+# drops (that guard is working as designed; this fixes the root cause it was
+# catching). Reuses prompt_artifacts' existing LANGUAGE_ALIASES/project_language
+# rather than re-deriving language detection here.
+
+_LANG_PERSONA = {
+    "dart":       "You are a Dart/Flutter expert helping a coding pipeline fix compile errors fast.",
+    "typescript": "You are a TypeScript/Node expert helping a coding pipeline fix compile and test errors fast.",
+    "python":     "You are a Python expert helping a coding pipeline fix errors and test failures fast.",
+    "go":         "You are a Go expert helping a coding pipeline fix compile errors fast.",
+    "swift":      "You are a Swift/SwiftUI expert helping a coding pipeline fix compile errors fast.",
+    "generic":    "You are an expert software engineer helping a coding pipeline fix errors fast.",
+}
+
+_LANG_OUTPUT_LABEL = {
+    "dart":       "FLUTTER ANALYZE OUTPUT",
+    "typescript": "BUILD/TEST OUTPUT",
+    "python":     "TEST/TRACEBACK OUTPUT",
+    "go":         "BUILD OUTPUT",
+    "swift":      "BUILD OUTPUT",
+    "generic":    "ERROR OUTPUT",
+}
+
+# Extra .roorules section headers to excerpt, on top of the universal
+# "## Learned Rules" (promote_rules.py appends there for every project,
+# regardless of language, so it's always worth including).
+_LANG_ROORULES_SECTIONS = {
+    "dart":       ["## Dart/Flame API", "## flame_audio", "## Lint rules"],
+    "typescript": ["## Stack facts — common mistakes to avoid", "## Import paths"],
+    "python":     [],
+    "go":         [],
+    "swift":      [],
+    "generic":    [],
+}
+
+# Source-file extensions to match in "<file>:<line>:<col>"-style error output.
+_LANG_FILE_EXT = {
+    "dart":       "dart",
+    "typescript": r"tsx?|jsx?",
+    "python":     "py",
+    "go":         "go",
+    "swift":      "swift",
+    "generic":    r"\w+",
+}
+
+
+def _advisor_language(project_root: str) -> str:
+    return prompt_artifacts.project_language(project_root)
+
+
+def _persona_for(language: str) -> str:
+    """Advisor persona line. Curated wording for the languages in
+    _LANG_PERSONA; anything else (COBOL, VB, PHP, Java, ...) gets an honest
+    persona built from its own name rather than the bland "expert software
+    engineer" generic — matches the same pattern used for the coding-agent
+    role line in work.py's _generic_role_spec()."""
+    if language in _LANG_PERSONA:
+        return _LANG_PERSONA[language]
+    if language == "generic":
+        return _LANG_PERSONA["generic"]
+    display = language.replace("-", " ").replace("_", " ").title()
+    return f"You are a {display} expert helping a coding pipeline fix compile and test errors fast."
+
 import json
 import requests
 from datetime import date
@@ -93,7 +167,15 @@ def undefined_class_hint(analyze_output: str, project_root: str) -> str:
     Deterministic hint for undefined_class / undefined_identifier errors.
     Finds the actual file defining the missing type — bypasses qwen entirely.
     Returns a precise import directive, or empty string if not applicable.
+
+    Dart-only: the error phrasing ("isn't defined", "isn't a type") is the
+    Dart analyzer's exact wording, the file scan only looks at *.dart, and
+    the generated hint uses Dart's `package:name/path` import syntax — none
+    of that applies on another language, so this no-ops there rather than
+    risk emitting a Dart-flavored hint on e.g. a TypeScript project.
     """
+    if _advisor_language(project_root) != "dart":
+        return ""
     names = list(dict.fromkeys(re.findall(
         r"(?:class|name|type|identifier) '(\w+)' "
         r"(?:isn't defined|isn't a type|can't be used as a type|doesn't exist)",
@@ -137,11 +219,14 @@ def advise(analyze_output: str, task: str, project_root: str, attempt: int = 1) 
     # ── Deterministic pre-check: undefined_class is almost always a missing import ──
     det_hint = undefined_class_hint(analyze_output, project_root)
 
+    lang = _advisor_language(project_root)
+
     rules_path = os.path.join(project_root, ".roorules")
     rules_excerpt = ""
     if os.path.exists(rules_path):
         full = open(rules_path).read()
-        for section in ["## Dart/Flame API", "## flame_audio", "## Lint rules"]:
+        sections = _LANG_ROORULES_SECTIONS.get(lang, []) + ["## Learned Rules"]
+        for section in sections:
             idx = full.find(section)
             if idx >= 0:
                 rules_excerpt += full[idx:idx + 600] + "\n\n"
@@ -157,11 +242,13 @@ def advise(analyze_output: str, task: str, project_root: str, attempt: int = 1) 
             f"by name (e.g. 'do NOT define a new Foo class')."
         )
 
-    prompt = f"""You are a Dart/Flutter expert helping a coding pipeline fix compile errors fast.
+    persona = _persona_for(lang)
+    output_label = _LANG_OUTPUT_LABEL.get(lang, _LANG_OUTPUT_LABEL["generic"])
+    prompt = f"""{persona}
 
 TASK being implemented: {task}
 
-FLUTTER ANALYZE OUTPUT:
+{output_label}:
 {analyze_output[:2000]}
 
 RELEVANT .roorules:
@@ -218,9 +305,12 @@ def log_error_pattern(
         re.findall(r'•\s+(\w+)\s*$', analyze_output, re.MULTILINE)
     ))[:10]
 
-    # Extract file names mentioned
+    # Extract file names mentioned. Extension list is language-aware (was
+    # Dart-only, so this silently found zero files on every non-Dart project —
+    # see the 2026-08-22 note near the top of this file).
+    ext = _LANG_FILE_EXT.get(_advisor_language(project_root), _LANG_FILE_EXT["generic"])
     files = list(dict.fromkeys(
-        re.findall(r'(\S+\.dart):\d+:\d+', analyze_output)
+        re.findall(rf'(\S+\.(?:{ext})):\d+:\d+', analyze_output)
     ))[:5]
 
     record = {

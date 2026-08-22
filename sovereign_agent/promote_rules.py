@@ -15,6 +15,7 @@ this is the "training" step in the learning loop.
 """
 
 import os
+import re
 import json
 import argparse
 import requests
@@ -169,6 +170,154 @@ def append_to_roorules(rules: list[str], project_root: str, dry_run: bool) -> in
     return len(additions)
 
 
+# ── ERROR_HINTS learning (2026-08-22) ───────────────────────────────────────
+# Everything above this point only ever wrote free-text prose into .roorules'
+# "## Learned Rules" section — genuinely useful (the model reads it as
+# context) but never fires deterministically the way a hint_packs ERROR_HINTS
+# entry does: an ERROR_HINTS regex is checked against the ACTUAL error output
+# of a later attempt and, on match, prepends the hint automatically — no
+# reliance on the model noticing a paragraph of prose.
+#
+# This closes that gap, but scoped conservatively:
+#   - ERROR_HINTS only, never BAD_PATTERNS. An ERROR_HINTS entry is purely
+#     additive (apply_error_hints() in work.py just prepends text) — a wrong
+#     one is a mildly irrelevant hint. A BAD_PATTERNS entry actively BLOCKS a
+#     file write; a wrong one silently rejects correct code forever, and
+#     autofix.py's own _mechanical_rewrites docstring is explicit that the
+#     bar for that kind of thing must be "correct in EVERY context, with no
+#     judgement" — not something to auto-derive from 3 occurrences on one
+#     project. BAD_PATTERNS stay human/Claude-curated only.
+#   - Written into the CURRENT PROJECT's own .sovereign_config.json
+#     (additional_error_hints), never into the shared hint_packs/ directory.
+#     hint_packs/ is cross-project — dart_core vs galaxican already exists
+#     specifically because a Galaxican-only trap was leaking into every Dart
+#     project once, and one project's 3 occurrences is not evidence a pattern
+#     is general. Graduating a project-local learned hint into a shared
+#     <language>_core (or a <language>_learned pack — see hints.py's
+#     _learned_pack_name) is a deliberate step, same as how typescript_core.py
+#     itself was seeded: real project entries, promoted once actually general.
+#   - Still gated by prompt_artifacts.verify_prompt_artifact — the same bar
+#     applied to every other piece of model-generated text that reaches a
+#     future prompt.
+ADDITIONAL_ERROR_HINTS_KEY = "additional_error_hints"
+
+
+def load_error_records(project_root: str) -> list[dict]:
+    path = os.path.join(project_root, ERRORS_LOG)
+    if not os.path.exists(path):
+        return []
+    records = []
+    for line in open(path):
+        try:
+            records.append(json.loads(line))
+        except Exception:
+            pass
+    return records
+
+
+def _dominant_error_code(source_task, error_records: list[dict]) -> str | None:
+    """The most common error_code logged for this task_idx, if any."""
+    if source_task is None:
+        return None
+    from collections import Counter
+    counts: Counter[str] = Counter()
+    for rec in error_records:
+        if rec.get("task_idx") == source_task:
+            for code in rec.get("error_codes", []):
+                counts[code] += 1
+    if not counts:
+        return None
+    return counts.most_common(1)[0][0]
+
+
+def candidate_error_hints(drafts: list[dict], error_records: list[dict],
+                          threshold: int) -> list[tuple[str, str]]:
+    """Group drafts by rule text (same grouping as deduplicate_and_merge),
+    and for any group that (a) hits the threshold and (b) correlates to a
+    single dominant error_code across its drafts' source tasks, propose an
+    ERROR_HINTS entry: (regex-escaped error code, rule text).
+
+    Returns [(pattern, hint), ...] — candidates only, not yet verified or
+    written anywhere.
+    """
+    groups: dict[str, list[dict]] = {}
+    for d in drafts:
+        if d.get("promoted"):
+            continue
+        rule = d.get("rule", "").strip()
+        if not rule or rule == "null":
+            continue
+        key = rule[:60].lower()
+        groups.setdefault(key, []).append(d)
+
+    candidates = []
+    for group in groups.values():
+        if len(group) < threshold:
+            continue
+        codes = [
+            _dominant_error_code(d.get("source_task"), error_records)
+            for d in group
+        ]
+        codes = [c for c in codes if c]
+        if not codes:
+            continue  # no linkable error code — .roorules prose only, no deterministic trigger
+        from collections import Counter
+        top_code, top_count = Counter(codes).most_common(1)[0]
+        if top_count < threshold:
+            continue  # the group hit threshold, but not consistently on the SAME code
+        rule = group[0]["rule"].strip()
+        candidates.append((re.escape(top_code), rule))
+    return candidates
+
+
+def append_to_project_config(entries: list[tuple[str, str]], project_root: str,
+                             dry_run: bool) -> int:
+    """Append verified (pattern, hint) pairs to this project's own
+    .sovereign_config.json additional_error_hints. Skips any pattern already
+    present (idempotent across repeated promote_rules.py runs)."""
+    if not entries:
+        return 0
+    texts = [hint for _pattern, hint in entries]
+    accepted_texts, rejected = prompt_artifacts.partition(
+        texts, project_root, kind="error hint", mode="reject"
+    )
+    for text, verdict in rejected:
+        for reason in verdict.reasons:
+            print(f"  ✗ REJECTED (error hint) — {reason}: {text[:90]}")
+    accepted = [(p, h) for p, h in entries if h in accepted_texts]
+    if not accepted:
+        return 0
+
+    cfg_path = os.path.join(project_root, ".sovereign_config.json")
+    try:
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+    except Exception as exc:
+        print(f"  ⚠  could not read .sovereign_config.json: {exc}")
+        return 0
+
+    existing = cfg.get(ADDITIONAL_ERROR_HINTS_KEY, [])
+    existing_patterns = {e.get("pattern") for e in existing if isinstance(e, dict)}
+    new_entries = [
+        {"pattern": p, "hint": h} for p, h in accepted if p not in existing_patterns
+    ]
+    if not new_entries:
+        return 0
+
+    if dry_run:
+        print(f"\n  [dry-run] Would add {len(new_entries)} error hint(s) to "
+              f".sovereign_config.json:")
+        for e in new_entries:
+            print(f"    {e['pattern']!r}: {e['hint'][:90]}")
+        return len(new_entries)
+
+    cfg[ADDITIONAL_ERROR_HINTS_KEY] = existing + new_entries
+    with open(cfg_path, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    return len(new_entries)
+
+
 def mark_promoted(drafts: list[dict], promoted_rules: list[str], project_root: str):
     """Rewrite rule_drafts.jsonl marking promoted entries."""
     path = os.path.join(project_root, RULE_DRAFTS_LOG)
@@ -233,6 +382,22 @@ def main():
     if promoted and not args.dry_run:
         mark_promoted(drafts, reviewed, project_root)
         print(f"  ✓ {promoted} rule(s) promoted to .roorules")
+
+    # ── ERROR_HINTS learning ────────────────────────────────────────────────
+    # Independent of the .roorules promotion above (it re-derives its own
+    # groups from `drafts` directly) — a group that hit the .roorules
+    # threshold but has no linkable error_code just yields zero candidates
+    # here rather than blocking on the roorules step's own review/rejection.
+    error_records = load_error_records(project_root)
+    hint_candidates = candidate_error_hints(drafts, error_records, args.threshold)
+    if hint_candidates:
+        print(f"  {len(hint_candidates)} candidate error-hint(s) hit threshold "
+              f"with a linkable error code...")
+        hints_added = append_to_project_config(hint_candidates, project_root, args.dry_run)
+        if hints_added:
+            verb = "Would add" if args.dry_run else "Added"
+            print(f"  ✓ {verb} {hints_added} error hint(s) to "
+                  f".sovereign_config.json (additional_error_hints)")
 
     print_error_summary(project_root)
 

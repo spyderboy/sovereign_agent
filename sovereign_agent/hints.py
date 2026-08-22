@@ -57,13 +57,36 @@ imports it except tools/split_hints.py.
 from __future__ import annotations
 
 import importlib
+import os
+import pathlib
 
 # Mutated in place by load_packs(). Never rebind — see CONTRACT above.
 BAD_PATTERNS: list[tuple[str, str]] = []
 ERROR_HINTS: list[tuple[str, str]] = []
 
-AVAILABLE_PACKS = ("dart_core", "flutter_ui", "dart_riverpod", "dart_flame",
-                   "galaxican")
+
+def _discover_packs() -> tuple[str, ...]:
+    """Every hint_packs/*.py module except __init__.py, sorted.
+
+    2026-08-22: this used to be a hand-maintained tuple, which meant a new
+    pack (e.g. a fresh <language>_core, or a <language>_learned file written
+    automatically by promote_rules.py — see that file's promote_error_hints())
+    did nothing until someone remembered to add it here too. Scanning the
+    directory means "drop a file in hint_packs/" is the whole registration
+    step, for a human or for the learning loop. AVAILABLE_PACKS below still
+    behaves like the old tuple (iterable, printable, `in` works).
+    """
+    pkg_dir = pathlib.Path(__file__).parent / "hint_packs"
+    try:
+        return tuple(sorted(
+            p.stem for p in pkg_dir.glob("*.py")
+            if p.stem != "__init__"
+        ))
+    except Exception:
+        return ()
+
+
+AVAILABLE_PACKS = _discover_packs()
 
 # What loads when .sovereign_config.json says nothing. Conservative by design:
 # generic language traps only. Engine- and project-specific packs are opt-in.
@@ -71,11 +94,23 @@ DEFAULT_PACKS: dict[str, tuple[str, ...]] = {
     "dart":       ("dart_core", "flutter_ui"),
     "flutter":    ("dart_core", "flutter_ui"),
     "go":         (),
-    "typescript": (),
+    "typescript": ("typescript_core",),
     "python":     (),
     "swift":      (),
     "generic":    (),
 }
+
+# 2026-08-22: a "<language>_learned" pack — auto-appended to by
+# promote_rules.py's promote_error_hints() as recurring, verified error
+# patterns are found — loads automatically for that language if the file
+# exists, with NO entry needed in DEFAULT_PACKS above. This is what makes
+# "codify a recurring mistake into a hint" an actually-automatic loop rather
+# than something a human has to remember to wire up per language. It is
+# additive only (ERROR_HINTS, never BAD_PATTERNS — see that function's
+# docstring for why) and every entry passed prompt_artifacts' grounding gate
+# before being written, same bar as everything else that reaches a prompt.
+def _learned_pack_name(language: str) -> str:
+    return f"{language}_learned"
 
 _loaded: list[str] = []
 
@@ -97,11 +132,21 @@ def load_packs(language: str | None = None,
     Returns the pack names actually loaded. Idempotent: calling twice replaces
     the contents rather than doubling them.
     """
+    key = (language or "generic").strip().lower()
     if packs is None:
-        key = (language or "generic").strip().lower()
         names = list(DEFAULT_PACKS.get(key, ()))
     else:
         names = list(packs)
+
+    # Auto-include this language's learned pack (see _learned_pack_name's
+    # docstring) if promote_rules.py has ever written one — silently, since
+    # "no learned pack yet" is the normal state for a project that hasn't
+    # accumulated 3+ occurrences of anything yet, not a misconfiguration.
+    learned_name = _learned_pack_name(key)
+    auto_names = set()
+    if learned_name in AVAILABLE_PACKS and learned_name not in names:
+        names.append(learned_name)
+        auto_names.add(learned_name)
 
     bad: list[tuple[str, str]] = []
     errs: list[tuple[str, str]] = []
@@ -109,7 +154,7 @@ def load_packs(language: str | None = None,
 
     for name in names:
         if name not in AVAILABLE_PACKS:
-            if verbose:
+            if verbose and name not in auto_names:
                 print(f"  ⚠  unknown hint pack '{name}' — available: "
                       f"{', '.join(AVAILABLE_PACKS)}")
             continue

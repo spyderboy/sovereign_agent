@@ -13,7 +13,33 @@ selected from `.sovereign_config.json`.
 | `dart_riverpod` | 1 | 7 | project uses Riverpod |
 | `dart_flame` | 12 | 19 | project uses the Flame engine |
 | `galaxican` | 7 | 42 | Galaxican / astro-flux only |
-| **total** | **24** | **85** | (union verified identical to pre-split) |
+| `typescript_core` | 4 | 1 | any TypeScript project |
+| **total** | **28** | **86** | (union verified identical to pre-split, plus typescript_core added 2026-08-22) |
+
+`typescript_core` was seeded 2026-08-22 by graduating the genuinely general
+entries out of projectsdash's own `additional_bad_patterns` /
+`additional_error_hints` — the same "narrowest pack, promote once it's
+confirmed general" path every pack here should follow. See that file's
+docstring for the full story.
+
+## Learned packs (automatic)
+
+A `<language>_learned` pack (e.g. `typescript_learned.py`) loads automatically
+for that language if the file exists — no entry needed in `DEFAULT_PACKS`,
+`AVAILABLE_PACKS` is discovered from the directory listing at import time (see
+`hints.py`'s `_discover_packs()`). `promote_rules.py`'s `promote_error_hints()`
+step (part of the same `run_promote_rules` supervisor.sh already calls after
+every batch) is the ONE thing that writes into a project's own
+`.sovereign_config.json additional_error_hints` when a mistake recurs 3+
+times with a stable, linkable compiler-error code — it does not yet write
+directly into a shared `<language>_learned` pack, on purpose: one project's
+recurring mistake is not evidence a pattern is general across every project
+in that language (see the Galaxican story above). Graduating a project-local
+learned hint into a shared pack — `typescript_learned.py`, or straight into
+`typescript_core.py` once it's clearly not one-project-specific — is a
+periodic manual/Claude-reviewed step, same as how `typescript_core.py` itself
+came to exist. BAD_PATTERNS entries are never auto-promoted, from either path
+— see `promote_rules.py`'s `promote_error_hints()` docstring for why.
 
 45% of the original file was Galaxican-specific and was being applied to every
 project. The clearest example, previously in the shared list:

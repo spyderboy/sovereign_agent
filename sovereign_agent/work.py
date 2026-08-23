@@ -3518,7 +3518,7 @@ def run_task(task: str, project_root: str, log_file: str,
             print(f"  {RED}(blocked: task not actually implemented){RESET}")
 
         if pattern_errs:
-            errors = pattern_errs + ("\n\n" + errors if errors else "")
+            errors = "\n".join(pattern_errs) + ("\n\n" + errors if errors else "")
             errors_seen.append("bad_pattern")
             _ledger(project_root, task_idx, current_model,
                     "attempt_blocked", pattern_errs)

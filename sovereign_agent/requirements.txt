@@ -2,3 +2,16 @@ python-dotenv>=1.0.0
 requests>=2.28.0
 google-cloud-firestore>=2.16.0
 anthropic>=0.25.0
+
+# RAG subsystem (opt-in via .sovereign_config.json "rag_enabled") — chunking,
+# hybrid retrieval, reranking. See rag_*.py.
+tree-sitter==0.26.0
+tree-sitter-dart==0.1.0
+tree-sitter-go==0.25.0
+tree-sitter-javascript==0.25.0
+tree-sitter-python==0.25.0
+tree-sitter-typescript==0.23.2
+lancedb==0.38.0
+rank-bm25==0.2.2
+sentence-transformers==6.0.1
+torch==2.13.0

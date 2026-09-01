@@ -1965,6 +1965,10 @@ PROJECT_ID: str = ""
 # types.go/vec.go/API.md and hallucinated struct fields and helpers.
 PROJECT_ALWAYS_INCLUDE: list[str] = []
 
+# RAG subsystem (rag_*.py), opt-in via .sovereign_config.json "rag_enabled".
+# Default off: existing projects are completely unaffected until they opt in.
+RAG_ENABLED: bool = False
+
 
 def _load_project_config(project_root: str) -> dict:
     """Load .sovereign_config.json from project_root and apply settings.
@@ -2081,6 +2085,12 @@ def _load_project_config(project_root: str) -> dict:
             # is actually in force — otherwise the only way to know is to
             # wait for a model name to scroll past on the first attempt.
             print(f"  {DIM}{_describe_config()}{RESET}")
+
+    # ── RAG subsystem (opt-in) ─────────────────────────────────────────────────
+    global RAG_ENABLED
+    RAG_ENABLED = bool(cfg.get("rag_enabled", False))
+    if RAG_ENABLED:
+        print(f"  {DIM}RAG subsystem enabled — hybrid retrieval + failure-memory active{RESET}")
 
     # ── Per-project validation commands + language ────────────────────────────
     global PROJECT_VALIDATE_COMMANDS, PROJECT_LANGUAGE, PROJECT_ID
@@ -3242,6 +3252,26 @@ def run_task(task: str, project_root: str, log_file: str,
     rel_files = list(dict.fromkeys(forced + rel_files))
     print(f"  Files: {', '.join(rel_files) or '(none found)'}")
 
+    # ── RAG retrieval (opt-in) ───────────────────────────────────────────────
+    # find_relevant_files()/forced-inclusion above still choose WHICH files
+    # are in scope — unchanged. RAG only changes how the non-target files in
+    # that set get read into the prompt: chunk excerpts instead of whole
+    # files. The task's own target file (_target_m) stays whole-file, since a
+    # task needs full context of what it's creating/editing, not a fragment.
+    rag_grouped: dict = {}
+    if RAG_ENABLED:
+        try:
+            import rag_index, rag_retrieve
+            rag_index.sync_index(project_root, candidate_files=rel_files)
+            _target_path = _target_m.group(1) if _target_m else None
+            support_files = [f for f in rel_files if f != _target_path]
+            rag_grouped = rag_retrieve.retrieve_context_chunks(task, support_files, project_root)
+            if rag_grouped:
+                print(f"  {DIM}RAG: {sum(len(c) for c in rag_grouped.values())} chunk(s) "
+                      f"across {len(rag_grouped)} of {len(support_files)} support file(s){RESET}")
+        except Exception as exc:
+            print(f"  {YELLOW}(RAG retrieval unavailable: {exc} — using whole-file context){RESET}")
+
     # ── Dependency-abort guard (TS projects) ──────────────────────────────────
     # If the task names sibling project modules that don't exist yet, it can't
     # pass — the worker would just hallucinate the missing symbol and burn every
@@ -3374,6 +3404,24 @@ def run_task(task: str, project_root: str, log_file: str,
         )
 
         file_contents = read_files(rel_files, project_root)
+        if rag_grouped:
+            # read_files() itself is untouched; substitute chunk excerpts only
+            # for files RAG found hits for. Any file RAG returns nothing for
+            # (parse failure, no relevant chunks) keeps its whole-file content
+            # from read_files() above — safe by construction.
+            for _rag_path, _rag_chunks in rag_grouped.items():
+                if _rag_path in file_contents:
+                    file_contents[_rag_path] = rag_retrieve.format_chunks_for_prompt({_rag_path: _rag_chunks})
+
+        if RAG_ENABLED and errors:
+            try:
+                import rag_failures
+                _hist_fix = rag_failures.retrieve_similar_failure_fix(project_root, errors)
+                if _hist_fix:
+                    errors = errors + _hist_fix
+            except Exception:
+                pass
+
         try:
             if _racing:
                 changes, call_info, race_winner, race_stats = _race_implement(
@@ -4066,6 +4114,15 @@ def main():
     # deferred until after the counting branches exit. (2026-07-14)
     if not (args.remaining_count or args.queue_remaining_count):
         _load_project_config(project_root)
+
+        if RAG_ENABLED:
+            try:
+                import rag_failures
+                n_mined = rag_failures.mine_failure_fixes(project_root)
+                if n_mined:
+                    print(f"  {DIM}RAG: mined {n_mined} new failure->fix pattern(s) from task_traces.jsonl{RESET}")
+            except Exception as exc:
+                print(f"  {YELLOW}(RAG failure-mining skipped: {exc}){RESET}")
 
         # ── Environment preflight ────────────────────────────────────────
         # 2026-07-13: 76 consecutive failures on a project where

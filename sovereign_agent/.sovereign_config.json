@@ -1,0 +1,21 @@
+{
+  "name": "sovereign-agent-self-improvement",
+  "language": "bash",
+  "locked_files": [
+    "work.py",
+    "CLAUDE.md",
+    "MANUAL.md",
+    "ROADMAP.md",
+    ".sovereign_config.json"
+  ],
+  "locked_prefixes": [
+    "rag_",
+    ".venv/",
+    "archive/",
+    "docs/"
+  ],
+  "validate_commands": [
+    "bash -n supervisor.sh"
+  ],
+  "rag_enabled": false
+}

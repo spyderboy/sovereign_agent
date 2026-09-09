@@ -299,6 +299,16 @@ more_work_remains() {
     fi
 }
 
+current_remaining_count() {
+    local mode
+    mode=$(resolve_task_mode)
+    if is_deep_mode; then
+        "$PYTHON" "$SOVEREIGN/work.py" --project "$PROJECT" --queue-remaining-count "$mode" 2>/dev/null
+    else
+        "$PYTHON" "$SOVEREIGN/work.py" --project "$PROJECT" --remaining-count "$mode" 2>/dev/null
+    fi
+}
+
 run_promote_rules() {
     log "Running promote_rules.py to apply learned rules..."
     "$PYTHON" "$SOVEREIGN/promote_rules.py" --project "$PROJECT" --threshold 2 \
@@ -310,6 +320,8 @@ MAX_ESCALATIONS=8
 ESCALATION_COUNT=0
 LAST_ESCALATION_TASK=0
 FAST_EXITS=0
+LAST_REMAINING_COUNT=-1
+NO_PROGRESS_COUNT=0
 
 # All live worker PIDs — used by the Ctrl+C trap
 declare -a WORK_PIDS=()
@@ -489,6 +501,20 @@ while true; do
     if [ $EXIT -eq 0 ]; then
         run_promote_rules
         if more_work_remains; then
+            CUR_REMAINING=$(current_remaining_count)
+            if [ "$CUR_REMAINING" = "$LAST_REMAINING_COUNT" ]; then
+                NO_PROGRESS_COUNT=$((NO_PROGRESS_COUNT + 1))
+            else
+                NO_PROGRESS_COUNT=0
+                LAST_REMAINING_COUNT="$CUR_REMAINING"
+            fi
+            if [ "$NO_PROGRESS_COUNT" -ge 3 ]; then
+                log "${RED}Remaining-task count stuck at $CUR_REMAINING for 3 batches in a row — refusing to spin${RESET}"
+                write_status "stuck:$START_AT"
+                echo -e "\n${RED}${BOLD}  ✗ STUCK — same task(s) failing identically across batches, not progressing.${RESET}"
+                echo -e "  Check logs/incomplete_tasks.md and the *-work.log for the repeated failure reason.\n"
+                break
+            fi
             log "${GREEN}Batch done — more tasks remain; looping immediately${RESET}"
             write_status "running:$START_AT"
             START_AT=1

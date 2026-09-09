@@ -1,28 +1,14 @@
-# Backlog — generated 2026-05-12
+# ROADMAP — sovereign_agent self-improvement
 
-## Tuesday 2026-05-12
-- [x] Add calculateTotal() method to Order class in lib/orders/order.dart
-- [x] Define IProduct interface in lib/products/product_interface.dart
-- [x] Update ShoppingCart.addItem() to check product availability in lib/cart/shopping_cart.dart
-- [x] Implement logUserAction() in AnalyticsService and call from UserService.login() in lib/auth/user_service.dart
-- [x] Add validateEmail() method to UserInputValidator class in lib/validation/user_input_validator.dart
-- [x] Define IDatabase interface in lib/database/database_interface.dart
-- [x] Update UserRepository.getUserById() to handle null case in lib/repositories/user_repository.dart
-- [x] Add sendNotification() method to NotificationService class in lib/notifications/notification_service.dart
-- [x] Implement parseJsonData() in DataParser and call from ApiClient.fetchData() in lib/api/api_client.dart
-- [x] Define IFileStorage interface in lib/storage/file_storage_interface.dart
-- [x] Add updateProfilePicture() method to UserProfile class in lib/user/profile/user_profile.dart
-- [x] Define ISettings interface in lib/settings/settings_interface.dart
-- [x] Update SettingsService.applySettings() to save changes in lib/services/settings_service.dart
-- [x] Implement logNetworkError() in NetworkMonitor and call from ApiClient.request() in lib/api/api_client.dart
-- [x] Add validatePhoneNumber() method to UserInputValidator class in lib/validation/user_input_validator.dart
-- [x] Define IAuthentication interface in lib/auth/authentication_interface.dart
-- [x] Update AuthService.login() to handle authentication errors in lib/services/auth_service.dart
-- [x] Add sendVerificationEmail() method to EmailService class in lib/emails/email_service.dart
-- [x] Implement parseJsonResponse() in ResponseParser and call from ApiClient.handleResponse() in lib/api/api_client.dart
-- [x] Define ICache interface in lib/cache/cache_interface.dart
-- [x] Add updateLastLogin() method to User class in lib/user/user.dart
-- [x] Define IIntegration interface in lib/integration/integration_interface.dart
-- [x] Update IntegrationService.connect() to handle connection errors in lib/services/integration_service.dart
-- [x] Implement logDataProcessed() in DataProcessor and call from ApiClient.processData() in lib/api/api_client.dart
-- [x] Add validateCreditCard() method to PaymentValidator class in lib/validation/payment_validator.dart
+Fixes for weaknesses found operating this harness against old-car-radio
+(2026-09-08, several-hour run). All three tasks touch only `supervisor.sh`
+— `work.py` is locked for this pass (see `.sovereign_config.json`); the
+one work.py fix from that session (cross-file dependency gating in
+`run_task()`) was made by hand, not through this harness, since it's
+core scheduling logic used by every project this tool runs.
+
+## Phase 1 — CLI and operator-safety fixes
+
+- [x] In supervisor.sh: add real -h/--help handling — currently `PROJECT="${1:-$(pwd)}"` at line 58 blindly treats the first argument as a project path with no check first, so `./supervisor.sh --help` sets PROJECT to the literal string "--help" and the run silently misbehaves instead of printing usage (observed directly: it hung, then produced nonsensical path errors). Add this check immediately after `set -uo pipefail` (line 56) and before the `PROJECT=` line: `if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'; exit 0; fi` — this prints the existing usage comment block (lines 2-54 of this same file, the `# Usage (...)` documentation already at the top) with the leading `#`/`# ` stripped, then exits 0 without touching PROJECT or attempting to start a run. Do not change the existing usage comment text itself, only add this new check — task gate: bash -n supervisor.sh passes, and `./supervisor.sh --help` prints the usage block and exits 0 (verify manually: `./supervisor.sh --help | head -3` should show "supervisor.sh — Run work.py in a loop" not an error)
+- [x] In supervisor.sh: add a single-model-mode + multi-worker pre-flight guard, matching the EXISTING analogous guard right above it — this file already has a block (currently lines 200-211: `# ── deep pass: limit workers on Apple Silicon (VRAM thrash); allow on Linux ──` down to the closing `fi`) that forces `WORKERS=1` and prints a warning when `--deep` is used with multiple workers on Apple Silicon. This project's sibling `old_car_radio.env` (a real, already-used config — read it first) pins TIER1_MODEL, TIER2_MODEL, TIER3_MODEL, TIER4_MODEL, and PLANNER_MODEL to the identical value on machines where that one model already consumes most of system RAM — a DIFFERENT scenario the existing guard doesn't cover (observed directly: a single ~29GB model on a 32GB machine, `--workers 8`, planner calls and coding calls fought each other for the same model instance, 8-for-8 identical timeouts for 20+ minutes before this was diagnosed and fixed by dropping to `--workers 1`). Add a new block immediately after the existing Apple-Silicon guard's closing `fi` (i.e. right after line 211, before the blank line and `log()` function definition) — if `TIER1_MODEL`, `TIER2_MODEL`, `TIER3_MODEL`, `TIER4_MODEL`, and `PLANNER_MODEL` (already-exported environment variables from the sourced `.env` — do not re-source or re-read any file) are all equal to each other and non-empty, AND `$WORKERS` is greater than 1, mirror the existing guard's exact style: print `"${YELLOW}⚠  All tiers + planner are pinned to the same model ($TIER1_MODEL) — extra workers deepen the queue against one model instance, they don't add real parallelism."` then `"   Forcing --workers 1.${RESET}"`, then set `WORKERS=1` — a guard, not just a warning, exactly like the block it sits next to. Do not modify the existing Apple-Silicon/--deep guard above it — task gate: bash -n supervisor.sh passes, and manually sourcing old_car_radio.env then running `./supervisor.sh /tmp --workers 4 --dry-run` (or any invocation reaching this point) prints the warning and the run proceeds as if `--workers 1` had been passed
+- [x] In supervisor.sh: archive stale escalate.md at the start of every run instead of leaving it silently stale — `logs/escalate.md` is fully overwritten (not appended) by work.py on each fresh escalation (confirmed: `_write_escalation` in work.py opens it with mode "w"), so a file left over from a run days or weeks ago is indistinguishable from a live one without manually checking its mtime (observed directly: had to run `ls -la logs/escalate.md` by hand mid-run to confirm a file dated Sep 2 was stale noise, not a real blocker, during a run on Sep 8). Add a check right after `LOGDIR="$PROJECT/logs"` is defined (currently line 61, before `STATUS="$LOGDIR/supervisor.status"` on line 62) — if `"$LOGDIR/escalate.md"` exists, rename it (not delete — preserve the content for later reference) to `"$LOGDIR/escalate-archived-$(date +%Y%m%d-%H%M%S).md"` using `mv`. This must run unconditionally at the top of every supervisor.sh invocation (not gated on any flag), since a resume-from-escalation happens later, inside the same running process, and will simply write a fresh escalate.md at that point regardless of what was archived at startup — task gate: bash -n supervisor.sh passes, and manually: `mkdir -p /tmp/faketest/logs && touch /tmp/faketest/logs/escalate.md && ./supervisor.sh /tmp/faketest --dry-run 2>&1 | head -5` (or equivalent) should result in `/tmp/faketest/logs/escalate.md` no longer existing and a new `escalate-archived-*.md` file present in its place

@@ -1,0 +1,1 @@
+// Add missing file content for star_decay_manager.dart

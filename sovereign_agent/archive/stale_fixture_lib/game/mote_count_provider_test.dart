@@ -1,0 +1,1 @@
+// No changes needed as the task is only about fixing mismatches in star_production_rate_provider_test.dart

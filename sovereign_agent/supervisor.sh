@@ -55,10 +55,18 @@
 
 set -uo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'
+  exit 0
+fi
+
 PROJECT="${1:-$(pwd)}"
 [ $# -gt 0 ] && shift
 SOVEREIGN="$(cd "$(dirname "$0")" && pwd)"
 LOGDIR="$PROJECT/logs"
+if [ -f "$LOGDIR/escalate.md" ]; then
+  mv "$LOGDIR/escalate.md" "$LOGDIR/escalate-archived-$(date +%Y%m%d-%H%M%S).md"
+fi
 STATUS="$LOGDIR/supervisor.status"
 
 # ── Refuse to start on top of a live run ─────────────────────────────────────
@@ -207,6 +215,15 @@ done
 if $IS_DEEP && [[ "$WORKERS" -gt 1 ]] && [[ "$(uname)" == "Darwin" ]]; then
     echo -e "${YELLOW}⚠  --deep with multiple workers causes VRAM thrashing on Apple Silicon."
     echo -e "   Forcing --workers 1 for the deep pass.${RESET}"
+    WORKERS=1
+fi
+
+# ── single-model mode: extra workers just queue against one model instance ──
+if [[ -n "${TIER1_MODEL:-}" ]] && [[ "$TIER1_MODEL" == "${TIER2_MODEL:-}" ]] \
+    && [[ "$TIER1_MODEL" == "${TIER3_MODEL:-}" ]] && [[ "$TIER1_MODEL" == "${TIER4_MODEL:-}" ]] \
+    && [[ "$TIER1_MODEL" == "${PLANNER_MODEL:-}" ]] && [[ "$WORKERS" -gt 1 ]]; then
+    echo -e "${YELLOW}⚠  All tiers + planner are pinned to the same model ($TIER1_MODEL) — extra workers deepen the queue against one model instance, they don't add real parallelism."
+    echo -e "   Forcing --workers 1.${RESET}"
     WORKERS=1
 fi
 

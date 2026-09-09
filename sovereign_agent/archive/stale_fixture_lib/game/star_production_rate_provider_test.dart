@@ -1,0 +1,2 @@
+// Fix API mismatches in lib/game/star_production_rate_provider_test.dart
+// (3 errors): fix miscellaneous error; fix undefined getter 'notifier' in lib/game/star_production_rate_provider_test.dart — done when: flutter analyze reports 0 errors for lib/game/star_production_rate_provider_test.dart

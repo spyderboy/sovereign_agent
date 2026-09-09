@@ -1,0 +1,1 @@
+// No changes needed as the task is only about fixing mismatches in lib/components/capture_target_animation_test.dart

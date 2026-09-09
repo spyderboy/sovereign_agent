@@ -1,0 +1,2 @@
+// Fix API mismatches in lib/game/star_decay_test.dart
+// (3 errors): fix undefined function 'GameStateNotifier'; fix undefined getter 'decayTimer' in lib/game/star_decay_test.dart — done when: flutter analyze reports 0 errors for lib/game/star_decay_test.dart

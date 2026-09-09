@@ -1803,6 +1803,42 @@ def write_changes(changes: dict[str, str], project_root: str,
             pattern_errors.extend(violations)
             continue  # don't write this file
         full = os.path.join(project_root, rel_path)
+        # Destructive-edit guard: reject a rewrite that discards most of an
+        # existing file's content. Observed directly (2026-09-01/02,
+        # old-car-radio): small local models attempting a 1-2 line addition
+        # to a large existing file (station_provider.dart, 640 lines)
+        # instead regenerated a truncated ~40-line stub, deleting ~93% of
+        # the file — twice, on two unrelated tasks. flutter analyze then
+        # failed with errors in files this task never touched (every caller
+        # of the deleted provider), which the "no error names a file this
+        # task wrote" heuristic misread as unrelated to this task and let
+        # the tier ladder keep retrying instead of ever blocking the write.
+        # Compare against the file's CURRENT on-disk content (not the task's
+        # pre-attempt backup) so this also catches a second destructive
+        # rewrite stacked on an already-corrupted first attempt within the
+        # same task.
+        if os.path.exists(full):
+            old_content = open(full).read()
+            old_lines = old_content.count("\n") + 1
+            new_lines = content.count("\n") + 1
+            if old_lines >= 15 and new_lines <= old_lines * 0.5 and (old_lines - new_lines) >= 30:
+                pct = 100 * (old_lines - new_lines) / old_lines
+                msg = (
+                    f"DESTRUCTIVE EDIT REJECTED [{rel_path}]: this rewrite would shrink "
+                    f"the file from {old_lines} to {new_lines} lines "
+                    f"({old_lines - new_lines} lines deleted, {pct:.0f}%). The task asked "
+                    f"for a small, additive change — you regenerated the whole file and "
+                    f"lost most of its content instead. Make the SMALLEST possible change "
+                    f"to the EXISTING file content; do not rewrite it from scratch. If this "
+                    f"task genuinely requires deleting this much code, it needs a human to "
+                    f"confirm — do not do it automatically."
+                )
+                print(
+                    f"  {RED}(blocked destructive edit: {rel_path} "
+                    f"{old_lines}→{new_lines} lines, -{pct:.0f}%){RESET}"
+                )
+                pattern_errors.append(msg)
+                continue  # don't write this file
         os.makedirs(os.path.dirname(full), exist_ok=True)
         with open(full, "w") as f:
             f.write(content)
@@ -2978,7 +3014,8 @@ def _ledger(project_root: str, task_idx: int, model: str,
 
 def _write_escalation(project_root: str, task_idx: int, task: str,
                       attempt: int, error: str,
-                      written: list[str], skipped: list[str]) -> str:
+                      written: list[str], skipped: list[str],
+                      is_test: bool = False, identical_error: bool = False) -> str:
     """Write a rich escalation report for Claude to act on. Returns the path."""
     path = os.path.join(project_root, ESCALATE_LOG)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -2990,6 +3027,26 @@ def _write_escalation(project_root: str, task_idx: int, task: str,
         cause = "Pre-existing lint in a model file (star.dart, mote.dart, etc.) unrelated to this task."
     elif not written:
         cause = "All candidate files are LOCKED — 35B produced correct code but had nowhere to write it."
+    elif is_test and identical_error:
+        # Observed directly (2026-09-02, old-car-radio): a widget test kept
+        # failing with the byte-identical assertion result across every tier
+        # the ladder tried, including genuinely different models where the
+        # project's config offered one. The root cause was a broken gesture
+        # simulation in the test itself (a drag whose start/end points both
+        # sat on an atan2 discontinuity, so the angle could never change) —
+        # no amount of retrying the IMPLEMENTATION could ever pass an
+        # assertion that the TEST'S OWN math made unreachable. An identical
+        # failure surviving a real model change on a test task is a much
+        # stronger "the spec is wrong" signal than on a feature task (where
+        # it usually just means the model can't find the right API).
+        cause = (
+            "Repeated IDENTICAL failure across every tier tried (including a "
+            "genuinely different model, where the config offered one) on a "
+            "TEST task. This pattern usually means the test's own approach "
+            "is broken, not the implementation — retrying further is "
+            "unlikely to help. Read the test file and the code it exercises "
+            "directly before deciding whether to fix the test or the code."
+        )
     else:
         cause = "Repeated identical error across attempts — likely a structural API mismatch."
 
@@ -3477,12 +3534,28 @@ def run_task(task: str, project_root: str, log_file: str,
                 print(f"  {YELLOW}Claude returned no changes — trying normal tiers{RESET}")
 
     def _advance_tier(attempt: int) -> bool:
-        """Move to the next model tier. Returns False if all tiers exhausted."""
+        """Move to the next tier whose model actually differs from the one
+        that just got stuck. Returns False if no distinct-model tier remains.
+
+        Historically this advanced to tier_idx+1's nominal model even when it
+        was byte-identical to the model that just failed — every project
+        running SINGLE-MODEL MODE (e.g. old-car-radio.env pins all four tiers
+        to the same qwen3.8:27b-mlx) prints "escalating to tier3/tier4" while
+        actually retrying the exact same weights. Observed directly: a stuck
+        task burned its full attempt budget three more times against a model
+        that had already failed identically, wasting ~40 minutes of wall
+        clock before finally exhausting. Skip straight past any tier whose
+        model matches the one that just got stuck; only a genuinely different
+        model counts as an escalation.
+        """
         nonlocal tier_idx, current_model, phase_stale, phase_attempts, last_err_sig, errors
         prev_model = TIER_MODELS[tier_idx]
-        tier_idx += 1
-        if tier_idx >= _max_tier:
+        next_idx = tier_idx + 1
+        while next_idx < _max_tier and TIER_MODELS[next_idx] == prev_model:
+            next_idx += 1
+        if next_idx >= _max_tier:
             return False
+        tier_idx = next_idx
         next_model = TIER_MODELS[tier_idx]
         print(
             f"\n  {YELLOW}⚡ {prev_model} stuck after {PHASE_STRIKE_LIMIT} identical "
@@ -3547,6 +3620,50 @@ def run_task(task: str, project_root: str, log_file: str,
             for _rag_path, _rag_chunks in rag_grouped.items():
                 if _rag_path in file_contents:
                     file_contents[_rag_path] = rag_retrieve.format_chunks_for_prompt({_rag_path: _rag_chunks})
+
+        # Exact-import-line hint (Dart): RAG already resolves the real,
+        # on-disk path of every support file it hands the model — the model
+        # still has to guess how deep '../' goes to reach it from whichever
+        # file it's editing, and observed directly (2026-09-01/02,
+        # old-car-radio) it guesses wrong constantly: 6+ distinct wrong
+        # relative paths across 3+ tasks for files RAG had ALREADY retrieved
+        # correct chunks of. A package: import needs no relative math at all
+        # — it's the same string regardless of which file is doing the
+        # importing — so hand the model the literal line instead of making
+        # it derive one.
+        #
+        # test/ files have no package: form (package:<name>/... only maps
+        # lib/), so a test importing a test/support/ helper hits the exact
+        # same wrong-relative-path failure with no package: escape hatch —
+        # observed directly (nope_button_test.dart guessing
+        # '../../support/haptic_test_utils.dart', wrong, right after this
+        # fix landed and still fixed the lib/ case fine). Compute the real
+        # relative path instead: both files are known, so the math is exact.
+        if PROJECT_LANGUAGE == "dart":
+            _editing_file_m = re.search(r'\b(lib/[\w/]+\.dart|test/[\w/]+\.dart)\b', task)
+            _editing_file = _editing_file_m.group(1) if _editing_file_m else None
+            try:
+                import dart_grounding as _dart_grounding
+                _pkg_name, _ = _dart_grounding.pubspec_info(project_root)
+            except Exception:
+                _pkg_name = None
+            for _fp in list(file_contents.keys()):
+                if not _fp.endswith(".dart"):
+                    continue
+                _import_line = None
+                _import_from = "anywhere else in the project"
+                if _fp.startswith("lib/") and _pkg_name:
+                    _import_line = f"import 'package:{_pkg_name}/{_fp[len('lib/'):]}';"
+                elif (_fp.startswith("test/") and _editing_file
+                      and _editing_file.startswith("test/") and _fp != _editing_file):
+                    _rel = os.path.relpath(_fp, os.path.dirname(_editing_file))
+                    _import_line = f"import '{_rel.replace(os.sep, '/')}';"
+                    _import_from = _editing_file
+                if _import_line:
+                    file_contents[_fp] = (
+                        f"// To import THIS file from {_import_from}, use exactly:\n"
+                        f"// {_import_line}\n" + file_contents[_fp]
+                    )
 
         if RAG_ENABLED and errors:
             try:
@@ -4092,7 +4209,8 @@ def run_task(task: str, project_root: str, log_file: str,
                 _log_task_summary(project_root, task_idx, task, "skipped",
                                   attempt, current_model, task_start)
                 _write_escalation(project_root, task_idx, task, attempt, errors,
-                                  last_written, last_skipped)
+                                  last_written, last_skipped,
+                                  is_test=is_test, identical_error=phase_stale >= PHASE_STRIKE_LIMIT)
                 return "skipped"
         elif phase_stale > 0:
             # Still in the same tier but looping — add a hard-override warning
@@ -4492,6 +4610,21 @@ def main():
         m = _re2.search(r'\b(lib/[\w/]+\.dart|test/[\w/]+\.dart)\b', t)
         return m.group(1) if m else None
 
+    def _feature_stem(path: str | None) -> str | None:
+        """Basename with directory, .dart suffix, and a trailing _test/_test.dart
+        stripped — e.g. 'lib/widgets/chrome_knob.dart' and
+        'test/widgets/chrome_knob_test.dart' both stem to 'chrome_knob'. Used to
+        confirm a test task actually pairs with the feature task it follows,
+        rather than assuming any adjacent test task does."""
+        if not path:
+            return None
+        stem = path.rsplit("/", 1)[-1]
+        if stem.endswith(".dart"):
+            stem = stem[:-5]
+        if stem.endswith("_test"):
+            stem = stem[:-5]
+        return stem
+
     indexed_tasks_all = [(i + 1, t) for i, t in enumerate(tasks)]
 
     chains: list[list[tuple[int, str]]] = []
@@ -4680,16 +4813,33 @@ def main():
             continue
 
         # Dependency block: defer this task if the immediately preceding task
-        # didn't complete AND either (a) this is its test, or (b) this targets
-        # the same file (would inherit whatever broken state was left behind).
+        # didn't complete AND either (a) this is ITS test (same feature stem —
+        # not just any test task), or (b) this targets the same file (would
+        # inherit whatever broken state was left behind).
+        #
+        # Was `_is_test_task(task)` alone for (a), which blocks ANY adjacent
+        # test task regardless of what it actually tests. Harmless in an
+        # interleaved feature+test ROADMAP (the very next task usually is the
+        # matching test), but in a --tests-only session every task is a test
+        # task — so one genuinely stuck task (observed: chrome_knob_test, a
+        # broken gesture-simulation spec, not a model error) silently chained
+        # "dependency-blocked" through all 10 unrelated remaining tests for
+        # hours, none of them ever actually attempted. Stem-matching preserves
+        # the intended same-feature pairing while ending that blast radius.
         is_immediate_successor = last_incomplete is not None and task_idx == last_incomplete + 1
         same_file_as_failure = (
             is_immediate_successor
             and last_incomplete_file is not None
             and _primary_file(task_line) == last_incomplete_file
         )
-        if is_immediate_successor and (_is_test_task(task) or same_file_as_failure):
-            reason = "same file as the failed task" if same_file_as_failure else "test of a task that didn't complete"
+        same_feature_test = (
+            is_immediate_successor
+            and _is_test_task(task)
+            and _feature_stem(_primary_file(task_line)) is not None
+            and _feature_stem(_primary_file(task_line)) == _feature_stem(last_incomplete_file)
+        )
+        if is_immediate_successor and (same_feature_test or same_file_as_failure):
+            reason = "same file as the failed task" if same_file_as_failure else "test of the feature that failed"
             print(
                 f"  {YELLOW}⏭  Dependency-blocked: task {last_incomplete} did not complete "
                 f"({reason}) — deferred to retry pass{RESET}"

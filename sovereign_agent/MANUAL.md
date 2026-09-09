@@ -30,7 +30,7 @@ rule learning without any human involvement.
   dramatically outperforms local alternatives, or for teams without a high-end
   local GPU.
 
-**Reference project used throughout:** `~/Code/astro_flux`
+**Reference project used throughout:** `~/Code/galaxican`
 
 ---
 
@@ -260,7 +260,7 @@ to absorb Ollama queue depth.
 
 ```bash
 cd ~/Code/Xanadu/sovereign_agent
-./supervisor.sh ~/Code/astro_flux
+./supervisor.sh ~/Code/galaxican
 ```
 
 One worker, processes tasks in order. Reliable baseline, good for debugging.
@@ -268,7 +268,7 @@ One worker, processes tasks in order. Reliable baseline, good for debugging.
 ### Parallel mode
 
 ```bash
-./supervisor.sh ~/Code/astro_flux --workers 10
+./supervisor.sh ~/Code/galaxican --workers 10
 ```
 
 Spawns N workers that stride across the task list (worker K handles tasks
@@ -290,7 +290,7 @@ slots means HTTP-layer queuing in Ollama.
 ### Quick mode — tier-1 only sweep
 
 ```bash
-./supervisor.sh ~/Code/astro_flux --workers 10 --quick
+./supervisor.sh ~/Code/galaxican --workers 10 --quick
 ```
 
 Uses only the 7B model (Tier 1). Fast — the model stays fully GPU-resident and
@@ -301,7 +301,7 @@ already in the queue.
 ### Deep mode — tier-2+ mop-up
 
 ```bash
-./supervisor.sh ~/Code/astro_flux --workers 4 --deep
+./supervisor.sh ~/Code/galaxican --workers 4 --deep
 ```
 
 Reads `logs/tier2_queue.jsonl` and processes only those tasks, starting at
@@ -312,10 +312,10 @@ more VRAM. Clears the queue file when complete.
 
 ```bash
 # Pass 1 — fast sweep, overnight or during the day
-./supervisor.sh ~/Code/astro_flux --workers 10 --quick
+./supervisor.sh ~/Code/galaxican --workers 10 --quick
 
 # Pass 2 — mop up what tier-1 couldn't handle
-./supervisor.sh ~/Code/astro_flux --workers 4 --deep
+./supervisor.sh ~/Code/galaxican --workers 4 --deep
 ```
 
 This keeps tier-1 throughput high and defers expensive model loads to a
@@ -440,7 +440,7 @@ Runs an interactive session before the day's work. Shows yesterday's velocity,
 today's planned tasks, and tomorrow's queue. You review and approve.
 
 ```bash
-python standup.py --project ~/Code/astro_flux
+python standup.py --project ~/Code/galaxican
 ```
 
 | Key | Action |
@@ -459,16 +459,16 @@ Called by the supervisor. Can also be run directly.
 
 ```bash
 # Normal (supervisor handles this)
-python work.py --project ~/Code/astro_flux
+python work.py --project ~/Code/galaxican
 
 # Resume at task 4 after a manual fix
-python work.py --project ~/Code/astro_flux --start-at 4
+python work.py --project ~/Code/galaxican --start-at 4
 
 # Dry-run — preview tasks without executing
-python work.py --project ~/Code/astro_flux --dry-run
+python work.py --project ~/Code/galaxican --dry-run
 
 # Tier-1 only, with parallel stride
-python work.py --project ~/Code/astro_flux --worker-id 0 --stride 10 --quick
+python work.py --project ~/Code/galaxican --worker-id 0 --stride 10 --quick
 ```
 
 ### What it does per task
@@ -507,8 +507,8 @@ python work.py --project ~/Code/astro_flux --worker-id 0 --stride 10 --quick
 ## 3. `velocity.py` — Dashboard
 
 ```bash
-python velocity.py --project ~/Code/astro_flux         # last 7 days
-python velocity.py --project ~/Code/astro_flux --days 1 # today only
+python velocity.py --project ~/Code/galaxican         # last 7 days
+python velocity.py --project ~/Code/galaxican --days 1 # today only
 ```
 
 Reads `logs/velocity.jsonl` and prints:
@@ -531,7 +531,7 @@ for error patterns that appear across multiple tasks and promotes them into the
 project's `.roorules` file.
 
 ```bash
-python promote_rules.py --project ~/Code/astro_flux --threshold 2
+python promote_rules.py --project ~/Code/galaxican --threshold 2
 ```
 
 `--threshold N` — promote a pattern after it appears in N or more tasks (default 2).
@@ -557,7 +557,7 @@ sovereign_agent/
 ├── requirements.txt         Python dependencies
 └── .env                     Model + endpoint configuration
 
-astro_flux/                  (your project)
+galaxican/                   (your project)
 ├── ROADMAP.md               Task source of truth — checkboxes
 ├── .roorules                Coding rules injected into every executor prompt
 ├── VISION.md                Product context (first 1500 chars injected)
@@ -586,7 +586,7 @@ When a task exhausts all tiers, `work.py`:
 
 ```bash
 # Resume after a manual fix
-echo "fixed:4" > ~/Code/astro_flux/logs/supervisor.status
+echo "fixed:4" > ~/Code/galaxican/logs/supervisor.status
 ```
 
 Structural error patterns that trigger escalation:

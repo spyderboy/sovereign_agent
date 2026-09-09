@@ -235,6 +235,14 @@ def preflight_models(required: list[str]) -> None:
 
 _LARGE_MODEL_THRESHOLD_GB = 15  # flush before loading anything this large
 
+# 2026-09-09: above this many lines, ask for SEARCH/REPLACE blocks instead of
+# a full-file rewrite for the task's own target file (see implement_task's
+# diff_mode_block and write_changes' _apply_search_replace). A full rewrite
+# of a 450+-line file timed out twice at 30 min each on this machine for a
+# ~20-line insertion — the model has to regenerate everything, including the
+# ~430 lines that were already correct, every single attempt.
+_DIFF_MODE_LINE_THRESHOLD = 150
+
 # Rough VRAM footprint by model name fragment (GB).
 # Used to decide whether to flush before loading a tier3/4 model.
 _MODEL_SIZE_HINTS: dict[str, float] = {
@@ -486,7 +494,7 @@ def task_text(line: str) -> str:
 # ─── Task type classification ─────────────────────────────────────────────────
 
 _TEST_TASK_RE = re.compile(
-    r'^(write|add)\s+(unit\s+|widget\s+|golden\s+|integration\s+)?test',
+    r'^(write|add)\s+(a\s+|an\s+)?(unit\s+|widget\s+|golden\s+|integration\s+)?tests?\b',
     re.IGNORECASE,
 )
 
@@ -561,13 +569,19 @@ def _commit_roadmap_mark(task_line: str, attempts: int = 4) -> None:
 # ─── File discovery ───────────────────────────────────────────────────────────
 
 def all_source_files(project_root: str) -> list[str]:
-    """Return all dart/py/js/go source files relative to project root.
+    """Return all dart/py/js/go/sh source files relative to project root.
 
     2026-07-13: added ".go" — its absence meant find_relevant_files returned
     [] for Go projects, so every worker coded with ZERO context and
     hallucinated field names, math helpers, and imports.
+
+    2026-09-08: added ".sh" — same failure mode for the "bash" language
+    project (sovereign_agent's own self-improvement pass against
+    supervisor.sh): the target file could never appear in the planner's
+    candidate list, so it picked unrelated files from elsewhere in the tree
+    instead.
     """
-    exts = {".dart", ".py", ".js", ".ts", ".go"}
+    exts = {".dart", ".py", ".js", ".ts", ".go", ".sh"}
     skip = {"build", ".dart_tool", ".git", "node_modules", ".fvm", ".venv", "venv",
             "logs", "site-packages", "dist-packages", ".tox", "vendor",
             "Pods", ".gradle", "reference", ".pub-cache"}
@@ -1421,7 +1435,16 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
     _tgt = re.search(r"\bIn ([\w./-]+\.\w+):", task)
     _target = _tgt.group(1) if _tgt else None
     _has_prior = bool(_target and _target in editable and editable[_target].strip())
+    _target_lines = editable[_target].count("\n") + 1 if _has_prior else 0
+    _use_diff_mode = _has_prior and _target_lines > _DIFF_MODE_LINE_THRESHOLD
     if errors and _has_prior:
+        _return_instr = (
+            f"Return SEARCH/REPLACE block(s) for `{_target}` per the format below — "
+            f"do not return its complete content."
+            if _use_diff_mode else
+            f"Return the complete file, but as the previous file with the smallest "
+            f"possible edit applied."
+        )
         error_block = (
             f"\n\n=== THIS IS A REPAIR, NOT A REWRITE ===\n"
             f"`{_target}` in 'Current files' above is YOUR OWN PREVIOUS ATTEMPT. "
@@ -1429,8 +1452,7 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
             f"Start from that exact file and change ONLY what these errors "
             f"require. Keep every import, helper, constant, structure and name "
             f"that is not implicated. Do not restructure, do not rename, do not "
-            f"re-derive the parts that already work. Return the complete file, "
-            f"but as the previous file with the smallest possible edit applied.\n\n"
+            f"re-derive the parts that already work. {_return_instr}\n\n"
             f"Errors to fix:\n{errors}"
         )
     else:
@@ -1450,6 +1472,28 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
         "  • Do NOT modify source files to make your test compile.\n"
         "The implement task will follow — your job here is ONLY the test file.\n"
         if is_test else ""
+    )
+
+    # Large target file (2026-09-09): a full rewrite makes the model
+    # regenerate everything, including the parts already correct, which is
+    # slow enough to time out on this model/hardware for files this size.
+    # Scoped to _target ONLY — any other file in this same response still
+    # uses complete content as normal.
+    diff_mode_block = (
+        f"\n\n=== {_target} IS LARGE ({_target_lines} lines) — USE SEARCH/REPLACE ===\n"
+        f"For `{_target}` ONLY, return one or more SEARCH/REPLACE blocks instead of "
+        f"the full file, in this exact format:\n"
+        f"<<<<<<< SEARCH\n"
+        f"<the exact existing lines you are changing, copied verbatim from "
+        f"'Current file contents' below — including whitespace/indentation>\n"
+        f"=======\n"
+        f"<the new lines that replace them>\n"
+        f">>>>>>> REPLACE\n"
+        f"Concatenate multiple such blocks in the same string if you need to change "
+        f"more than one place in the file. The SEARCH text must match the current "
+        f"file EXACTLY — copy it, do not retype it from memory. Every other file "
+        f"you return (if any) still uses complete file content as normal.\n"
+        if _use_diff_mode else ""
     )
 
     _role = _role_spec_for(PROJECT_LANGUAGE)
@@ -1477,6 +1521,7 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
         f"{rules}"
         f"{pitfalls_block}"
         f"{scope_block}"
+        f"{diff_mode_block}"
     )
     # Import map (TS projects): tell the model EXACTLY which module exports each
     # symbol, with the relative specifier already computed for the target file.
@@ -1555,6 +1600,45 @@ def _mechanical_rewrites(rel_path: str, content: str) -> str:
     for pattern, repl, _why in _REWRITES:
         content = re.sub(pattern, repl, content)
     return content
+
+
+_SEARCH_REPLACE_RE = re.compile(
+    r"<{7} SEARCH\n(.*?)\n={7}\n(.*?)\n>{7} REPLACE", re.DOTALL,
+)
+
+
+def _is_search_replace_format(content: str) -> bool:
+    return "<<<<<<< SEARCH" in content and ">>>>>>> REPLACE" in content
+
+
+def _apply_search_replace(rel_path: str, patch_text: str,
+                          old_content: str) -> tuple[str | None, str | None]:
+    """Apply one or more SEARCH/REPLACE blocks to old_content.
+
+    Returns (new_content, None) on success, or (None, error_message) — fed
+    back to the model on the next attempt the same way a validation error is
+    — when a SEARCH block's text isn't found verbatim (the model paraphrased
+    or mis-copied it instead of quoting the file it was shown).
+    """
+    blocks = _SEARCH_REPLACE_RE.findall(patch_text)
+    if not blocks:
+        return None, (
+            f"MALFORMED SEARCH/REPLACE [{rel_path}]: no valid "
+            f"<<<<<<< SEARCH / ======= / >>>>>>> REPLACE block found. Each block "
+            f"needs all three markers, each on its own line."
+        )
+    new_content = old_content
+    for search, replace in blocks:
+        if search not in new_content:
+            return None, (
+                f"SEARCH BLOCK NOT FOUND [{rel_path}]: the text between "
+                f"<<<<<<< SEARCH and ======= does not appear verbatim in the "
+                f"current file. Copy the exact lines from 'Current file contents' "
+                f"above — including whitespace and indentation — do not retype "
+                f"them from memory."
+            )
+        new_content = new_content.replace(search, replace, 1)
+    return new_content, None
 
 
 def write_changes(changes: dict[str, str], project_root: str,
@@ -1655,6 +1739,28 @@ def write_changes(changes: dict[str, str], project_root: str,
                 content = extracted
             else:
                 content = str(content)
+        # SEARCH/REPLACE (2026-09-09, see implement_task's diff_mode_block):
+        # convert into the full new content HERE, before any downstream check
+        # (bad-pattern, grounding, destructive-edit) — every one of those
+        # operates on real file content and would misfire against raw
+        # <<<<<<< SEARCH markers otherwise.
+        if isinstance(content, str) and _is_search_replace_format(content):
+            _full_for_patch = os.path.join(project_root, rel_path)
+            if not os.path.exists(_full_for_patch):
+                msg = (
+                    f"INVALID FORMAT [{rel_path}]: SEARCH/REPLACE blocks were used but "
+                    f"this file does not exist yet. New files must be returned as "
+                    f"complete file content, not a patch against nothing."
+                )
+                print(f"  {RED}(blocked SEARCH/REPLACE on new file: {rel_path}){RESET}")
+                pattern_errors.append(msg)
+                continue
+            content, _sr_err = _apply_search_replace(
+                rel_path, content, open(_full_for_patch).read())
+            if _sr_err:
+                print(f"  {RED}(SEARCH/REPLACE failed to apply: {rel_path}){RESET}")
+                pattern_errors.append(_sr_err)
+                continue
         # Only check Dart source files for bad patterns — not docs, XML, YAML, etc.
         import pathlib
         violations = check_bad_patterns(rel_path, content) if pathlib.Path(rel_path).suffix in ('.dart', '.go', '.ts', '.tsx', '.py', '.swift') else []
@@ -3250,6 +3356,35 @@ def run_task(task: str, project_root: str, log_file: str,
         forced.append(_target_m.group(1))
 
     rel_files = list(dict.fromkeys(forced + rel_files))
+
+    # Proactive, size-aware trim (2026-09-09): the reactive PromptTooLargeError
+    # path below trims by raw file COUNT (rel_files[:keep]), ignoring actual
+    # file sizes — a single large file can blow the budget while five small
+    # ones fit easily, so count-based halving either over-trims fine files or
+    # under-trims and still overflows, wasting a whole attempt on nothing.
+    # Observed directly: nearly every task in the 2026-09-08 old-car-radio run
+    # hit "prompt too large" on attempt 1 before any generation happened.
+    # Keep files in priority order (forced/target file first, via
+    # dict.fromkeys above) and greedily add whole files while the running
+    # total stays under budget — same (chars // 3) estimate and 0.85 cutoff
+    # ollama()'s own preflight check uses, so this activates BEFORE that
+    # check trips, not instead of it.
+    _ctx_limit = MODEL_CTX.get(current_model, int(os.getenv("OLLAMA_CONTEXT_LENGTH", "24576")))
+    _budget_chars = int(_ctx_limit * 0.85 * 3) - len(task) - 2000  # 2000 ~= fixed system-prompt overhead
+    _running = 0
+    _kept: list[str] = []
+    for _f in rel_files:
+        _full = os.path.join(project_root, _f)
+        _size = min(os.path.getsize(_full), 10000) if os.path.exists(_full) else 0
+        if _kept and _running + _size > _budget_chars:
+            continue  # always keep at least the first (target) file
+        _running += _size
+        _kept.append(_f)
+    if len(_kept) < len(rel_files):
+        print(f"  {DIM}(pre-trimmed {len(rel_files)} → {len(_kept)} files to fit "
+              f"{current_model}'s {_ctx_limit}-token context){RESET}")
+    rel_files = _kept
+
     print(f"  Files: {', '.join(rel_files) or '(none found)'}")
 
     # ── RAG retrieval (opt-in) ───────────────────────────────────────────────
@@ -3702,6 +3837,42 @@ def run_task(task: str, project_root: str, log_file: str,
                       f"unsatisfiable gate, not this task. Escalating the model "
                       f"cannot fix it.{RESET}")
                 errors_seen.append("foreign_failure")
+
+                # Cross-file dependency gate (2026-09-08): the diagnosis above
+                # already establishes escalating THIS task's model cannot fix
+                # it — the blamed file belongs to a different task. Previously
+                # execution fell through to the normal retry/escalate ladder
+                # anyway, burning a second attempt (often across a tier
+                # change) on a failure already known to be unfixable here.
+                # Observed cost: a required-param addition in file A whose
+                # only call site is in file B (a separate, later task) failed
+                # validation on attempt 1 with this exact diagnosis, then
+                # spent attempt 2 re-trying at tier2 before exhausting its
+                # budget and queuing for --deep — a fully avoidable second
+                # attempt.
+                #
+                # Bounded by prior-skip count (persisted across runs, not
+                # just this call) so this can't quietly disable the
+                # foreign_streak/FOREIGN_PARK_LIMIT safety net below: a task
+                # that keeps landing here across repeated separate attempts
+                # is NOT a simple ordering issue (the true dependency isn't
+                # landing, or this blame is a coincidence) and needs the
+                # normal retry-then-park path to eventually flag it for
+                # review, not an indefinite fast-defer loop.
+                if _count_prior_skips(task, project_root) < 2:
+                    print(f"  {DIM}   Deferring to retry pass now instead of "
+                          f"burning further attempts on an unfixable failure.{RESET}")
+                    restore_files(backups, project_root)
+                    _append_velocity(project_root, {
+                        "date": date.today().isoformat(), "task": task[:120],
+                        "outcome": "skipped", "attempts": attempt,
+                        "duration_s": round(time.time() - task_start, 1),
+                        "error_types": list(dict.fromkeys(errors_seen)),
+                        "model": current_model,
+                    })
+                    _log_task_summary(project_root, task_idx, task, "skipped",
+                                      attempt, current_model, task_start)
+                    return "skipped"
         except Exception:
             pass
 

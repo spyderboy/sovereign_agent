@@ -56,6 +56,44 @@ def _bare_name(token: str) -> str:
     return t.split(" as ")[0].strip()
 
 
+_SKIP_DIRS = {"node_modules", ".git", ".next", "dist", "build", ".venv", "venv"}
+
+
+def _find_src_roots(project_root: str, src_rel: str = "src") -> list[str]:
+    """Resolve the source root(s) to scan for a TS project.
+
+    Most projects keep everything under <project_root>/<src_rel> (default
+    'src') -- if that exists, use it alone (unchanged prior behavior).
+    Otherwise, search for every directory literally named src_rel nested
+    anywhere under project_root and scan all of them together. This is what a
+    monorepo needs: a project whose real TypeScript subproject lives at e.g.
+    functions/blueprint-ai/src/ rather than at the top level. Without this,
+    the old code fell back to the first of ('lib', '.') that merely EXISTED
+    as a directory -- for a Flutter/Dart project that's 'lib', which exists
+    but holds zero .ts files, so the index came back silently empty and
+    fix_ts_imports stripped every import as "unknown" no matter how correct
+    it was. Falls back to 'lib' then '.' only if no nested src_rel is found
+    at all, so a project with no 'src' directory anywhere still indexes
+    something.
+    """
+    direct = os.path.join(project_root, src_rel)
+    if os.path.isdir(direct):
+        return [direct]
+    found: list[str] = []
+    for dirpath, dirs, _files in os.walk(project_root):
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+        if os.path.basename(dirpath) == src_rel:
+            found.append(dirpath)
+            dirs[:] = []  # don't descend into a matched src/ looking for nested ones
+    if found:
+        return found
+    for candidate in ("lib", "."):
+        root = os.path.join(project_root, candidate)
+        if os.path.isdir(root):
+            return [root]
+    return []
+
+
 def build_symbol_index(project_root: str, src_rel: str = "src"):
     """Return (symbol -> module_relpath, module_relpath -> set(exported symbols)).
 
@@ -64,41 +102,34 @@ def build_symbol_index(project_root: str, src_rel: str = "src"):
     """
     index: dict[str, str] = {}
     exports: dict[str, set[str]] = {}
-    root = os.path.join(project_root, src_rel)
-    if not os.path.isdir(root):
-        for candidate in ("lib", "."):
-            root = os.path.join(project_root, candidate)
-            if os.path.isdir(root):
-                break
-        else:
-            return index, exports
-    _SKIP_DIRS = {"node_modules", ".git", ".next", "dist", "build", ".venv", "venv"}
-    for dirpath, _dirs, files in os.walk(root):
-        _dirs[:] = [d for d in _dirs if d not in _SKIP_DIRS]
-        for fn in files:
-            if not fn.endswith((".ts", ".tsx")) or fn.endswith(".d.ts"):
-                continue
-            full = os.path.join(dirpath, fn)
-            modrel = _slashes(os.path.relpath(full, project_root))
-            modrel = re.sub(r"\.tsx?$", "", modrel)
-            try:
-                text = open(full, encoding="utf-8").read()
-            except Exception:
-                continue
-            syms: set[str] = set(_EXPORT_DECL_RE.findall(text))
-            for m in _EXPORT_LIST_RE.finditer(text):
-                for part in m.group(1).split(","):
-                    name = part.strip()
-                    if not name or "from" in name:
-                        continue
-                    # export { a as b } exposes b
-                    exposed = name.split(" as ")[-1].strip().lstrip("type ").strip()
-                    if exposed:
-                        syms.add(exposed)
-            syms.discard("")
-            exports.setdefault(modrel, set()).update(syms)
-            for s in syms:
-                index.setdefault(s, modrel)  # first definition wins
+    roots = _find_src_roots(project_root, src_rel)
+    for root in roots:
+        for dirpath, _dirs, files in os.walk(root):
+            _dirs[:] = [d for d in _dirs if d not in _SKIP_DIRS]
+            for fn in files:
+                if not fn.endswith((".ts", ".tsx")) or fn.endswith(".d.ts"):
+                    continue
+                full = os.path.join(dirpath, fn)
+                modrel = _slashes(os.path.relpath(full, project_root))
+                modrel = re.sub(r"\.tsx?$", "", modrel)
+                try:
+                    text = open(full, encoding="utf-8").read()
+                except Exception:
+                    continue
+                syms: set[str] = set(_EXPORT_DECL_RE.findall(text))
+                for m in _EXPORT_LIST_RE.finditer(text):
+                    for part in m.group(1).split(","):
+                        name = part.strip()
+                        if not name or "from" in name:
+                            continue
+                        # export { a as b } exposes b
+                        exposed = name.split(" as ")[-1].strip().lstrip("type ").strip()
+                        if exposed:
+                            syms.add(exposed)
+                syms.discard("")
+                exports.setdefault(modrel, set()).update(syms)
+                for s in syms:
+                    index.setdefault(s, modrel)  # first definition wins
     return index, exports
 
 
@@ -155,28 +186,21 @@ def build_signature_index(project_root: str, src_rel: str = "src") -> dict[str, 
     """Map exported function name -> full call signature string, e.g.
     'productionTick(g: GameState, sdt: number, rng: Rng): void'."""
     sigs: dict[str, str] = {}
-    root = os.path.join(project_root, src_rel)
-    if not os.path.isdir(root):
-        for candidate in ("lib", "."):
-            root = os.path.join(project_root, candidate)
-            if os.path.isdir(root):
-                break
-        else:
-            return sigs
-    _SKIP_DIRS = {"node_modules", ".git", ".next", "dist", "build", ".venv", "venv"}
-    for dirpath, _dirs, files in os.walk(root):
-        _dirs[:] = [d for d in _dirs if d not in _SKIP_DIRS]
-        for fn in files:
-            if not fn.endswith((".ts", ".tsx")) or fn.endswith(".d.ts"):
-                continue
-            try:
-                text = open(os.path.join(dirpath, fn), encoding="utf-8").read()
-            except Exception:
-                continue
-            for m in _FUNC_START_RE.finditer(text):
-                sig = _extract_one_signature(text, m.end(), m.group(1))
-                if sig:
-                    sigs.setdefault(m.group(1), sig)
+    roots = _find_src_roots(project_root, src_rel)
+    for root in roots:
+        for dirpath, _dirs, files in os.walk(root):
+            _dirs[:] = [d for d in _dirs if d not in _SKIP_DIRS]
+            for fn in files:
+                if not fn.endswith((".ts", ".tsx")) or fn.endswith(".d.ts"):
+                    continue
+                try:
+                    text = open(os.path.join(dirpath, fn), encoding="utf-8").read()
+                except Exception:
+                    continue
+                for m in _FUNC_START_RE.finditer(text):
+                    sig = _extract_one_signature(text, m.end(), m.group(1))
+                    if sig:
+                        sigs.setdefault(m.group(1), sig)
     return sigs
 
 

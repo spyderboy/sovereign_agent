@@ -463,7 +463,7 @@ write_status "running:$START_AT"
 
 while true; do
     log "▶  work.py --start-at $START_AT ${PASS_ARGS[*]+"${PASS_ARGS[@]}"}"
-    "$PYTHON" "$SOVEREIGN/work.py" --project "$PROJECT" --start-at "$START_AT" \
+    PYTHONUNBUFFERED=1 "$PYTHON" "$SOVEREIGN/work.py" --project "$PROJECT" --start-at "$START_AT" \
         "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}" &
     WORK_PIDS=($!)
     ITER_START=$SECONDS

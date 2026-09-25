@@ -1,0 +1,48 @@
+# Sweep-2 arm: qwen3.8:27b at every tier, single-model ladder on purpose.
+#
+# Pairs with qwen25-t1 in a sweep.sh two-pass run: the cheap pass (14b)
+# clears everything it can and defers anything blocked on a sibling; this
+# pass then spends real time on what's left, which is now genuinely hard
+# rather than just blocked. No further local escalation past 27b — a task
+# that still fails here gets written to logs/escalate.md (CLAUDE_ENABLED
+# defaults off, so nothing auto-spends against the Claude API) instead of
+# climbing to a bigger local model. Shelve it for Claude or another model
+# to pick up by hand.
+#
+# Use qwen3.8:27b specifically, NOT qwen3.8:27b-mlx — the -mlx tag is an
+# NVFP4 quantization with no Apple Silicon acceleration (misdiagnosed as a
+# real MLX build once already). qwen3.8:27b is the genuine GGUF Q4_K_M
+# build and is the one Metal actually accelerates.
+#
+#   CHEAP=qwen25-t1 STRONG=qwen38 ./sweep.sh ~/Code/<project>
+
+[tiers.1]
+model  = "qwen3.8:27b"
+params = 27
+ctx    = 16384
+
+[tiers.2]
+model  = "qwen3.8:27b"
+params = 27
+ctx    = 16384
+
+[tiers.3]
+model  = "qwen3.8:27b"
+params = 27
+ctx    = 16384
+
+[tiers.4]
+model  = "qwen3.8:27b"
+params = 27
+ctx    = 16384
+
+[budget]
+task_ceiling_s      = 3600
+attempts_tier1      = 3
+attempts_mid        = 2
+attempts_last       = 2
+foreign_park        = 2
+quick_param_limit_b = 28
+
+[run]
+main_branch = "main"

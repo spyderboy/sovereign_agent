@@ -250,6 +250,7 @@ _MODEL_SIZE_HINTS: dict[str, float] = {
     "30b":   18.0,
     "r1":    19.0,
     "35b":   20.0,  # qwen3.6:35b-a3b — MoE, full model ~20GB in VRAM
+    "27b":   17.0,  # qwen3.8:27b — dense, ~17GB resident (GGUF Q4_K_M)
     "26b":   15.0,  # gemma4:26b       — MoE, full model ~15GB in VRAM
     "24b":   14.0,
     "20b":   13.0,
@@ -260,10 +261,17 @@ _MODEL_SIZE_HINTS: dict[str, float] = {
 }
 
 def _model_size_gb(model_name: str) -> float:
-    """Estimate model VRAM footprint from its name."""
+    """Estimate model VRAM footprint from its name.
+
+    Fragments are matched with a digit boundary immediately before them, so
+    "7b" doesn't match inside "27b"/"47b" and "4b" doesn't match inside
+    "24b"/"14b" — plain substring containment silently misclassified
+    qwen3.8:27b (17GB) as a 7b (4.7GB) model before this fix, which meant it
+    never tripped the large-model VRAM lock or the longer coding timeout.
+    """
     name = model_name.lower()
     for fragment, gb in _MODEL_SIZE_HINTS.items():
-        if fragment in name:
+        if re.search(r"(?<!\d)" + re.escape(fragment), name):
             return gb
     return 10.0  # safe default if unknown
 

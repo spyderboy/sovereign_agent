@@ -4,6 +4,15 @@
 #   ./sweep.sh ~/Code/witches_bricks
 #   CHEAP=qwen25-t1 STRONG=qwen25 ./sweep.sh ~/Code/witches_bricks
 #   MAX_CYCLES=6 CHEAP_MAX=5400 STRONG_MAX=7200 ./sweep.sh ~/Code/witches_bricks
+#   CHEAP=qwen25-t1 STRONG=qwen38 CHEAP_WORKERS=2 ./sweep.sh ~/Code/witches_bricks
+#
+# CHEAP_WORKERS/STRONG_WORKERS (default 2/1): worker count per pass. The
+# cheap pass's model is small (14b, ~9GB) so parallel workers are safe;
+# default STRONG_WORKERS to 1 unless the strong profile's model is small
+# enough that VRAM headroom for N concurrent loads is actually there —
+# work.py's own large-model lock (size >=15GB) serializes concurrent calls
+# to one big model regardless, so extra strong workers mostly buy pipeline
+# overlap, not real concurrency, once the model itself is large.
 #
 # WHY TWO PASSES AND A LOOP
 #
@@ -31,6 +40,8 @@ CHEAP="${CHEAP:-qwen25-t1}"
 STRONG="${STRONG:-qwen25}"
 CHEAP_MAX="${CHEAP_MAX:-5400}"
 STRONG_MAX="${STRONG_MAX:-7200}"
+CHEAP_WORKERS="${CHEAP_WORKERS:-2}"
+STRONG_WORKERS="${STRONG_WORKERS:-1}"
 MAX_CYCLES="${MAX_CYCLES:-5}"
 RESULTS="$HOME/sweep-$(date +%m%d-%H%M)"
 
@@ -101,16 +112,16 @@ reset_tree() {
     fi
 }
 
-run_pass() {   # $1 profile  $2 cap  $3 label
-    local prof="$1" cap="$2" label="$3" log="$RESULTS/$3.log"
+run_pass() {   # $1 profile  $2 cap  $3 label  $4 workers
+    local prof="$1" cap="$2" label="$3" workers="${4:-1}" log="$RESULTS/$3.log"
     local before after start elapsed killed=0
     before=$(done_count)
-    say "${BOLD}$label${RESET}  profile=$prof  cap=${cap}s  done=$before"
+    say "${BOLD}$label${RESET}  profile=$prof  cap=${cap}s  workers=$workers  done=$before"
     reset_tree
 
     start=$SECONDS
     ( cd "$SOVEREIGN" && SOVEREIGN_PROFILE="$prof" \
-        ./supervisor.sh "$PROJECT" --features-only >>"$log" 2>&1 ) &
+        ./supervisor.sh "$PROJECT" --workers "$workers" --features-only >>"$log" 2>&1 ) &
     local sup=$!
     while kill -0 "$sup" 2>/dev/null; do
         if [ $((SECONDS - start)) -ge "$cap" ]; then
@@ -130,8 +141,8 @@ run_pass() {   # $1 profile  $2 cap  $3 label
 
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 echo -e "${BOLD}  Sweep${RESET}   $PROJECT"
-echo -e "  cheap  : $CHEAP   cap ${CHEAP_MAX}s"
-echo -e "  strong : $STRONG  cap ${STRONG_MAX}s"
+echo -e "  cheap  : $CHEAP   cap ${CHEAP_MAX}s   workers ${CHEAP_WORKERS}"
+echo -e "  strong : $STRONG  cap ${STRONG_MAX}s  workers ${STRONG_WORKERS}"
 echo -e "  cycles : up to $MAX_CYCLES, stopping when one changes nothing"
 echo -e "  logs   : $RESULTS"
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
@@ -162,7 +173,7 @@ for cycle in $(seq 1 "$MAX_CYCLES"); do
     echo -e "\n${BOLD}──────── cycle $cycle ────────${RESET}"
     CYCLE_BEFORE=$(done_count)
 
-    run_pass "$CHEAP"  "$CHEAP_MAX"  "cycle${cycle}-cheap"
+    run_pass "$CHEAP"  "$CHEAP_MAX"  "cycle${cycle}-cheap"  "$CHEAP_WORKERS"
     CHEAP_GAIN=$PASS_GAIN
 
     if [ "$(open_count)" = "0" ]; then
@@ -171,7 +182,7 @@ for cycle in $(seq 1 "$MAX_CYCLES"); do
         break
     fi
 
-    run_pass "$STRONG" "$STRONG_MAX" "cycle${cycle}-strong"
+    run_pass "$STRONG" "$STRONG_MAX" "cycle${cycle}-strong" "$STRONG_WORKERS"
     STRONG_GAIN=$PASS_GAIN
 
     CYCLE_GAIN=$(( $(done_count) - CYCLE_BEFORE ))

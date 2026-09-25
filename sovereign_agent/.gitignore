@@ -4,3 +4,4 @@
 .probe/
 __pycache__/
 *.pyc
+*.log

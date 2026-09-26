@@ -439,7 +439,7 @@ def main():
     if _load_recs is not None:
         records = _load_recs(project_root)
         if records:
-            _vel_report(records, days=3)
+            _vel_report(records, days=3, project=os.path.basename(project_root))
         else:
             print(f"  {DIM}(no velocity data yet — run work.py to start tracking){RESET}\n")
 

@@ -65,7 +65,7 @@ def rate_color(rate: float) -> str:
     return RED
 
 
-def report(records: list[dict], days: int):
+def report(records: list[dict], days: int, project: str | None = None):
     if not records:
         print(f"{YELLOW}No velocity data yet. Run work.py to generate it.{RESET}")
         return
@@ -101,7 +101,8 @@ def report(records: list[dict], days: int):
 
     # ── Print header ───────────────────────────────────────────────────────────
     print(f"\n{BOLD}{'━'*56}{RESET}")
-    print(f"{BOLD}  📊  AstroFlux SDLC Velocity — last {days} day(s){RESET}")
+    title = f"{project} SDLC Velocity" if project else "SDLC Velocity"
+    print(f"{BOLD}  📊  {title} — last {days} day(s){RESET}")
     print(f"{BOLD}{'━'*56}{RESET}\n")
 
     # ── Daily table ────────────────────────────────────────────────────────────
@@ -170,7 +171,7 @@ def main():
         sys.exit(1)
 
     records = load_records(project_root)
-    report(records, args.days)
+    report(records, args.days, os.path.basename(project_root))
 
 
 if __name__ == "__main__":

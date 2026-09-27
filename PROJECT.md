@@ -6,8 +6,8 @@ hosting: none
 repo: https://github.com/spyderboy/sovereign_agent.git
 date_started: 2026-05-23T23:08:24-04:00
 public_status: In daily use
-cta_label: Let's talk about Xanadu
-cta_url: '#contact'
+cta_label: How it works
+cta_url: '#engine'
 ---
 
 # Xanadu
@@ -19,23 +19,17 @@ cta_url: '#contact'
 
 ## Marketing
 ### Tagline
-An autonomous development loop: local LLMs plan, write, test and fix code
-straight from a roadmap, escalating to Claude only when they're stuck.
+The autonomous development loop behind the projects on this page.
 
 ### Promo Text
-Xanadu is the engine behind everything else on this page. Give it a
-project's ROADMAP.md and it works through the tasks unattended, one
-validated change at a time, then surfaces only the blockers that genuinely
-need a human. Most of the work runs on local models on hardware I already
-own; paid cloud models are the last rung of the ladder, not the first.
+Give Xanadu a project's roadmap and it works through it unattended, one
+tested change at a time, surfacing only the blockers that genuinely need a
+human. The architecture and the numbers are in the Engine section.
 
 ## Features
 - Works straight from a project's ROADMAP.md: one task, one tested change
-- Tiered model ladder: four local LLM tiers first, Claude only after repeat failures
-- Real validation gates: static analysis plus per-task tests on every attempt
-- Learns from its mistakes: repeated error patterns become permanent rules shared across machines
-- Scales from one Mac to parallel workers to rented RunPod GPUs
-- Fully resumable: all state lives in the roadmap and git, so it survives being killed mid-run
+- Runs unattended overnight, and picks up where it left off if it's stopped
+- Comes back with a finished roadmap or a short list of decisions for a human
 
 ## Notes
 The tool behind most of the other roadmap-driven projects in this directory

@@ -6,6 +6,8 @@ hosting: none
 repo: https://github.com/spyderboy/sovereign_agent.git
 date_started: 2026-05-23T23:08:24-04:00
 public_status: In daily use
+cta_label: Let's talk about Xanadu
+cta_url: '#contact'
 ---
 
 # Xanadu

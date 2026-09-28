@@ -2066,6 +2066,17 @@ def _branch_merge(project_root: str, branch: str, task_idx: int, task: str) -> N
         return r
 
     _run_with_retry(["add", "-A"], "add")
+    # Nothing staged means main already satisfies this task — typically a
+    # sibling task on the same file wrote this function too (2026-09-28:
+    # xmeasure's parse_github_time landed inside the parse_jira_time task).
+    # The gate just passed against that code, so the task is done: there is
+    # nothing to commit or merge. `git commit` would exit 1 ("nothing to
+    # commit", empty stderr) and the retry wrapper would kill the whole run.
+    if _git(["diff", "--cached", "--quiet"], project_root).returncode == 0:
+        print(f"  {DIM}Already satisfied on {MAIN_BRANCH} — nothing to commit{RESET}")
+        _git(["checkout", "-f", MAIN_BRANCH], project_root)
+        _git(["branch", "-D", branch], project_root)
+        return
     _run_with_retry(["commit", "-m", f"task {task_idx}: {task[:72]}"], "commit")
     _git(["checkout", "-f", MAIN_BRANCH], project_root)
 

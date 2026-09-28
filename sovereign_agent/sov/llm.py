@@ -14,6 +14,7 @@ import requests
 import sys
 import time
 from sov.config import (
+    OLLAMA_THINK,
     MODEL_CTX,
     OLLAMA_URL,
 )
@@ -182,6 +183,7 @@ def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
                 "options": {"num_ctx": ctx_limit},
                 "stream": True,
                 "keep_alive": keep_alive,
+                **({"think": OLLAMA_THINK} if OLLAMA_THINK is not None else {}),
             },
             stream=True,
             timeout=timeout,

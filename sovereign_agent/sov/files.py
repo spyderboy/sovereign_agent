@@ -508,7 +508,7 @@ def update_api_guide(written_paths: list[str], changes: dict[str, str],
 
         try:
             entry = ollama(
-                FINDER_MODEL,
+                PLANNER_MODEL,
                 (
                     "You are a Dart API documentation extractor.\n"
                     "Given a Dart source file, output a COMPACT API reference entry "

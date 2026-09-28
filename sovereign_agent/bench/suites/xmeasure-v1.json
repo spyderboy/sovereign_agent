@@ -1,0 +1,442 @@
+{
+  "name": "xmeasure-v1",
+  "project": "/Volumes/Lexar/Code/xmeasure",
+  "main_branch": "main",
+  "link": [
+    ".venv",
+    "node_modules",
+    ".dart_tool"
+  ],
+  "created": "2026-09-28T17:43:29",
+  "cases": [
+    {
+      "id": "xmeasure-mappers-timeparse-py-6e9aa11",
+      "merge": "6e9aa112d984c61490e1706c368a4329ac6203bf",
+      "base": "80916d45cbc0f83331d3e38bc69d1712c1679b9f",
+      "task_line": "- [ ] In `xmeasure/mappers/timeparse.py`: implement `parse_github_time(s: str) -> datetime` \u2014 `datetime.fromisoformat(s.replace('Z', '+00:00')).astimezone(UTC)` with UTC from xmeasure.constants. Every datetime is timezone-aware UTC. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_timeparse.py::test_github_time_is_utc\" passes",
+      "target": "xmeasure/mappers/timeparse.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_timeparse.py::test_github_time_is_utc\"",
+      "history": {
+        "model": "qwen3.8:27b",
+        "attempts": 1,
+        "duration_s": 359.5
+      }
+    },
+    {
+      "id": "xmeasure-mappers-timeparse-py-2cec767",
+      "merge": "2cec7677a215d6ec4e05fe1592515a9ab7d7d396",
+      "base": "bac706cc7c6580e0e0dcab4d819882de35ea4949",
+      "task_line": "- [ ] In `xmeasure/mappers/timeparse.py`: implement `parse_jira_time(s: str) -> datetime` \u2014 Jira format \"2026-09-01T10:15:30.000-0400\": `datetime.strptime(s, '%Y-%m-%dT%H:%M:%S.%f%z').astimezone(UTC)`. Every datetime is timezone-aware UTC. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_timeparse.py::test_jira_time_converts_offset_to_utc\" passes",
+      "target": "xmeasure/mappers/timeparse.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_timeparse.py::test_jira_time_converts_offset_to_utc\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 1,
+        "duration_s": 79.1
+      }
+    },
+    {
+      "id": "xmeasure-mappers-timeparse-py-a24adbe",
+      "merge": "a24adbea53fa7830a7c8a23aeeba1976084418d2",
+      "base": "ecfe12f1f4040145ec9f7dc109a857044bd51535",
+      "task_line": "- [ ] In `xmeasure/mappers/timeparse.py`: implement `parse_date(s: str) -> datetime` \u2014 \"YYYY-MM-DD\" \u2192 midnight UTC that day (`datetime.strptime(s, '%Y-%m-%d').replace(tzinfo=UTC)`). \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_timeparse.py::test_parse_date_is_midnight_utc\" passes",
+      "target": "xmeasure/mappers/timeparse.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_timeparse.py::test_parse_date_is_midnight_utc\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 1,
+        "duration_s": 71.7
+      }
+    },
+    {
+      "id": "xmeasure-store-codec-py-38f150a",
+      "merge": "38f150a652d6eb2c5bb627636a6fda9a98532a1e",
+      "base": "c4b10ae73619454020d1cafddf8c09605aa2c3ab",
+      "task_line": "- [ ] In `xmeasure/store/codec.py`: implement the ISO codec pair `to_iso(t: datetime | None) -> str | None` (`t.isoformat()`) and `from_iso(s: str | None) -> datetime | None` (`datetime.fromisoformat(s)`); None passes through both. The offset in the ISO text keeps the result UTC-aware. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_codec.py::test_iso_round_trip_keeps_utc\" \"tests/unit/test_codec.py::test_none_passes_through\" passes",
+      "target": "xmeasure/store/codec.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_codec.py::test_iso_round_trip_keeps_utc\" \"tests/unit/test_codec.py::test_none_passes_through\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 1,
+        "duration_s": 69.3
+      }
+    },
+    {
+      "id": "xmeasure-metrics-result-py-a105977",
+      "merge": "a10597787e37e4266612f539d2b7b0320964756d",
+      "base": "5a5ba09b571f80f24de50ca39b8917b6a88d12c9",
+      "task_line": "- [ ] In `xmeasure/metrics/result.py`: implement `make_result(metric_id: str, window: Window, value: float | None, n: int, detail: dict[str, float | int | None] | None = None) -> MetricResult` \u2014 unit from `METRICS_BY_ID[metric_id]['unit']`; `window_label=window.label`; round `value` and every FLOAT in detail with `round(x, 3)` (ints untouched); if `n < MIN_SAMPLE` return value=None and note=NOTE_INSUFFICIENT but keep n and detail; else note ''. Construct dataclasses with keyword arguments only. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_result.py::test_make_result_fills_unit_and_label\" \"tests/unit/test_result.py::test_small_sample_hides_value_but_keeps_n_and_detail\" \"tests/unit/test_result.py::test_values_and_detail_are_rounded_to_3_decimals\" passes",
+      "target": "xmeasure/metrics/result.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_result.py::test_make_result_fills_unit_and_label\" \"tests/unit/test_result.py::test_small_sample_hides_value_but_keeps_n_and_detail\" \"tests/unit/test_result.py::test_values_and_detail_are_rounded_to_3_decimals\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 1,
+        "duration_s": 107.1
+      }
+    },
+    {
+      "id": "xmeasure-mappers-timeparse-py-f6660ca",
+      "merge": "f6660ca08b1f4ef898ff7bc1cac2c4d6c390f389",
+      "base": "3193604d67aad8c3bfc6821af85cb89b079e2417",
+      "task_line": "- [ ] In `xmeasure/mappers/timeparse.py`: implement `parse_github_time(s: str) -> datetime` \u2014 `datetime.fromisoformat(s.replace('Z', '+00:00')).astimezone(UTC)` with UTC from xmeasure.constants. Every datetime is timezone-aware UTC. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_timeparse.py::test_github_time_is_utc\" passes",
+      "target": "xmeasure/mappers/timeparse.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_timeparse.py::test_github_time_is_utc\"",
+      "history": {
+        "model": "qwen3.8:27b",
+        "attempts": 1,
+        "duration_s": 359.5
+      }
+    },
+    {
+      "id": "xmeasure-mappers-timeparse-py-9fea2c0",
+      "merge": "9fea2c06db682072adf6d69244f8267e74e5f9f5",
+      "base": "53ce38d3026e693e568b198660864ef692416b88",
+      "task_line": "- [ ] In `xmeasure/mappers/timeparse.py`: implement `parse_git_time(s: str) -> datetime` \u2014 git %aI/%cI strict ISO with offset: `datetime.fromisoformat(s).astimezone(UTC)`. Every datetime is timezone-aware UTC. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_timeparse.py::test_git_time_converts_offset_to_utc\" passes",
+      "target": "xmeasure/mappers/timeparse.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_timeparse.py::test_git_time_converts_offset_to_utc\"",
+      "history": {
+        "model": "qwen3.8:27b",
+        "attempts": 1,
+        "duration_s": 336.9
+      }
+    },
+    {
+      "id": "xmeasure-mappers-timeparse-py-34ef2e6",
+      "merge": "34ef2e6192776011e8f971d002e5d6a86f6c4852",
+      "base": "5bec255903373700287a17a6a8777cd796debf95",
+      "task_line": "- [ ] In `xmeasure/mappers/timeparse.py`: implement `week_start(t: datetime) -> datetime` \u2014 Monday 00:00 UTC of t's ISO week (midnight of t's date minus t.weekday() days). \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_timeparse.py::test_week_start_is_monday_midnight_utc\" passes",
+      "target": "xmeasure/mappers/timeparse.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_timeparse.py::test_week_start_is_monday_midnight_utc\"",
+      "history": {
+        "model": "qwen3.8:27b",
+        "attempts": 1,
+        "duration_s": 323.4
+      }
+    },
+    {
+      "id": "xmeasure-store-codec-py-6c46ccb",
+      "merge": "6c46ccb2382519c62808d86c9ddff73885439fec",
+      "base": "5ddd37ca1b8431302f77bdd4e5702c1fdfaa39be",
+      "task_line": "- [ ] In `xmeasure/store/codec.py`: implement the JSON list pair `to_json_list(items: tuple[str, ...]) -> str` (`json.dumps(list(items))`) and `from_json_list(s: str) -> tuple[str, ...]` (a TUPLE, not a list). \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_codec.py::test_json_list_round_trip\" passes",
+      "target": "xmeasure/store/codec.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_codec.py::test_json_list_round_trip\"",
+      "history": {
+        "model": "qwen3.8:27b",
+        "attempts": 1,
+        "duration_s": 287.8
+      }
+    },
+    {
+      "id": "xmeasure-metrics-result-py-44df204",
+      "merge": "44df204b9171026ed8de83319787f5b7c28e78a2",
+      "base": "33da1a3a38ad403292f36f765ff612f9f934bfe1",
+      "task_line": "- [ ] In `xmeasure/metrics/result.py`: implement `no_source(metric_id: str, window: Window) -> MetricResult` \u2014 value None, n 0, note NOTE_NO_SOURCE, unit from METRICS_BY_ID, detail {}. Construct dataclasses with keyword arguments only. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_result.py::test_no_source\" \"tests/conformance/test_p1_foundation.py\" passes",
+      "target": "xmeasure/metrics/result.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_result.py::test_no_source\" \"tests/conformance/test_p1_foundation.py\"",
+      "history": {
+        "model": "qwen3.8:27b",
+        "attempts": 1,
+        "duration_s": 356.3
+      }
+    },
+    {
+      "id": "xmeasure-config-windows-py-9f4a9d6",
+      "merge": "9f4a9d6f41da5d9b3db1f8b8732a855470785a68",
+      "base": "1bc4d47a0227188f78aed8969703aae0357e6815",
+      "task_line": "- [ ] In `xmeasure/config/windows.py`: implement `parse_windows(raw: dict) -> tuple[Window, Window | None]` \u2014 raw is the YAML `windows` mapping; baseline required, pilot optional; each needs `start` and `end` as YYYY-MM-DD strings (use xmeasure.mappers.timeparse.parse_date), start < end, labels 'baseline' / 'pilot'; the pilot must not overlap the baseline. Raise xmeasure.errors.ConfigError whose message STARTS WITH `windows.baseline` or `windows.pilot`. Window(label=..., start=..., end=...) keyword-only. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_config_windows.py\" passes",
+      "target": "xmeasure/config/windows.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_config_windows.py\"",
+      "history": {
+        "model": "qwen3.8:27b",
+        "attempts": 1,
+        "duration_s": 1261.0
+      }
+    },
+    {
+      "id": "xmeasure-config-github-py-8b4dd3d",
+      "merge": "8b4dd3d2e7663e82590712698f7f9291735e0095",
+      "base": "474f4fec9287ce4dd3795b0e447c77658deacc0e",
+      "task_line": "- [ ] In `xmeasure/config/github.py`: implement `parse_github(raw: dict | None) -> GithubConfig | None` \u2014 None \u2192 None; defaults api_url 'https://api.github.com' (rstrip '/'), token_env 'GITHUB_TOKEN'; deploy_workflows and ai_labels become TUPLES. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_config_sections.py::test_github_defaults_and_tuples\" passes",
+      "target": "xmeasure/config/github.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_config_sections.py::test_github_defaults_and_tuples\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 1,
+        "duration_s": 89.6
+      }
+    },
+    {
+      "id": "xmeasure-config-jira-py-8473cd9",
+      "merge": "8473cd9e3360a162ac0b378977cbd563592ec2c9",
+      "base": "a804b47561ff820208592de9e8197969b1e13995",
+      "task_line": "- [ ] In `xmeasure/config/jira.py`: implement `parse_jira(raw: dict | None) -> JiraConfig | None` \u2014 None \u2192 None; base_url and project_key required (ConfigError starting `jira.base_url` / `jira.project_key`); base_url rstrip '/'; bug_types default ('Bug',); lists become TUPLES; production_field default None. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_config_sections.py::test_jira_requires_base_url_and_project\" passes",
+      "target": "xmeasure/config/jira.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_config_sections.py::test_jira_requires_base_url_and_project\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 1,
+        "duration_s": 123.9
+      }
+    },
+    {
+      "id": "xmeasure-config-xanadu-py-b2333ec",
+      "merge": "b2333ec249f599479cffaaafb5c2e8d001957a69",
+      "base": "0da3ff48e1e29c337387dbfa3d553552b17e05de",
+      "task_line": "- [ ] In `xmeasure/config/xanadu.py`: implement `parse_xanadu(raw: dict | None, base_dir: Path) -> XanaduConfig | None` \u2014 None \u2192 None; log_paths resolved like repo paths, as a tuple of Path. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_config_sections.py::test_xanadu_paths_resolve\" passes",
+      "target": "xmeasure/config/xanadu.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_config_sections.py::test_xanadu_paths_resolve\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 1,
+        "duration_s": 108.2
+      }
+    },
+    {
+      "id": "xmeasure-config-survey-py-aa6e62f",
+      "merge": "aa6e62fa9cd843d685d947c0f3a9b91e9c57ab3f",
+      "base": "23da8755ee57417c00b5099696fde1fa7f4a17e9",
+      "task_line": "- [ ] In `xmeasure/config/survey.py`: implement `parse_survey_config(raw: dict | None) -> SurveyConfig | None` \u2014 None \u2192 None; columns must have all four keys submitted_at, speed, quality, toil_hours (ConfigError starting `survey.columns` naming the missing keys); timestamp_format default 'iso', timezone default '+00:00'. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_config_sections.py::test_survey_requires_all_four_columns\" passes",
+      "target": "xmeasure/config/survey.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_config_sections.py::test_survey_requires_all_four_columns\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 1,
+        "duration_s": 135.9
+      }
+    },
+    {
+      "id": "xmeasure-store-open-py-345c9a1",
+      "merge": "345c9a1fd90018498407ec2a6053dc33bef189dd",
+      "base": "0efd9f515fcc83f1e161ae3b5319e04062445484",
+      "task_line": "- [ ] In `xmeasure/store/open.py`: implement `open_store(path: Path) -> sqlite3.Connection` \u2014 create parent folders, connect, executescript xmeasure.store_schema.DDL, upsert meta ('schema_version', str(SCHEMA_VERSION)), commit. Safe to call on an existing file. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_store_open.py\" passes",
+      "target": "xmeasure/store/open.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_store_open.py\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 2,
+        "duration_s": 607.9
+      }
+    },
+    {
+      "id": "xmeasure-store-prs-io-py-73aebbd",
+      "merge": "73aebbd1db6cd12c84352504f7164cf931797c43",
+      "base": "0af452dd469077be75d47afe2c9f1101636489d1",
+      "task_line": "- [ ] In `xmeasure/store/prs_io.py`: implement the pair `save_pull_requests(conn, prs: tuple[PullRequest, ...]) -> int` / `load_pull_requests(conn) -> tuple[PullRequest, ...]` \u2014 table `pull_requests`, INSERT OR REPLACE, nullable datetimes (merged_at, closed_at, first_commit_at) via to_iso/from_iso, booleans 0/1. Construct dataclasses with keyword arguments only. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_store_prs_io.py\" passes",
+      "target": "xmeasure/store/prs_io.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_store_prs_io.py\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 1,
+        "duration_s": 319.9
+      }
+    },
+    {
+      "id": "xmeasure-store-releases-io-py-183c4fe",
+      "merge": "183c4fe3c4f497f5b73b7c4a252c43786f10c84e",
+      "base": "189d715e21ca44e5044d40fc71fc4e196d00567f",
+      "task_line": "- [ ] In `xmeasure/store/releases_io.py`: implement the pair `save_releases(conn, releases: tuple[Release, ...]) -> int` / `load_releases(conn) -> tuple[Release, ...]` \u2014 table `releases`, INSERT OR REPLACE. Construct dataclasses with keyword arguments only. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_store_releases_io.py\" passes",
+      "target": "xmeasure/store/releases_io.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_store_releases_io.py\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 2,
+        "duration_s": 334.5
+      }
+    },
+    {
+      "id": "xmeasure-mappers-git-numstat-p-4a83385",
+      "merge": "4a833857eac5afe170ebe8402a0285065d4fbe50",
+      "base": "5cc22c7ccdaeef276afbce7e01d19f7be47d0fc6",
+      "task_line": "- [ ] In `xmeasure/mappers/git_numstat.py`: implement `parse_numstat_line(line: str) -> FileChange | None` \u2014 `added<TAB>deleted<TAB>path`; binary `-<TAB>-<TAB>path` \u2192 added=0, deleted=0; rename paths like `src/{old => new}.py` kept verbatim; blank or malformed \u2192 None. Pure function: no I/O, no network, no datetime.now(), no environment variables. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_git_numstat.py\" passes",
+      "target": "xmeasure/mappers/git_numstat.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_git_numstat.py\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 1,
+        "duration_s": 108.5
+      }
+    },
+    {
+      "id": "xmeasure-mappers-ai-attributio-b2721c3",
+      "merge": "b2721c3b6a2a8c260ab14ae880fea3cfbea3a215",
+      "base": "e0e51987847d851c36d5162e958db0d0434b15bf",
+      "task_line": "- [ ] In `xmeasure/mappers/ai_attribution.py`: implement `commit_is_ai(subject: str, body: str, author_email: str, ai_author_emails: tuple[str, ...]) -> bool` \u2014 true if `re.search(AI_TRAILER_PATTERN, body)` (from xmeasure.constants; it is already MULTILINE + case-insensitive), or `re.match(XANADU_TASK_SUBJECT_PATTERN, subject)`, or author_email in ai_author_emails. A mention of 'Claude' outside a Co-Authored-By trailer is NOT AI. Pure function: no I/O, no network, no datetime.now(), no environment variables. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_ai_attribution.py::test_commit_trailer_task_subject_and_email\" passes",
+      "target": "xmeasure/mappers/ai_attribution.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_ai_attribution.py::test_commit_trailer_task_subject_and_email\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 1,
+        "duration_s": 93.6
+      }
+    },
+    {
+      "id": "xmeasure-mappers-ai-attributio-dc7ab03",
+      "merge": "dc7ab03f276e6e36491c73fb6df1711f56088d52",
+      "base": "4e776e734edaa322d3359f3970c20bb225761c88",
+      "task_line": "- [ ] In `xmeasure/mappers/ai_attribution.py`: implement `pr_is_ai(title: str, body: str | None, labels: tuple[str, ...], ai_labels: tuple[str, ...]) -> bool` \u2014 AI_TRAILER_PATTERN found in title + newline + (body or ''), or any label in ai_labels. Pure function: no I/O, no network, no datetime.now(), no environment variables. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_ai_attribution.py::test_pr_body_or_label\" passes",
+      "target": "xmeasure/mappers/ai_attribution.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_ai_attribution.py::test_pr_body_or_label\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 2,
+        "duration_s": 334.4
+      }
+    },
+    {
+      "id": "xmeasure-metrics-first-review-a7f5057",
+      "merge": "a7f5057f5c4e94e75f42f2963e7f270827e9e0b7",
+      "base": "ef871edd3eb6f6cbbe86dbd06c5fa6c30e214e53",
+      "task_line": "- [ ] In `xmeasure/metrics/first_review.py`: implement `first_review_times(reviews: tuple[Review, ...]) -> dict[tuple[str, int], datetime]` \u2014 key (review.repo, review.pr_number), value the EARLIEST submitted_at. Pure function: no I/O, no network, no datetime.now(), no environment variables. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_m_first_review.py\" passes",
+      "target": "xmeasure/metrics/first_review.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_m_first_review.py\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 2,
+        "duration_s": 269.8
+      }
+    },
+    {
+      "id": "xmeasure-metrics-throughput-py-05e09ef",
+      "merge": "05e09efea85e7279fc4b7b9085625ff25058ac4a",
+      "base": "c25616b04b7b347978977b4fa32a39b7a53e3202",
+      "task_line": "- [ ] In `xmeasure/metrics/throughput.py`: implement `throughput(prs: tuple[PullRequest, ...], window: Window) -> MetricResult` \u2014 merged PRs (merged_at not None, not is_draft, `window.contains(pr.merged_at)`) \u00f7 `window.weeks`; n = that count; metric id 'throughput'. Build the result with xmeasure.metrics.result.make_result (never MetricResult(...) directly); make_result applies MIN_SAMPLE and rounding. Pure function: no I/O, no network, no datetime.now(), no environment variables. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_m_throughput.py\" passes",
+      "target": "xmeasure/metrics/throughput.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_m_throughput.py\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 1,
+        "duration_s": 111.4
+      }
+    },
+    {
+      "id": "xmeasure-metrics-deploys-py-a907d7f",
+      "merge": "a907d7fde86505e104bc9a6ef53bd5957d93bab7",
+      "base": "0ca7ba3eada6b894196376e9231804e0d55b871c",
+      "task_line": "- [ ] In `xmeasure/metrics/deploys.py`: implement `deploy_times(ci_runs: tuple[CiRun, ...], releases: tuple[Release, ...]) -> tuple[tuple[datetime, ...], int]` \u2014 sorted completed_at of CiRuns with is_deploy and conclusion == CiConclusion.SUCCESS, basis 1; if none, sorted published_at of releases that are not is_prerelease, basis 2; else ((), 0). Pure function: no I/O, no network, no datetime.now(), no environment variables. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_m_deploys.py\" passes",
+      "target": "xmeasure/metrics/deploys.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_m_deploys.py\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 3,
+        "duration_s": 413.6
+      }
+    },
+    {
+      "id": "xmeasure-metrics-pr-size-py-dfa4dcd",
+      "merge": "dfa4dcd0ea21af4804680d191ff5ceb99b78f0db",
+      "base": "cbed1e92f143702bc0484018a652ff6a3217f750",
+      "task_line": "- [ ] In `xmeasure/metrics/pr_size.py`: implement `pr_size(prs: tuple[PullRequest, ...], window: Window) -> MetricResult` \u2014 additions + deletions (as float) of PRs merged in the window; value median, detail p85; n = count. Build the result with xmeasure.metrics.result.make_result (never MetricResult(...) directly); make_result applies MIN_SAMPLE and rounding. Pure function: no I/O, no network, no datetime.now(), no environment variables. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_m_pr_size.py\" passes",
+      "target": "xmeasure/metrics/pr_size.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_m_pr_size.py\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 2,
+        "duration_s": 281.1
+      }
+    },
+    {
+      "id": "xmeasure-metrics-change-failur-c67d40f",
+      "merge": "c67d40fcf1c1f9fa20a8fc4c031e78ed628f8a09",
+      "base": "8af2fbeabfd44482748a72fc695374bc36a8df1c",
+      "task_line": "- [ ] In `xmeasure/metrics/change_failure_rate.py`: implement `change_failure_rate(ci_runs: tuple[CiRun, ...], releases: tuple[Release, ...], commits: tuple[Commit, ...], issues: tuple[Issue, ...], window: Window) -> MetricResult` \u2014 deploys (deploy_times) in the window; a deploy failed if any failure time f satisfies `deploy < f <= deploy + timedelta(days=FAILURE_WINDOW_DAYS)`; failures = committed_at of is_revert commits + created_at of production bugs (is_bug and found_in_production), even after the window end; value = failed \u00f7 deploys \u00d7 100 (None if no deploys); n = deploys. Build the result with xmeasure.metrics.result.make_result (never MetricResult(...) directly); make_result applies MIN_SAMPLE and rounding. Pure function: no I/O, no network, no datetime.now(), no environment variables. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_m_change_failure_rate.py\" passes",
+      "target": "xmeasure/metrics/change_failure_rate.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_m_change_failure_rate.py\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 1,
+        "duration_s": 176.9
+      }
+    },
+    {
+      "id": "xmeasure-metrics-build-health-af3de2c",
+      "merge": "af3de2cc5b4e822b64780d66a55bad22aa1593e5",
+      "base": "0d046ee7f870423487d764c34e3ad0c7a0fb6a60",
+      "task_line": "- [ ] In `xmeasure/metrics/build_health.py`: implement `build_health(ci_runs: tuple[CiRun, ...], window: Window) -> MetricResult` \u2014 completed runs = conclusion SUCCESS or FAILURE with completed_at in the window (CANCELLED/SKIPPED/OTHER ignored); value = SUCCESS share \u00d7 100; detail flaky_rate = share with attempt > 1 \u00d7 100; n = completed runs. Build the result with xmeasure.metrics.result.make_result (never MetricResult(...) directly); make_result applies MIN_SAMPLE and rounding. Pure function: no I/O, no network, no datetime.now(), no environment variables. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_m_build_health.py\" passes",
+      "target": "xmeasure/metrics/build_health.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_m_build_health.py\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 2,
+        "duration_s": 312.9
+      }
+    },
+    {
+      "id": "xmeasure-metrics-share-in-test-529ab45",
+      "merge": "529ab45c55d65a5b02240a781aee3d89d28a2070",
+      "base": "c28561fa530a879a4dde69e3b4b086fe232fcef4",
+      "task_line": "- [ ] In `xmeasure/metrics/share_in_tests.py`: implement `share_in_tests(commits: tuple[Commit, ...], window: Window, test_globs: tuple[str, ...]) -> MetricResult` for metric id 'test_share' (the function name must NOT start with test_) \u2014 non-merge commits in the window; lines ADDED in files whose path fnmatch-es any glob \u00f7 all lines added \u00d7 100 (None if 0); n = those commits. Build the result with xmeasure.metrics.result.make_result (never MetricResult(...) directly); make_result applies MIN_SAMPLE and rounding. Pure function: no I/O, no network, no datetime.now(), no environment variables. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_m_share_in_tests.py\" passes",
+      "target": "xmeasure/metrics/share_in_tests.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_m_share_in_tests.py\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 1,
+        "duration_s": 169.5
+      }
+    },
+    {
+      "id": "xmeasure-config-repos-py-5a8ba47",
+      "merge": "5a8ba47d9bdb3a76b2ce4864454a2230017edb66",
+      "base": "139b990317cc2e0ad75c3044bcc10164298574e1",
+      "task_line": "- [ ] In `xmeasure/config/repos.py`: implement `parse_repos(raw: list, base_dir: Path) -> tuple[RepoConfig, ...]` \u2014 at least one entry; each needs `path`; optional `github` must contain '/'; relative paths resolve with `(base_dir / p).resolve()`, absolute paths kept. ConfigError messages start with `repos`. RepoConfig(path=..., github=...) keyword-only. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_config_repos.py\" passes",
+      "target": "xmeasure/config/repos.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_config_repos.py\"",
+      "history": {
+        "model": "qwen3.8:27b",
+        "attempts": 1,
+        "duration_s": 1990.0
+      }
+    },
+    {
+      "id": "xmeasure-config-top-level-py-5785b48",
+      "merge": "5785b48e8d8d1cebbcae268146e4900ebbbce7e7",
+      "base": "4e36f6cc94a1ec81255fab7763bf1c3431ce5a11",
+      "task_line": "- [ ] In `xmeasure/config/top_level.py`: define `TOP_LEVEL_KEYS` (frozenset of: team store windows repos github jira xanadu ai exclude_authors test_globs survey) and implement `check_top_level(raw: dict) -> None` \u2014 the first unknown key (sorted) raises ConfigError whose message starts with that key; missing/empty team or store raises ConfigError starting with `team` / `store`. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_config_top_level.py\" passes",
+      "target": "xmeasure/config/top_level.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_config_top_level.py\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 1,
+        "duration_s": 859.9
+      }
+    },
+    {
+      "id": "xmeasure-metrics-cycle-time-py-fb877b0",
+      "merge": "fb877b02646aac39ea5e7db00b836f6c4592783f",
+      "base": "9f79cbcdb920b658664191064b0c78c9ad4abd3b",
+      "task_line": "- [ ] In `xmeasure/metrics/cycle_time.py`: implement `cycle_time(prs: tuple[PullRequest, ...], reviews: tuple[Review, ...], window: Window) -> MetricResult` \u2014 over PRs merged in the window: start = first_commit_at or created_at; hours = (merged_at - start).total_seconds()/3600; value = stats.median(hours); detail: p85 = stats.percentile(hours, 85), coding = median(created_at - start), review_wait = median(first review - created_at), review_to_merge = median(merged_at - first review) using first_review_times keyed by (pr.repo, pr.number); PRs without a review are left out of the two review medians only. n = merged PRs. Build the result with xmeasure.metrics.result.make_result (never MetricResult(...) directly); make_result applies MIN_SAMPLE and rounding. Pure function: no I/O, no network, no datetime.now(), no environment variables. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_m_cycle_time.py\" passes",
+      "target": "xmeasure/metrics/cycle_time.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_m_cycle_time.py\"",
+      "history": {
+        "model": "qwen2.5-coder:14b",
+        "attempts": 1,
+        "duration_s": 425.6
+      }
+    },
+    {
+      "id": "xmeasure-store-commits-io-py-247856d",
+      "merge": "247856d3406a99f7e53f01f8371b59e1e28129ae",
+      "base": "9604132b492371645eaf2f50312161dea1bc0113",
+      "task_line": "- [ ] In `xmeasure/store/commits_io.py`: implement the pair `save_commits(conn, commits: tuple[Commit, ...]) -> int` / `load_commits(conn) -> tuple[Commit, ...]` \u2014 commits go to table `commits`, each Commit.files entry to table `commit_files` (the ODD ONE OUT: files live in their own table; on save delete that commit's old rows first). INSERT OR REPLACE for idempotence; datetimes via xmeasure.store.codec to_iso/from_iso; booleans 0/1; files keep insertion order on load. Construct dataclasses with keyword arguments only. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_store_commits_io.py\" passes",
+      "target": "xmeasure/store/commits_io.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_store_commits_io.py\"",
+      "history": {
+        "model": "qwen3.8:27b",
+        "attempts": 1,
+        "duration_s": 1236.6
+      }
+    },
+    {
+      "id": "xmeasure-store-reviews-io-py-3e339b1",
+      "merge": "3e339b17ebc1a5568af4865e5ffc84a0886a1b28",
+      "base": "4f044de623e69f336486b2a619d21d4698c5c7cc",
+      "task_line": "- [ ] In `xmeasure/store/reviews_io.py`: implement the pair `save_reviews(conn, reviews: tuple[Review, ...]) -> int` / `load_reviews(conn) -> tuple[Review, ...]` \u2014 table `reviews`; store `state.value`, load with `ReviewState(value)`. Construct dataclasses with keyword arguments only. \u2014 done when: its tests pass; task gate: .venv/bin/python -m pytest -q \"tests/unit/test_store_reviews_io.py\" passes",
+      "target": "xmeasure/store/reviews_io.py",
+      "gate": ".venv/bin/python -m pytest -q \"tests/unit/test_store_reviews_io.py\"",
+      "history": {
+        "model": "qwen3.8:27b",
+        "attempts": 1,
+        "duration_s": 848.8
+      }
+    }
+  ]
+}

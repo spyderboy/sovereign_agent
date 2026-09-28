@@ -119,7 +119,7 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
                    is_test: bool = False,
                    project_root: str = ".") -> tuple[dict[str, str], dict]:
     """Ask Ollama to implement the task. Returns {rel_path: new_content}."""
-    model = model or EXECUTOR_MODEL
+    model = model or TIER1_MODEL
     # Split context: editable files get full content; locked files get a compact
     # read-only API stub so the model knows what classes/constructors exist without
     # being able to overwrite them.  Previously locked files were stripped entirely,

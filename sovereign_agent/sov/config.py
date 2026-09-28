@@ -121,6 +121,17 @@ OLLAMA_URL = _s("LOCAL_MODEL_URL", _RUN.get("ollama_url"),
 # divergent 'main' while the real integration branch is left behind.
 MAIN_BRANCH = _s("MAIN_BRANCH", _RUN.get("main_branch"), "main")
 
+# Ollama's `think` switch for reasoning models (qwen3.x, deepseek-r1…). Unset
+# (the default) sends nothing, so the model decides. 2026-09-28: qwen3.8:27b
+# produced 0 answer characters in 5 min on a planner call and ran every coding
+# attempt to its timeout — consistent with thinking until the budget ran out,
+# since Ollama returns thinking apart from the answer. Profile: [run] think.
+_think_env = os.getenv("OLLAMA_THINK")
+OLLAMA_THINK: bool | None = (
+    _think_env.strip().lower() in ("1", "true", "yes", "on") if _think_env not in (None, "")
+    else (bool(_RUN["think"]) if "think" in _RUN else None)
+)
+
 # ── The ladder ───────────────────────────────────────────────────────────────
 TIER1_MODEL = _s("TIER1_MODEL", _tier(1, "model", None), "qwen2.5-coder:14b")
 TIER2_MODEL = _s("TIER2_MODEL", _tier(2, "model", None), "qwen2.5-coder:32b")

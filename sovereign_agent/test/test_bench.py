@@ -64,7 +64,10 @@ def test_prepare_isolates_the_case(tmp_path, monkeypatch):
     (src / ".venv").mkdir()
     monkeypatch.setattr(bench, "WORK", tmp_path / "work")
     case = {"id": "a-case", "base": base, "task_line": LINE_A}
-    wd = bench.prepare(case, {"project": str(src), "main_branch": "main", "link": [".venv"]})
+    wd = bench.prepare(case, {"project": str(src), "main_branch": "main", "link": [".venv"]},
+                       {"rag_enabled": True})
+    import json
+    assert json.loads((wd / ".sovereign_config.json").read_text())["rag_enabled"] is True
     text = (wd / "ROADMAP.md").read_text()
     assert text.count("- [ ] ") == 1 and LINE_A in text
     assert (wd / ".venv").is_symlink()

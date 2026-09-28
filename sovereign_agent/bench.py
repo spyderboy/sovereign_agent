@@ -203,7 +203,7 @@ def cmd_make(a) -> int:
 
 # ─── run ──────────────────────────────────────────────────────────────────────
 
-def prepare(case: dict, suite: dict) -> Path:
+def prepare(case: dict, suite: dict, config: dict | None = None) -> Path:
     wd = WORK / case["id"]
     shutil.rmtree(wd, ignore_errors=True)
     wd.parent.mkdir(parents=True, exist_ok=True)
@@ -223,13 +223,20 @@ def prepare(case: dict, suite: dict) -> Path:
                 f.write(f"\n/{link}\n")
     rm = wd / "ROADMAP.md"
     rm.write_text(only_open(rm.read_text(), case["task_line"]))
-    git(wd, "commit", "-qam", f"bench: only {case['id']} open")
+    if config:                                  # e.g. {"rag_enabled": true}
+        cp = wd / ".sovereign_config.json"
+        cfg = json.loads(cp.read_text()) if cp.exists() else {}
+        cfg.update(config)
+        cp.write_text(json.dumps(cfg, indent=2) + "\n")
+    git(wd, "add", "ROADMAP.md", *([".sovereign_config.json"] if config else []))
+    git(wd, "commit", "-qm", f"bench: only {case['id']} open")
     (wd / "logs").mkdir(exist_ok=True)
     return wd
 
 
-def run_case(case: dict, suite: dict, env: dict, timeout: int, outdir: Path) -> dict:
-    wd = prepare(case, suite)
+def run_case(case: dict, suite: dict, env: dict, timeout: int, outdir: Path,
+             config: dict | None = None) -> dict:
+    wd = prepare(case, suite, config)
     log = outdir / f"{case['id']}.log"
     t0 = time.time()
     timed_out = False
@@ -290,10 +297,14 @@ def cmd_run(a) -> int:
     for kv in a.set:
         k, _, v = kv.partition("=")
         env[k] = v
+    config = {}
+    for kv in a.config:
+        k, _, v = kv.partition("=")
+        config[k] = json.loads(v)
     label = a.label or a.profile
     outdir = RESULTS / f"{datetime.now():%Y%m%d-%H%M}-{slug(label, 30)}"
     outdir.mkdir(parents=True, exist_ok=True)
-    meta = {"suite": a.suite, "profile": a.profile, "set": a.set, "label": label,
+    meta = {"suite": a.suite, "profile": a.profile, "set": a.set, "config": config, "label": label,
             "started": datetime.now().isoformat(timespec="seconds"),
             "forced_during_live_run": bool(live), "cases": [c["id"] for c in cases]}
     (outdir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
@@ -304,7 +315,7 @@ def cmd_run(a) -> int:
     with open(outdir / "results.jsonl", "w") as rf:
         for i, c in enumerate(cases, 1):
             print(f"[{i}/{len(cases)}] {c['id']} …", end=" ", flush=True)
-            rec = run_case(c, suite, env, a.timeout, outdir)
+            rec = run_case(c, suite, env, a.timeout, outdir, config)
             rec["tag"] = tag_of(c)
             records.append(rec)
             rf.write(json.dumps(rec) + "\n")
@@ -387,6 +398,9 @@ def main() -> int:
     r.add_argument("--profile", required=True)
     r.add_argument("--set", action="append", default=[], metavar="KEY=VAL",
                    help="env override for work.py, e.g. OLLAMA_THINK=0 (repeatable)")
+    r.add_argument("--config", action="append", default=[], metavar="KEY=JSON",
+                   help="override a .sovereign_config.json key in each case clone, "
+                        "e.g. rag_enabled=true (repeatable)")
     r.add_argument("--label")
     r.add_argument("--cases", help="comma-separated case ids")
     r.add_argument("--tag", choices=["easy", "hard", "unknown"])

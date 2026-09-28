@@ -134,8 +134,15 @@ def _branch_start(project_root: str, task_idx: int, task: str) -> str | None:
     _git(["clean", "-fd", "-e", "logs"], project_root)
     r = _git(["checkout", "-b", branch], project_root)
     if r.returncode != 0:
-        # Branch exists from a previous aborted run — reuse it
-        _git(["checkout", "-f", branch], project_root)
+        # Branch exists from a previous aborted run. Reuse it only if it holds
+        # work of its own (committed but never merged); a branch with nothing
+        # beyond main is just a stale pointer to an OLD main, and working on it
+        # would validate against code main has since moved past (2026-09-28).
+        ahead = _git(["rev-list", "--count", f"{MAIN_BRANCH}..{branch}"], project_root)
+        if ahead.returncode == 0 and ahead.stdout.strip() == "0":
+            _git(["checkout", "-f", "-B", branch, MAIN_BRANCH], project_root)
+        else:
+            _git(["checkout", "-f", branch], project_root)
     return branch
 
 

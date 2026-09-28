@@ -215,3 +215,25 @@ def test_same_file_tasks_stay_on_one_worker_even_split_or_nonadjacent():
     b_owner = [w for w in (0, 1) if 4 in by_worker[w]][0]
     assert 7 in by_worker[b_owner]
     assert by_worker[0] and by_worker[1]
+
+
+def test_stale_empty_branch_is_rebuilt_from_current_main(repo):
+    """A leftover task branch with nothing of its own must not pin an old main."""
+    ns = _load(None)
+    _sh(repo, "branch", "task-1-task-1")            # points at the initial commit
+    Path(repo, "new.py").write_text("n = 1\n")
+    _sh(repo, "add", "-A")
+    _sh(repo, "commit", "-qm", "main moved on")
+    ns["_branch_start"](str(repo), 1, "task 1")
+    assert Path(repo, "new.py").exists()            # working on today's main
+
+
+def test_branch_with_unmerged_work_is_reused(repo):
+    ns = _load(None)
+    _sh(repo, "checkout", "-q", "-b", "task-1-task-1")
+    Path(repo, "work.py").write_text("w = 1\n")
+    _sh(repo, "add", "-A")
+    _sh(repo, "commit", "-qm", "committed, never merged")
+    _sh(repo, "checkout", "-q", "main")
+    ns["_branch_start"](str(repo), 1, "task 1")
+    assert Path(repo, "work.py").exists()           # the committed work survives

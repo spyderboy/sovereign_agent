@@ -98,8 +98,15 @@ reset_tree() {
         echo -e "    git -C $PROJECT checkout -f main && git -C $PROJECT clean -fd${RESET}"
         exit 1
     fi
+    # Parallel workers' worktrees (~/.cache/xanadu-worktrees/…) outlive a pass
+    # killed at its cap, and git refuses to delete a branch a worktree still
+    # has checked out — so remove them before the branch sweep (2026-09-28:
+    # a capped pass left two stale task branches behind).
     ( cd "$PROJECT" \
       && find .git -name '*.lock' -delete \
+      && { git worktree list --porcelain | awk '/^worktree /{sub(/^worktree /,""); print}' \
+           | grep 'xanadu-worktrees' | while IFS= read -r wt; do git worktree remove --force "$wt"; done; \
+           git worktree prune; } \
       && git checkout -f main \
       && git clean -fd \
       && git for-each-ref --format='%(refname:short)' 'refs/heads/task-*' \
@@ -199,6 +206,9 @@ for cycle in $(seq 1 "$MAX_CYCLES"); do
 done
 
 reset_tree
+# monitor.py watches sweep.log for this line to tell a finished sweep from a
+# crashed one — keep the wording stable.
+say "sweep finished — $(done_count) done, $(open_count) open"
 echo
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 echo -e "${BOLD}  Sweep finished${RESET}  $START_DONE → $(done_count) of $(grep -cE '^- \[[ x]\]' "$PROJECT/ROADMAP.md")"

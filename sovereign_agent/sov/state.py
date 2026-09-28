@@ -11,6 +11,10 @@ from sov.config import CLAUDE_ENABLED as _CLAUDE_ENABLED_DEFAULT
 # The CLI may force Claude escalation off for this run (see work.main).
 CLAUDE_ENABLED = _CLAUDE_ENABLED_DEFAULT
 
+# Per-attempt thinking override set by the runner (OLLAMA_THINK_RETRIES);
+# None means use OLLAMA_THINK.
+THINK_OVERRIDE: bool | None = None
+
 
 # ─── Parallel-worker isolation (2026-09-28) ───────────────────────────────────
 # Parallel workers used to share ONE working tree and git index with no

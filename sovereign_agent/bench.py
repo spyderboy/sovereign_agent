@@ -90,6 +90,22 @@ def slug(text: str, n: int = 40) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:n].strip("-")
 
 
+def spread(cases: list[dict], n: int) -> list[dict]:
+    """n cases spread across as many different target files as possible:
+    round-robin over targets in suite order (deterministic). "The first 4
+    hard cases" were once all timeparse.py functions."""
+    groups: dict[str, list[dict]] = {}
+    for c in cases:
+        groups.setdefault(c.get("target") or c["id"], []).append(c)
+    out, depth = [], 0
+    while len(out) < n and any(len(g) > depth for g in groups.values()):
+        for g in groups.values():
+            if len(g) > depth and len(out) < n:
+                out.append(g[depth])
+        depth += 1
+    return out
+
+
 def summarize(records: list[dict]) -> dict:
     passed = [r for r in records if r["passed"]]
     first = [r for r in passed if r.get("attempts") == 1]
@@ -288,6 +304,8 @@ def cmd_run(a) -> int:
         cases = [c for c in cases if c["id"] in want]
     if a.tag:
         cases = [c for c in cases if tag_of(c) == a.tag]
+    if a.sample:
+        cases = spread(cases, a.sample)
     if a.limit:
         cases = cases[:a.limit]
 
@@ -419,6 +437,7 @@ def main() -> int:
     r.add_argument("--cases", help="comma-separated case ids")
     r.add_argument("--tag", choices=["easy", "hard", "unknown"])
     r.add_argument("--limit", type=int)
+    r.add_argument("--sample", type=int, help="N cases spread across different target files")
     r.add_argument("--timeout", type=int, default=3900, help="seconds per case")
     r.add_argument("--force", action="store_true", help="run even while a sweep is live")
     r.add_argument("--stop-at", metavar="HH:MM", help="start no new case after this time")

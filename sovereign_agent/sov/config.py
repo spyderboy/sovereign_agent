@@ -132,6 +132,17 @@ OLLAMA_THINK: bool | None = (
     else (bool(_RUN["think"]) if "think" in _RUN else None)
 )
 
+# Thinking for attempts 2+ of a task only (attempt 1 keeps OLLAMA_THINK).
+# For "think hard once, retry fast": a benchmark on 2026-09-28 showed thinking
+# is what makes qwen3.8's first answer right (4/4 vs 2/4), but on hard tasks a
+# thinking attempt can run to the call timeout without answering. Profile:
+# [run] think_retries.
+_think_r_env = os.getenv("OLLAMA_THINK_RETRIES")
+OLLAMA_THINK_RETRIES: bool | None = (
+    _think_r_env.strip().lower() in ("1", "true", "yes", "on") if _think_r_env not in (None, "")
+    else (bool(_RUN["think_retries"]) if "think_retries" in _RUN else None)
+)
+
 # ── The ladder ───────────────────────────────────────────────────────────────
 TIER1_MODEL = _s("TIER1_MODEL", _tier(1, "model", None), "qwen2.5-coder:14b")
 TIER2_MODEL = _s("TIER2_MODEL", _tier(2, "model", None), "qwen2.5-coder:32b")

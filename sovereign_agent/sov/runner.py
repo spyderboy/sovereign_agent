@@ -13,6 +13,7 @@ import prompt_artifacts
 import re
 import time
 from sov.config import (
+    OLLAMA_THINK_RETRIES,
     CLAUDE_MODEL,
     MAX_TASK_SECONDS,
     MODEL_CTX,
@@ -398,6 +399,8 @@ def run_task(task: str, project_root: str, log_file: str,
         return True
 
     for attempt in range(1, MAX_RETRIES + 1):
+        state.THINK_OVERRIDE = (OLLAMA_THINK_RETRIES
+                                if attempt > 1 and OLLAMA_THINK_RETRIES is not None else None)
         heartbeat(f"task {task_idx} attempt {attempt}")
         # ── Absolute hard ceiling ────────────────────────────────────────────
         # Checked first, before any branch (timeout/bad-pattern/no-output/thrash)

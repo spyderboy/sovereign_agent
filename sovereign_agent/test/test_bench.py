@@ -76,3 +76,10 @@ def test_prepare_isolates_the_case(tmp_path, monkeypatch):
     assert status.strip() == "?? logs/" or status.strip() == ""   # clean apart from logs
     remotes = subprocess.run(["git", "remote"], cwd=wd, capture_output=True, text=True).stdout
     assert remotes.strip() == ""                                   # can never push back
+
+
+def test_spread_prefers_different_files():
+    cases = [{"id": f"t{i}", "target": t} for i, t in
+             enumerate(["a.py", "a.py", "a.py", "b.py", "c.py", "c.py"])]
+    assert [c["id"] for c in bench.spread(cases, 3)] == ["t0", "t3", "t4"]
+    assert [c["id"] for c in bench.spread(cases, 5)] == ["t0", "t3", "t4", "t1", "t5"]

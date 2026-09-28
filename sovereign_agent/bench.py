@@ -39,7 +39,7 @@ import shutil
 import statistics
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -314,6 +314,9 @@ def cmd_run(a) -> int:
     records = []
     with open(outdir / "results.jsonl", "w") as rf:
         for i, c in enumerate(cases, 1):
+            if a.stop_at and past(a.stop_at, meta["started"]):
+                print(f"stop-at {a.stop_at} reached — {len(cases) - i + 1} case(s) not started")
+                break
             print(f"[{i}/{len(cases)}] {c['id']} …", end=" ", flush=True)
             rec = run_case(c, suite, env, a.timeout, outdir, config)
             rec["tag"] = tag_of(c)
@@ -331,6 +334,17 @@ def cmd_run(a) -> int:
     if s["harness_lied"]:
         print(f"⚠ {s['harness_lied']} case(s) marked done whose gate fails")
     return 0
+
+
+def past(stop_at: str, started_iso: str) -> bool:
+    """True once the clock passes HH:MM, counting from the run's start (an
+    08:00 stop set at 18:00 means tomorrow morning)."""
+    started = datetime.fromisoformat(started_iso)
+    hh, mm = map(int, stop_at.split(":"))
+    stop = started.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if stop <= started:
+        stop += timedelta(days=1)
+    return datetime.now() >= stop
 
 
 def tag_of(case: dict) -> str:
@@ -407,6 +421,7 @@ def main() -> int:
     r.add_argument("--limit", type=int)
     r.add_argument("--timeout", type=int, default=3900, help="seconds per case")
     r.add_argument("--force", action="store_true", help="run even while a sweep is live")
+    r.add_argument("--stop-at", metavar="HH:MM", help="start no new case after this time")
     c = sub.add_parser("compare", help="compare two runs case by case")
     c.add_argument("a")
     c.add_argument("b")

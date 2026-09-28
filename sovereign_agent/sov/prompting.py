@@ -8,6 +8,7 @@ import json
 import os
 import re
 from sov.config import (
+    CALL_TIMEOUT_S,
     TIER1_MODEL,
     TIER2_MODEL,
     TIER3_MODEL,
@@ -318,7 +319,7 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
     # model fits in unified memory — this can take 20+ min when RAM is tight).
     # (3-4 min to load + 10-12 min to generate a full file).
     size_gb = _model_size_gb(model)
-    coding_timeout = 1800 if size_gb >= _LARGE_MODEL_THRESHOLD_GB else 600
+    coding_timeout = CALL_TIMEOUT_S or (1800 if size_gb >= _LARGE_MODEL_THRESHOLD_GB else 600)
     raw = ollama(model, system_prompt, user_prompt, timeout=coding_timeout)
     call_info = {"system": system_prompt, "user": user_prompt, "raw": raw}
 

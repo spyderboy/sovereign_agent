@@ -38,6 +38,7 @@ ctx    = 16384
 
 [budget]
 task_ceiling_s      = 3600
+call_timeout_s      = 900     # one attempt may generate for at most 15 min
 attempts_tier1      = 3
 attempts_mid        = 2
 attempts_last       = 2

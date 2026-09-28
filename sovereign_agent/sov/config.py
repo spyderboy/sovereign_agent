@@ -226,6 +226,13 @@ RETRY_BUDGET_MULT = _f("RETRY_BUDGET_MULT", _BUDGET.get("retry_mult"), 2.0)
 # bad-pattern and no-output branches never consulted a budget at all.
 MAX_TASK_SECONDS = _i("MAX_TASK_SECONDS", _BUDGET.get("task_ceiling_s"), 3600)
 
+# Wall-clock limit on ONE coding call (one attempt's generation). 0 keeps the
+# built-in size-based default (1800s for large models, 600s otherwise).
+# 2026-09-28: a qwen3.8:27b attempt generated for the full 30 minutes without
+# finishing, burning a quarter of a 2-hour strong pass on one task; the task
+# ceiling alone could not stop it because it is only checked between attempts.
+CALL_TIMEOUT_S = _i("CALL_TIMEOUT_S", _BUDGET.get("call_timeout_s"), 0)
+
 # Validation failures naming NO file this task wrote, before it is parked for a
 # human rather than climbing the ladder. Cumulative, not consecutive — see
 # work.py's park block.

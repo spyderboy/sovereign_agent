@@ -1125,7 +1125,62 @@ def _extract_api_stub(path: str, content: str, max_chars: int = 1500) -> str:
         return content[:max_chars]
     if ext in (".ts", ".tsx", ".js", ".jsx", ".mjs"):
         return _extract_ts_api_stub(content, max_chars=max_chars)
+    if ext == ".py":
+        return _extract_py_api_stub(content, max_chars=max_chars)
     return _extract_dart_api_stub(content, max_chars=min(max_chars, 800))
+
+
+def _extract_py_api_stub(content: str, max_chars: int = 1500) -> str:
+    """Read-only API surface of a Python file, via the ast module.
+
+    2026-09-28: .py files fell through to the Dart extractor and produced an
+    empty stub — the GalaxicanJS failure mode (model never sees the locked
+    types, invents the API). Keeps module constants WITH values, classes /
+    dataclasses with their annotated fields and enum members, and every
+    function / method signature (names, annotations, defaults) with its first
+    docstring line. Bodies are dropped. Unparseable source is returned raw.
+    """
+    import ast as _ast
+
+    try:
+        tree = _ast.parse(content)
+    except SyntaxError:
+        return content[:max_chars]
+
+    def _sig(fn, indent: str) -> str:
+        prefix = "async def" if isinstance(fn, _ast.AsyncFunctionDef) else "def"
+        ret = f" -> {_ast.unparse(fn.returns)}" if fn.returns else ""
+        decos = "".join(f"{indent}@{_ast.unparse(d)}\n" for d in fn.decorator_list)
+        doc = _ast.get_docstring(fn)
+        note = f"  # {doc.strip().splitlines()[0]}" if doc else ""
+        return f"{decos}{indent}{prefix} {fn.name}({_ast.unparse(fn.args)}){ret}: ...{note}"
+
+    out: list[str] = []
+    for node in tree.body:
+        if isinstance(node, (_ast.Import, _ast.ImportFrom)):
+            continue
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            if not node.name.startswith("_"):
+                out.append(_sig(node, ""))
+        elif isinstance(node, _ast.ClassDef):
+            decos = "".join(f"@{_ast.unparse(d)}\n" for d in node.decorator_list)
+            bases = f"({', '.join(_ast.unparse(b) for b in node.bases)})" if node.bases else ""
+            lines = [f"{decos}class {node.name}{bases}:"]
+            for item in node.body:
+                if isinstance(item, (_ast.AnnAssign, _ast.Assign)):
+                    lines.append(f"    {_ast.unparse(item)}")
+                elif isinstance(item, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    if not item.name.startswith("_") or item.name in ("__init__", "__post_init__"):
+                        lines.append(_sig(item, "    "))
+            if len(lines) == 1:
+                lines.append("    ...")
+            out.append("\n".join(lines))
+        elif isinstance(node, (_ast.Assign, _ast.AnnAssign)):
+            out.append(_ast.unparse(node))
+        elif type(node).__name__ == "TypeAlias":  # `type X = ...` (3.12+)
+            out.append(_ast.unparse(node))
+
+    return "\n\n".join(out)[:max_chars]
 
 
 # Cache of (symbol->module, module->exports) per project_root. Cheap to build

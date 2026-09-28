@@ -21,26 +21,68 @@ Usage:
     python work.py --project ~/Code/astro_flux --start-at 3
     python work.py --project ~/Code/astro_flux --dry-run
 """
+
+from datetime import date
+from dotenv import load_dotenv
+from pathlib import Path
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import HTTPError
+from requests.exceptions import ReadTimeout
+import argparse
+import contextlib
+import fcntl
+import json
 import os
 import re
-import sys
-import json
-import time
-import fcntl
-import shutil
-import argparse
-import subprocess
-import contextlib
-import import_fixer
-from datetime import date
-from pathlib import Path
-from dotenv import load_dotenv
+import re as _re
 import requests
-from requests.exceptions import (
-    ReadTimeout, ConnectionError as RequestsConnectionError, HTTPError
-)
+import shutil
+import subprocess
+import sys
+import time
 
+# .env must load before any sov module reads the environment (sov.config
+# resolves models, tiers and budgets at import time).
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+
+from hints import BAD_PATTERNS
+from hints import ERROR_HINTS
+import grounders
+import hints
+import import_fixer
+import prompt_artifacts
+from sov.config import (  # noqa: E402
+    ADVISOR_MODEL,
+    BUDGET_CEILING_S,
+    BUDGET_FLOOR_S,
+    BUDGET_MULTIPLIER,
+    BUDGET_SAMPLES,
+    CLAUDE_MODEL,
+    GIT_BRANCHES,
+    MAIN_BRANCH,
+    MAX_TASK_SECONDS,
+    MODEL_CTX,
+    MODEL_PARAMS,
+    OLLAMA_URL,
+    PHASE_MAX_ATTEMPTS,
+    PHASE_STRIKE_LIMIT,
+    PLANNER_MODEL,
+    QUICK_PARAM_LIMIT_B,
+    RACE_ENABLED,
+    RACE_MODEL,
+    RETRY_BUDGET_MULT,
+    TIER1_MODEL,
+    TIER2_MAX_ATTEMPTS,
+    TIER2_MODEL,
+    TIER3_MODEL,
+    TIER4_MAX_ATTEMPTS,
+    TIER_MODELS,
+    ctx_conflicts as _ctx_conflicts,
+    describe as _describe_config,
+)
+from sov import state
+from sov.gitops import _branch_abandon, _branch_merge, _branch_start, _git, _merge_lock, _post_planning_commit, _setup_worker_worktree
+from sov.ui import BOLD, DIM, GREEN, RED, RESET, YELLOW
 
 
 class PromptTooLargeError(Exception):
@@ -56,24 +98,6 @@ class PromptTooLargeError(Exception):
             f"Prompt truncated: {token_count} tokens used {token_count/limit*100:.0f}% "
             f"of {limit}-token context window"
         )
-
-
-# ── Configuration ─────────────────────────────────────────────────────────────
-# Models, tiers, attempts and budgets now live in sov/config.py, selected by a
-# profile file (profiles/<name>.toml) via SOVEREIGN_PROFILE, with environment
-# variables overriding both. Changing the ladder is a data edit, not a code
-# edit to this file.
-from sov.config import (                                        # noqa: E402
-    OLLAMA_URL, MAIN_BRANCH,
-    TIER1_MODEL, TIER2_MODEL, TIER3_MODEL, TIER4_MODEL, TIER_MODELS,
-    QUICK_PARAM_LIMIT_B, MODEL_PARAMS, MODEL_CTX,
-    PLANNER_MODEL, ADVISOR_MODEL, RACE_MODEL, RACE_ENABLED, GIT_BRANCHES,
-    CLAUDE_MODEL, CLAUDE_ENABLED,
-    PHASE_STRIKE_LIMIT, PHASE_MAX_ATTEMPTS, TIER2_MAX_ATTEMPTS, TIER4_MAX_ATTEMPTS,
-    BUDGET_SAMPLES, BUDGET_MULTIPLIER, BUDGET_FLOOR_S, BUDGET_CEILING_S,
-    RETRY_BUDGET_MULT, MAX_TASK_SECONDS, FOREIGN_PARK_LIMIT,
-    ctx_conflicts as _ctx_conflicts, describe as _describe_config,
-)
 
 _cw = _ctx_conflicts()
 if _cw:
@@ -133,13 +157,6 @@ def _get_advisor():
 MAX_RETRIES    = 50
 ROADMAP_PATH   = "ROADMAP.md"
 LOG_DIR        = "logs"
-
-BOLD   = "\033[1m"
-GREEN  = "\033[92m"
-YELLOW = "\033[93m"
-RED    = "\033[91m"
-DIM    = "\033[2m"
-RESET  = "\033[0m"
 
 # ─── Stall watchdog ───────────────────────────────────────────────────────────
 # The hard task ceiling is checked at the top of each attempt, so a worker that
@@ -532,7 +549,7 @@ def mark_done(task_line: str):
     """
     # Parallel workers: the mark goes to the primary checkout's ROADMAP (the
     # worktree's copy is a detached snapshot), under the merge lock.
-    roadmap = os.path.join(INTEGRATION_ROOT, ROADMAP_PATH) if INTEGRATION_ROOT else ROADMAP_PATH
+    roadmap = os.path.join(state.INTEGRATION_ROOT, ROADMAP_PATH) if state.INTEGRATION_ROOT else ROADMAP_PATH
     with _merge_lock():
         _mark_done_locked(roadmap, task_line)
 
@@ -561,7 +578,7 @@ def _commit_roadmap_mark(task_line: str, attempts: int = 4) -> None:
     attempt fails the mark is still on disk — but the next _branch_start
     will wipe it, so a persistent failure is printed loudly.
     """
-    cwd = INTEGRATION_ROOT or os.getcwd()
+    cwd = state.INTEGRATION_ROOT or os.getcwd()
     if not os.path.exists(os.path.join(cwd, ".git")):
         return
     msg = f"roadmap: mark done — {task_text(task_line)[:60]}"
@@ -911,19 +928,6 @@ class _LockedSet:
 
 
 LOCKED_FILES: _LockedSet = _LockedSet()
-
-# ─── Known bad patterns ───────────────────────────────────────────────────────
-# Checked against every proposed file before it is written to disk.
-# If matched, the file is rejected and the hint is appended to errors
-# so the 35B gets a precise, actionable correction on the next attempt.
-import re as _re
-# ─── Bad patterns & error hints ────────────────────────────────────────────────
-# Extracted to hints.py — import from there so each can be edited independently.
-import hints  # noqa: E402  — pack loader; see hints.py CONTRACT
-from hints import BAD_PATTERNS, ERROR_HINTS  # noqa: E402  (mutated in place)
-import grounding  # noqa: E402  — identifier whitelist gate for Go projects
-import grounders  # noqa: E402  — per-language grounding gate registry
-import prompt_artifacts  # noqa: E402  — grounding gate for model-written prompt text
 
 
 def apply_error_hints(error_output: str) -> str:
@@ -1571,7 +1575,7 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
         if _use_diff_mode else ""
     )
 
-    _role = _role_spec_for(PROJECT_LANGUAGE)
+    _role = _role_spec_for(state.PROJECT_LANGUAGE)
     _example_line = (
         f"  - Keys are file paths exactly as given (e.g. '{_role['example_path']}')\n"
         if _role["example_path"]
@@ -1753,7 +1757,7 @@ def write_changes(changes: dict[str, str], project_root: str,
         # Frozen-suite guard (Go projects): the acceptance tests are authored
         # once and locked (conformance/); workers must NEVER write *_test.go,
         # anywhere — a worker-written test could game its own acceptance gate.
-        if PROJECT_LANGUAGE == "go" and rel_path.endswith("_test.go"):
+        if state.PROJECT_LANGUAGE == "go" and rel_path.endswith("_test.go"):
             msg = (
                 f"SCOPE VIOLATION [{rel_path}]: this project's test suite is frozen "
                 f"(conformance/ is locked). Never write *_test.go files. Implement "
@@ -1851,7 +1855,7 @@ def write_changes(changes: dict[str, str], project_root: str,
         # 73% of failing attempts (invented imports and symbols) entirely
         # ungated. Language selection now lives in grounders.py; adding a
         # language does not mean editing this function.
-        _grounder = grounders.for_language(PROJECT_LANGUAGE)
+        _grounder = grounders.for_language(state.PROJECT_LANGUAGE)
         if not violations and _grounder.handles(rel_path):
             # Deterministic repairs BEFORE the check: Go models reliably drop
             # 1-2 closing braces on deeply nested functions ("unexpected EOF,
@@ -2008,11 +2012,6 @@ def update_api_guide(written_paths: list[str], changes: dict[str, str],
     print(f"  {DIM}📖 API guide updated ({len(new_entries)} new entries){RESET}")
 
 
-def _git(args: list[str], cwd: str) -> subprocess.CompletedProcess:
-    """Run a git command quietly. Never raises — caller checks returncode."""
-    return subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True)
-
-
 def _task_primary_file(t: str) -> str | None:
     # 2026-09-28: this only matched lib/ and test/ .dart paths, so on a
     # Python roadmap every task had no primary file, nothing chained, and
@@ -2045,316 +2044,6 @@ def _assign_chains(chains: list, stride: int, worker_id: int) -> list:
         if owner == worker_id:
             kept.append(c)
     return kept
-
-
-# ─── Parallel-worker isolation (2026-09-28) ───────────────────────────────────
-# Parallel workers used to share ONE working tree and git index with no
-# coordination: every worker's between-task `checkout -f` + `clean -fd` wiped
-# whatever another worker had written mid-attempt, and merges collided
-# ("Merging is not possible because you have unmerged files" — xmeasure's
-# first 2-worker sweep died on task 4 this way). Now, when stride > 1, each
-# worker runs in its own git worktree (under ~/.cache/xanadu-worktrees/, so
-# the primary checkout never sees it), on a detached HEAD at main's tip. Only
-# the primary checkout ever has main checked out, and every write to main —
-# task merges and ROADMAP [x] marks — happens there under an flock.
-# INTEGRATION_ROOT is None in single-worker mode, and everything below
-# degrades to the original behaviour.
-INTEGRATION_ROOT: str | None = None
-
-# Untracked directories a worktree needs from the primary checkout: logs must
-# stay shared (tier2 queue, velocity, traces), and validate/gate commands
-# reference in-tree toolchains like `.venv/bin/python`.
-_WORKTREE_SHARED = ("logs", ".venv", "venv", "node_modules", ".dart_tool")
-
-
-@contextlib.contextmanager
-def _merge_lock():
-    """Serialize writes to the integration branch across parallel workers.
-    Not re-entrant — never nest (flock on a second fd would self-deadlock)."""
-    if not INTEGRATION_ROOT:
-        yield
-        return
-    with open(os.path.join(INTEGRATION_ROOT, ".git", "xanadu-merge.lock"), "w") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
-
-
-def _to_main(root: str) -> None:
-    """Forced checkout of the integration branch's tip. In a worker worktree
-    this must be a detached checkout: git refuses to check out a branch that
-    is already checked out in another worktree (the primary)."""
-    if INTEGRATION_ROOT:
-        _git(["checkout", "-f", "--detach", MAIN_BRANCH], root)
-    else:
-        _git(["checkout", "-f", MAIN_BRANCH], root)
-
-
-def _setup_worker_worktree(primary: str, worker_id: int) -> str:
-    """Create (or recreate) this worker's private worktree and return its path."""
-    import atexit
-    # Outside the project AND outside any directory name a file scanner
-    # skips. The first version (2026-09-28) put worktrees under .git/, and
-    # all_source_files() / the grounders skip any path whose components
-    # include ".git" — so workers saw none of the project's own files and
-    # coded blind. ~/.cache/xanadu-worktrees/<project>-<hash>/w<N> is safe.
-    import hashlib
-    real = os.path.realpath(primary)
-    key = hashlib.sha1(real.encode()).hexdigest()[:8]
-    base = os.environ.get("XANADU_WORKTREE_ROOT") or os.path.join(
-        os.path.expanduser("~"), ".cache", "xanadu-worktrees")
-    wt = os.path.join(base, f"{os.path.basename(real)}-{key}", f"w{worker_id}")
-    _git(["worktree", "remove", "--force", wt], primary)
-    if os.path.exists(wt):
-        shutil.rmtree(wt)
-    _git(["worktree", "prune"], primary)
-    r = _git(["worktree", "add", "--detach", wt, MAIN_BRANCH], primary)
-    if r.returncode != 0:
-        print(f"{RED}✗ worker {worker_id}: could not create worktree: "
-              f"{r.stderr.strip()[:300]}{RESET}")
-        sys.exit(1)
-    # Share untracked essentials by symlink, and exclude the symlinks without
-    # a trailing slash — `.venv/` in .gitignore matches a directory, not a
-    # symlink, so `clean -fd` would otherwise delete them between tasks.
-    # info/exclude lives in the common git dir, so this is shared by the
-    # primary too, where the anchored names are equally harmless.
-    exclude_path = os.path.join(
-        wt, _git(["rev-parse", "--git-path", "info/exclude"], wt).stdout.strip())
-    try:
-        with open(exclude_path) as f:
-            existing = set(f.read().split())
-    except OSError:
-        existing = set()
-    new_lines = []
-    for name in _WORKTREE_SHARED:
-        src = os.path.join(primary, name)
-        if not os.path.exists(src) or os.path.exists(os.path.join(wt, name)):
-            continue  # absent, or tracked (already checked out in the worktree)
-        os.symlink(src, os.path.join(wt, name))
-        if f"/{name}" not in existing:
-            new_lines.append(f"/{name}")
-    if new_lines:
-        os.makedirs(os.path.dirname(exclude_path), exist_ok=True)
-        with open(exclude_path, "a") as f:
-            f.write("\n" + "\n".join(new_lines) + "\n")
-    atexit.register(lambda: _git(["worktree", "remove", "--force", wt], primary))
-    print(f"  {DIM}worker {worker_id}: isolated worktree {wt}{RESET}")
-    return wt
-
-
-def _branch_start(project_root: str, task_idx: int, task: str) -> str | None:
-    """Create an isolated branch for this task. Returns branch name or None if git unavailable."""
-    if not GIT_BRANCHES:
-        return None
-    if not os.path.exists(os.path.join(project_root, ".git")):
-        return None
-    slug = re.sub(r"[^a-z0-9]+", "-", task[:45].lower()).strip("-")
-    branch = f"task-{task_idx}-{slug}"
-    # Always start from main so branches don't stack on each other.
-    # MUST be a forced checkout: write_changes() writes the model's output
-    # straight to disk before validation ever runs, so the working tree is
-    # essentially always dirty by the time we get here. A plain `checkout
-    # main` silently no-ops on a dirty tree instead of erroring — it does
-    # NOT restore main's clean file contents — so a previous task's failed
-    # (never-committed) writes were surviving in the working tree and
-    # contaminating every task after it, even though the branches themselves
-    # forked cleanly from main at the git-ref level. Found 2026-07-13: task
-    # 4's abandoned squad_move.go (with a hallucinated import of a package
-    # that doesn't exist) kept failing go vet for tasks 8 and 10, neither of
-    # which had anything to do with squad_move.go.
-    _to_main(project_root)
-    # -e logs: never clean the logs/ dir — tier2_queue.jsonl, velocity.jsonl,
-    # the failure ledger etc. live there untracked; a bare `clean -fd` was
-    # deleting the --deep queue between tasks (2026-07-13).
-    _git(["clean", "-fd", "-e", "logs"], project_root)
-    r = _git(["checkout", "-b", branch], project_root)
-    if r.returncode != 0:
-        # Branch exists from a previous aborted run — reuse it
-        _git(["checkout", "-f", branch], project_root)
-    return branch
-
-
-def _branch_merge(project_root: str, branch: str, task_idx: int, task: str) -> bool:
-    """Commit the task changes, merge to the integration branch, delete the branch.
-
-    Returns False only in parallel mode when the merge conflicts with work
-    another worker landed first: the merge is aborted, main stays clean, and
-    the caller should requeue the task rather than mark it done.
-
-    Every step here is load-bearing: if `commit` or `merge` silently fails
-    (index.lock contention is the usual cause — seen 2026-08-21: a single
-    un-retried commit here lost a brief lock race and nothing checked the
-    return code, so two gate-passing tasks' worth of work sat uncommitted
-    until the *next* task's `_branch_start` ran `git clean -fd` and wiped
-    them — meanwhile `_commit_roadmap_mark`'s retry loop happened to outlast
-    the same contention, so ROADMAP.md showed both tasks done while the code
-    itself had silently vanished), the task must not be allowed to silently
-    disappear. Retry briefly like `_commit_roadmap_mark` does, then fail
-    loudly and stop rather than losing validated work.
-    """
-    def _run_with_retry(args: list[str], step_name: str, attempts: int = 4) -> subprocess.CompletedProcess:
-        r = _git(args, project_root)
-        for i in range(attempts - 1):
-            if r.returncode == 0:
-                return r
-            time.sleep(0.5 * (i + 1))
-            r = _git(args, project_root)
-        if r.returncode != 0:
-            print(f"  {RED}FATAL: git {step_name} failed for task {task_idx} after "
-                  f"{attempts} attempts — refusing to continue and risk losing this "
-                  f"task's work.{RESET}")
-            print(f"  {DIM}{r.stderr.strip()}{RESET}")
-            print(f"  Check for a stale .git/index.lock (lock contention or a prior "
-                  f"killed git/work.py process can leave one behind) and remove it, "
-                  f"then retry.")
-            sys.exit(1)
-        return r
-
-    _run_with_retry(["add", "-A"], "add")
-    # Nothing staged means main already satisfies this task — typically a
-    # sibling task on the same file wrote this function too (2026-09-28:
-    # xmeasure's parse_github_time landed inside the parse_jira_time task).
-    # The gate just passed against that code, so the task is done: there is
-    # nothing to commit or merge. `git commit` would exit 1 ("nothing to
-    # commit", empty stderr) and the retry wrapper would kill the whole run.
-    if _git(["diff", "--cached", "--quiet"], project_root).returncode == 0:
-        print(f"  {DIM}Already satisfied on {MAIN_BRANCH} — nothing to commit{RESET}")
-        _to_main(project_root)
-        _git(["branch", "-D", branch], project_root)
-        return True
-    _run_with_retry(["commit", "-m", f"task {task_idx}: {task[:72]}"], "commit")
-
-    if INTEGRATION_ROOT:
-        # Parallel: merge in the primary checkout, which alone has main
-        # checked out, while holding the merge lock.
-        with _merge_lock():
-            for i in range(4):
-                merge_r = _git(["merge", "--no-ff", branch, "-m", f"Merge task-{task_idx}"],
-                               INTEGRATION_ROOT)
-                if merge_r.returncode == 0 or "index.lock" not in merge_r.stderr:
-                    break
-                time.sleep(0.5 * (i + 1))
-            if merge_r.returncode != 0:
-                _git(["merge", "--abort"], INTEGRATION_ROOT)
-                _git(["checkout", "-f", MAIN_BRANCH], INTEGRATION_ROOT)
-        _to_main(project_root)
-        _git(["branch", "-D", branch], project_root)
-        if merge_r.returncode != 0:
-            print(f"  {YELLOW}⚠ merge into {MAIN_BRANCH} failed (conflict with another "
-                  f"worker's merge?) — aborted, task requeued: "
-                  f"{(merge_r.stdout + merge_r.stderr).strip()[:200]}{RESET}")
-            return False
-        return True
-
-    _git(["checkout", "-f", MAIN_BRANCH], project_root)
-
-    merge_r = _run_with_retry(
-        ["merge", "--no-ff", branch, "-m", f"Merge task-{task_idx}"], "merge"
-    )
-    if merge_r.returncode != 0:
-        # _run_with_retry already exited on failure; this branch is
-        # unreachable but kept for clarity if that behavior ever changes.
-        print(f"  Resolve manually: git checkout {MAIN_BRANCH} && git merge {branch}")
-        sys.exit(1)
-
-    _git(["branch", "-D", branch], project_root)
-    return True
-
-
-def _branch_abandon(project_root: str, branch: str) -> None:
-    """Discard a failed task branch and return to main.
-
-    Force + clean: this branch failed, so nothing it wrote — committed or
-    not — should be allowed to survive into main or leak into the next
-    task's working tree. See the note in _branch_start for why a plain
-    (non-forced) checkout isn't enough here.
-    """
-    _to_main(project_root)
-    _git(["clean", "-fd", "-e", "logs"], project_root)
-    _git(["branch", "-D", branch], project_root)
-
-
-def _post_planning_commit(project_root: str,
-                          files: list[str] | None = None) -> bool:
-    """Commit and push sprint planning artifacts so cloud workers can pull them.
-
-    Called after plan_week.py (or standup) generates ROADMAP.md + task_graph.json.
-    Only commits if there are actual staged changes — safe to call repeatedly.
-    Returns True if everything succeeded (or there was nothing to commit).
-    """
-    if not os.path.exists(os.path.join(project_root, ".git")):
-        print(f"  {YELLOW}No .git found in {project_root} — skipping sprint commit{RESET}")
-        return False
-
-    stage_targets = files or ["ROADMAP.md", "task_graph.json", ".roorules", "docs/"]
-    existing = [f for f in stage_targets
-                if os.path.exists(os.path.join(project_root, f))]
-    if not existing:
-        print(f"  {YELLOW}Nothing to commit (no planning files found){RESET}")
-        return False
-
-    _git(["add"] + existing, project_root)
-
-    # Bail out cleanly if nothing actually changed
-    staged = _git(["diff", "--cached", "--quiet"], project_root)
-    if staged.returncode == 0:
-        print(f"  {DIM}Sprint planning files unchanged — no commit needed{RESET}")
-        return True
-
-    today = date.today().isoformat()
-    commit_r = _git(["commit", "-m", f"sprint planning: {today}"], project_root)
-    if commit_r.returncode != 0:
-        print(f"  {YELLOW}git commit failed: {commit_r.stderr.strip()}{RESET}")
-        return False
-
-    print(f"  {GREEN}✓ Sprint plan committed ({', '.join(existing)}){RESET}")
-
-    push_r = _git(["push", "origin", "HEAD"], project_root)
-    if push_r.returncode != 0:
-        print(f"  {YELLOW}git push failed (no remote / auth issue?):\n"
-              f"    {push_r.stderr.strip()[:120]}{RESET}")
-        return False
-
-    print(f"  {GREEN}✓ Sprint plan pushed to origin — cloud workers can pull{RESET}")
-    return True
-
-
-# ─── Project config (.sovereign_config.json) ──────────────────────────────────
-
-# Per-project validation gates (language-agnostic). When non-empty, validate()
-# runs these shell commands (in order, cwd = project root, fail on nonzero
-# exit) INSTEAD of the built-in flutter/pytest/npm chain, and
-# snapshot_baseline_errors() skips its flutter-analyze baseline entirely.
-# Populated from .sovereign_config.json "validate_commands": list[str].
-PROJECT_VALIDATE_COMMANDS: list[str] = []
-
-# Project language from .sovereign_config.json "language" (default "dart").
-# Currently used to: extend bad-pattern checks to .go files, and block all
-# *_test.go writes in Go projects (their conformance suite is frozen).
-PROJECT_LANGUAGE: str = "dart"
-
-# Project identifier from .sovereign_config.json "project" (falls back to the
-# project directory's basename if the key is absent). Used to scope Firestore
-# lesson push/pull per-project — see _firestore_push_lessons/_firestore_pull_lessons.
-# Added 2026-07-13: before this, error_patterns/project_rules were pushed and
-# pulled with NO project field at all, so every project sharing this Firestore
-# project (FIRESTORE_PROJECT) drew from one global, unscoped pool. In practice
-# this meant a brand-new Go project pulled 433 Dart/Flutter-specific rules from
-# an older unrelated project on its very first run, silently re-contaminating
-# any local .roorules cleanup on every session start.
-PROJECT_ID: str = ""
-
-# Files fed as context to EVERY task, from .sovereign_config.json
-# "context_always_include". Added 2026-07-13: the key existed only as prose in
-# the config's "notes" — nothing implemented it, so Go workers never saw
-# types.go/vec.go/API.md and hallucinated struct fields and helpers.
-PROJECT_ALWAYS_INCLUDE: list[str] = []
-
-# RAG subsystem (rag_*.py), opt-in via .sovereign_config.json "rag_enabled".
-# Default off: existing projects are completely unaffected until they opt in.
-RAG_ENABLED: bool = False
 
 
 def _load_project_config(project_root: str) -> dict:
@@ -2462,10 +2151,9 @@ def _load_project_config(project_root: str) -> dict:
             ERROR_HINTS.append((_re.compile(entry["pattern"]), entry["hint"]))
 
     # ── Always-include context files ──────────────────────────────────────────
-    global PROJECT_ALWAYS_INCLUDE
     ai = cfg.get("context_always_include", [])
     if isinstance(ai, list) and all(isinstance(p, str) for p in ai):
-        PROJECT_ALWAYS_INCLUDE = list(ai)
+        state.PROJECT_ALWAYS_INCLUDE = list(ai)
         if ai:
             print(f"  {DIM}Loaded {len(ai)} always-include context file(s){RESET}")
             # The ladder is now data (profiles/*.toml + env). Print which one
@@ -2474,24 +2162,22 @@ def _load_project_config(project_root: str) -> dict:
             print(f"  {DIM}{_describe_config()}{RESET}")
 
     # ── RAG subsystem (opt-in) ─────────────────────────────────────────────────
-    global RAG_ENABLED
-    RAG_ENABLED = bool(cfg.get("rag_enabled", False))
-    if RAG_ENABLED:
+    state.RAG_ENABLED = bool(cfg.get("rag_enabled", False))
+    if state.RAG_ENABLED:
         print(f"  {DIM}RAG subsystem enabled — hybrid retrieval + failure-memory active{RESET}")
 
     # ── Per-project validation commands + language ────────────────────────────
-    global PROJECT_VALIDATE_COMMANDS, PROJECT_LANGUAGE, PROJECT_ID
     vc = cfg.get("validate_commands", [])
     if isinstance(vc, list) and vc and all(isinstance(c, str) for c in vc):
-        PROJECT_VALIDATE_COMMANDS = list(vc)
+        state.PROJECT_VALIDATE_COMMANDS = list(vc)
         print(f"  {DIM}Loaded {len(vc)} project validate command(s) — "
               f"built-in flutter/pytest/npm gates disabled{RESET}")
     lang = cfg.get("language")
     if isinstance(lang, str) and lang:
-        PROJECT_LANGUAGE = lang.lower()
+        state.PROJECT_LANGUAGE = lang.lower()
 
     proj_id = cfg.get("project")
-    PROJECT_ID = proj_id if isinstance(proj_id, str) and proj_id else os.path.basename(
+    state.PROJECT_ID = proj_id if isinstance(proj_id, str) and proj_id else os.path.basename(
         os.path.abspath(project_root))
 
     total = len(exact) + len(prefixes)
@@ -2549,7 +2235,7 @@ def _firestore_push_lessons(project_root: str) -> None:
                                 or rec.get("pattern", ""))
                         if not code:
                             continue
-                        doc_id = f"{PROJECT_ID}_{code}".replace("/", "_")[:128]
+                        doc_id = f"{state.PROJECT_ID}_{code}".replace("/", "_")[:128]
                         col.document(doc_id).set({
                             "code":      code,
                             "count":     rec.get("count", 1),
@@ -2557,7 +2243,7 @@ def _firestore_push_lessons(project_root: str) -> None:
                             "last_date": rec.get("date", date.today().isoformat()),
                             "hint":      rec.get("hint", ""),
                             "source":    "local",
-                            "project":   PROJECT_ID,
+                            "project":   state.PROJECT_ID,
                         }, merge=True)
                         pushed += 1
                     except Exception:
@@ -2574,14 +2260,14 @@ def _firestore_push_lessons(project_root: str) -> None:
                         rule_text = rec.get("rule") or rec.get("new_rule", "")
                         if not rule_text:
                             continue
-                        doc_id = f"{PROJECT_ID}_" + _hl2.md5(rule_text.encode()).hexdigest()[:16]
+                        doc_id = f"{state.PROJECT_ID}_" + _hl2.md5(rule_text.encode()).hexdigest()[:16]
                         col.document(doc_id).set({
                             "rule":      rule_text,
                             "task_idx":  rec.get("task_idx", 0),
                             "date":      rec.get("date", date.today().isoformat()),
                             "source":    "local",
                             "applied":   False,
-                            "project":   PROJECT_ID,
+                            "project":   state.PROJECT_ID,
                         }, merge=True)
                         pushed += 1
                     except Exception:
@@ -2597,8 +2283,8 @@ def _firestore_push_lessons(project_root: str) -> None:
                 try:
                     rec = json.loads(line)
                     key = rec.get("date", "") + rec.get("task", "")[:60]
-                    doc_id = f"{PROJECT_ID}_" + _hl2.md5(key.encode()).hexdigest()[:16]
-                    col.document(doc_id).set({**rec, "project": PROJECT_ID}, merge=True)
+                    doc_id = f"{state.PROJECT_ID}_" + _hl2.md5(key.encode()).hexdigest()[:16]
+                    col.document(doc_id).set({**rec, "project": state.PROJECT_ID}, merge=True)
                     pushed += 1
                 except Exception:
                     pass
@@ -2643,7 +2329,7 @@ def _firestore_pull_lessons(project_root: str) -> None:
                         pass
 
         new_patterns: list[str] = []
-        for doc in db.collection("error_patterns").where("project", "==", PROJECT_ID).stream():
+        for doc in db.collection("error_patterns").where("project", "==", state.PROJECT_ID).stream():
             d = doc.to_dict()
             code = d.get("code", "")
             if code and code not in existing_codes:
@@ -2671,7 +2357,7 @@ def _firestore_pull_lessons(project_root: str) -> None:
                         pass
 
         new_rules: list[str] = []
-        for doc in db.collection("project_rules").where("project", "==", PROJECT_ID).stream():
+        for doc in db.collection("project_rules").where("project", "==", state.PROJECT_ID).stream():
             d = doc.to_dict()
             rule = d.get("rule", "")
             if rule and rule[:80] not in existing_rules:
@@ -2717,7 +2403,7 @@ def snapshot_baseline_errors(project_root: str) -> frozenset[str]:
     These are errors the model didn't cause and cannot fix — they must not
     block task validation.
     """
-    if PROJECT_VALIDATE_COMMANDS:
+    if state.PROJECT_VALIDATE_COMMANDS:
         # Per-project gates are absolute (a Go build either passes or it
         # doesn't) — no flutter baseline to snapshot.
         return frozenset()
@@ -2791,8 +2477,8 @@ def validate(
     # ── Per-project gates (from .sovereign_config.json "validate_commands") ──
     # Run in order, cwd = project root (main() chdirs there at startup).
     # First nonzero exit fails the task with that command's output.
-    if PROJECT_VALIDATE_COMMANDS:
-        for shell_cmd in PROJECT_VALIDATE_COMMANDS:
+    if state.PROJECT_VALIDATE_COMMANDS:
+        for shell_cmd in state.PROJECT_VALIDATE_COMMANDS:
             try:
                 result = subprocess.run(
                     ["bash", "-lc", shell_cmd],
@@ -2934,7 +2620,6 @@ def print_timing_report(project_root: str, session_start: float) -> None:
 # ─── Task runner ─────────────────────────────────────────────────────────────
 
 VELOCITY_LOG   = "logs/velocity.jsonl"
-ESCALATE_LOG   = "logs/escalate.md"
 REVIEW_LOG     = "logs/needs_review.md"
 
 # Validation failures naming NO file this task wrote, before the task is parked
@@ -3262,7 +2947,7 @@ def _write_escalation(project_root: str, task_idx: int, task: str,
                       written: list[str], skipped: list[str],
                       is_test: bool = False, identical_error: bool = False) -> str:
     """Write a rich escalation report for Claude to act on. Returns the path."""
-    path = os.path.join(project_root, ESCALATE_LOG)
+    path = os.path.join(project_root, state.ESCALATE_LOG)
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
     # Categorise the likely cause
@@ -3627,7 +3312,7 @@ def run_task(task: str, project_root: str, log_file: str,
     # qualifier (`ai.AI`, `game.Tick`) in the task text. sim/ is excluded:
     # its locked core is already always-included and the full package is huge.
     pkg_ctx: list[str] = []
-    if PROJECT_LANGUAGE == "go":
+    if state.PROJECT_LANGUAGE == "go":
         _dirs: set[str] = set()
         _tm = re.search(r'\bIn ([\w./-]+\.go):', task)
         if _tm and os.path.dirname(_tm.group(1)) not in ("", "sim"):
@@ -3639,7 +3324,7 @@ def run_task(task: str, project_root: str, log_file: str,
             _fs = sorted(f for f in os.listdir(os.path.join(project_root, _d))
                          if f.endswith(".go"))[:8]
             pkg_ctx += [os.path.join(_d, f) for f in _fs]
-    forced = [f for f in PROJECT_ALWAYS_INCLUDE + spec_refs + ref_refs + pkg_ctx
+    forced = [f for f in state.PROJECT_ALWAYS_INCLUDE + spec_refs + ref_refs + pkg_ctx
               if os.path.exists(os.path.join(project_root, f))]
 
     # THE TASK'S OWN TARGET FILE. rel_files is planned ONCE, here, from files
@@ -3696,7 +3381,7 @@ def run_task(task: str, project_root: str, log_file: str,
     # files. The task's own target file (_target_m) stays whole-file, since a
     # task needs full context of what it's creating/editing, not a fragment.
     rag_grouped: dict = {}
-    if RAG_ENABLED:
+    if state.RAG_ENABLED:
         try:
             import rag_index, rag_retrieve
             rag_index.sync_index(project_root, candidate_files=rel_files)
@@ -3715,9 +3400,9 @@ def run_task(task: str, project_root: str, log_file: str,
     # attempt (observed: GameCanvas run before useGameLoop.ts landed → "Cannot
     # find name 'useGameLoop'"). Defer to the retry pass so the dependency can
     # land first, instead of failing the task outright.
-    if PROJECT_LANGUAGE == "dart":
+    if state.PROJECT_LANGUAGE == "dart":
         _missing = _missing_dart_deps(task, project_root)
-    elif PROJECT_LANGUAGE in ("typescript", "ts", "tsx"):
+    elif state.PROJECT_LANGUAGE in ("typescript", "ts", "tsx"):
         _missing = _missing_local_deps(task, project_root)
     else:
         _missing = []
@@ -3744,7 +3429,7 @@ def run_task(task: str, project_root: str, log_file: str,
     # If this task has been skipped in previous runs, skip local models entirely
     # and call Claude directly with a richer, focused prompt.  If Claude also
     # fails, fall through to the normal tier loop as a last resort.
-    if CLAUDE_ENABLED and CHRONIC_BLOCKER_THRESHOLD > 0:
+    if state.CLAUDE_ENABLED and CHRONIC_BLOCKER_THRESHOLD > 0:
         prior_skips = _count_prior_skips(task, project_root)
         if prior_skips >= CHRONIC_BLOCKER_THRESHOLD:
             file_contents_c = read_files(rel_files, project_root)
@@ -3884,7 +3569,7 @@ def run_task(task: str, project_root: str, log_file: str,
         # '../../support/haptic_test_utils.dart', wrong, right after this
         # fix landed and still fixed the lib/ case fine). Compute the real
         # relative path instead: both files are known, so the math is exact.
-        if PROJECT_LANGUAGE == "dart":
+        if state.PROJECT_LANGUAGE == "dart":
             _editing_file_m = re.search(r'\b(lib/[\w/]+\.dart|test/[\w/]+\.dart)\b', task)
             _editing_file = _editing_file_m.group(1) if _editing_file_m else None
             try:
@@ -3910,7 +3595,7 @@ def run_task(task: str, project_root: str, log_file: str,
                         f"// {_import_line}\n" + file_contents[_fp]
                     )
 
-        if RAG_ENABLED and errors:
+        if state.RAG_ENABLED and errors:
             try:
                 import rag_failures
                 _hist_fix = rag_failures.retrieve_similar_failure_fix(project_root, errors)
@@ -4031,7 +3716,7 @@ def run_task(task: str, project_root: str, log_file: str,
         last_skipped = [p for p in changes if p in LOCKED_FILES]
         # Go tasks name their single target file: "In <path>.go: implement ..."
         _go_target = None
-        if PROJECT_LANGUAGE == "go":
+        if state.PROJECT_LANGUAGE == "go":
             _m = re.search(r'\bIn ([\w./-]+\.go):', task)
             _go_target = _m.group(1) if _m else None
         written, pattern_errs = write_changes(changes, project_root, test_only=is_test,
@@ -4101,7 +3786,7 @@ def run_task(task: str, project_root: str, log_file: str,
         # the gofmt gate, and the post-autofix failure produced a different
         # error signature each attempt — feeding the thrash detector bogus
         # "all different errors" streaks and escalating tiers prematurely.
-        if PROJECT_LANGUAGE == "go":
+        if state.PROJECT_LANGUAGE == "go":
             try:
                 _get_autofix().apply_go_mechanical_fixes(project_root, written)
             except Exception:
@@ -4267,7 +3952,7 @@ def run_task(task: str, project_root: str, log_file: str,
         # Step 1: Mechanical auto-fixer
         try:
             af = _get_autofix()
-            if PROJECT_LANGUAGE == "go":
+            if state.PROJECT_LANGUAGE == "go":
                 fix_count, _ = af.apply_go_mechanical_fixes(project_root, written)
             else:
                 fix_count, _ = af.apply_mechanical_fixes(output, project_root)
@@ -4418,7 +4103,7 @@ def run_task(task: str, project_root: str, log_file: str,
                 )
                 print(f"\n  {YELLOW}⏭  All local tiers exhausted ({reason}){RESET}")
 
-                if CLAUDE_ENABLED:
+                if state.CLAUDE_ENABLED:
                     restore_files(backups, project_root)  # clean slate for Claude
                     file_contents_claude = read_files(rel_files, project_root)
                     claude_changes, _ = _escalate_to_claude(
@@ -4649,7 +4334,7 @@ def main():
     if not (args.remaining_count or args.queue_remaining_count):
         _load_project_config(project_root)
 
-        if RAG_ENABLED:
+        if state.RAG_ENABLED:
             try:
                 import rag_failures
                 n_mined = rag_failures.mine_failure_fixes(project_root)
@@ -4664,7 +4349,7 @@ def main():
         # unbuilt dependency tree; every attempt was doomed before the first
         # token. One stat() up front turns a wasted run into a clear message.
         try:
-            _problems = grounders.for_language(PROJECT_LANGUAGE).preflight(project_root)
+            _problems = grounders.for_language(state.PROJECT_LANGUAGE).preflight(project_root)
             for _p in _problems:
                 print(f"  {YELLOW}⚠  PREFLIGHT: {_p}{RESET}")
             if _problems:
@@ -4768,10 +4453,9 @@ def main():
     # Per-worker suffixes keep log and escalation files separate.
     worker_suffix = f"-w{args.worker_id}" if args.stride > 1 else ""
     if args.stride > 1:
-        global ESCALATE_LOG, INTEGRATION_ROOT
-        ESCALATE_LOG = f"logs/escalate{worker_suffix}.md"
+        state.ESCALATE_LOG = f"logs/escalate{worker_suffix}.md"
         if GIT_BRANCHES and os.path.isdir(os.path.join(project_root, ".git")):
-            INTEGRATION_ROOT = project_root
+            state.INTEGRATION_ROOT = project_root
             project_root = _setup_worker_worktree(project_root, args.worker_id)
             os.chdir(project_root)
 
@@ -4920,8 +4604,7 @@ def main():
     # Disable Claude escalation in --quick and --deep runs to save API costs
     # and keep these passes purely local-model based.
     if args.quick or args.deep:
-        global CLAUDE_ENABLED
-        CLAUDE_ENABLED = False
+        state.CLAUDE_ENABLED = False
 
     mode_label = f"  ⚡ QUICK (tiers 2–{QUICK_MAX_TIER_IDX}, <{QUICK_PARAM_LIMIT_B:.0f}B)" if args.quick else (
                  "  🔬 DEEP (tiers 2–3 from queue)" if args.deep else "")
@@ -4991,7 +4674,7 @@ def main():
     #      depends on earlier tasks targeting files under pkg/.
     go_failed_targets: set[str] = set()
     go_task_deps: dict[int, list[tuple[int, str]]] = {}
-    if PROJECT_LANGUAGE == "go":
+    if state.PROJECT_LANGUAGE == "go":
         _go_tgt_re = re.compile(r'\bIn ([\w./-]+\.go):')
         _decl_re = re.compile(r'implement types?\s+([A-Z]\w*(?:\s*,\s*[A-Z]\w*)*)')
         _entries = []

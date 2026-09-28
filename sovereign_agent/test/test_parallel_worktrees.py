@@ -6,50 +6,59 @@ in-progress file, and merges collided. Also guards the language-agnostic
 task grouping (it only recognised lib/*.dart, so Python same-file tasks were
 dealt round-robin across workers).
 
-Loaded from work.py's source rather than by importing work.py, which has
-import-time side effects (config, env).
+Tests the real sov modules (falling back to work.py for anything not yet
+extracted); config values are pinned per test.
 """
-import ast
-import contextlib
-import fcntl
 import os
-import shutil
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
 
 import pytest
 
-WORK = Path(__file__).resolve().parents[1] / "work.py"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import ast  # noqa: E402
+import importlib  # noqa: E402
 
-_FUNCS = [
-    "_git", "_merge_lock", "_to_main", "_setup_worker_worktree",
-    "_branch_start", "_branch_merge", "_branch_abandon",
-    "mark_done", "_mark_done_locked", "_commit_roadmap_mark",
-    "_task_primary_file", "_assign_chains", "all_source_files",
-]
-_CONSTS = ["_WORKTREE_SHARED"]
+from sov import gitops, state  # noqa: E402
+
+WORK = Path(__file__).resolve().parents[1] / "work.py"
+_NAMES = ["_git", "_merge_lock", "_to_main", "_setup_worker_worktree",
+          "_branch_start", "_branch_merge", "_branch_abandon", "_WORKTREE_SHARED",
+          "mark_done", "_mark_done_locked", "_commit_roadmap_mark",
+          "_task_primary_file", "_assign_chains", "all_source_files"]
 
 
 def _load(integration_root=None) -> dict:
-    tree = ast.parse(WORK.read_text())
-    body = [n for n in tree.body
-            if (isinstance(n, ast.FunctionDef) and n.name in _FUNCS)
-            or (isinstance(n, ast.Assign) and any(
-                getattr(t, "id", None) in _CONSTS for t in n.targets))]
-    ns = {
-        "os": os, "re": __import__("re"), "sys": sys, "time": time,
-        "shutil": shutil, "fcntl": fcntl, "contextlib": contextlib,
-        "subprocess": subprocess, "Path": Path,
-        "GIT_BRANCHES": True, "MAIN_BRANCH": "main", "ROADMAP_PATH": "ROADMAP.md",
-        "INTEGRATION_ROOT": integration_root,
-        "RED": "", "YELLOW": "", "DIM": "", "RESET": "",
-        "task_text": lambda line: line,
-    }
-    exec(compile(ast.Module(body=body, type_ignores=[]), str(WORK), "exec"), ns)
-    return ns
+    """Each name from the sov module that now owns it; names not yet moved
+    out of work.py are exec'd from its source into a namespace built from
+    the sov modules (work.py itself has import-time side effects)."""
+    state.INTEGRATION_ROOT = integration_root
+    ns: dict = {}
+    for m in ("ui", "gitops", "roadmap", "scheduling", "files"):
+        try:
+            ns.update(vars(importlib.import_module(f"sov.{m}")))
+        except ModuleNotFoundError:
+            pass
+    missing = [n for n in _NAMES if n not in ns]
+    if missing:
+        tree = ast.parse(WORK.read_text())
+        want = set(missing) | {"ROADMAP_PATH", "task_text", "_TEST_TASK_RE", "_is_test_task"}
+        body = [n for n in tree.body
+                if (isinstance(n, ast.FunctionDef) and n.name in want)
+                or (isinstance(n, ast.Assign) and any(getattr(t, "id", None) in want for t in n.targets))]
+        ns.update({"os": os, "re": __import__("re"), "Path": Path, "fcntl": __import__("fcntl"),
+                   "time": __import__("time"), "state": state})
+        exec(compile(ast.Module(body=body, type_ignores=[]), str(WORK), "exec"), ns)
+    return {n: ns[n] for n in _NAMES}
+
+
+@pytest.fixture(autouse=True)
+def _isolated_config(monkeypatch):
+    monkeypatch.setattr(gitops, "MAIN_BRANCH", "main")
+    monkeypatch.setattr(gitops, "GIT_BRANCHES", True)
+    monkeypatch.setattr(state, "INTEGRATION_ROOT", None)
 
 
 def _sh(cwd, *args):

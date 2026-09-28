@@ -1,22 +1,17 @@
 """_extract_py_api_stub: the read-only surface workers see for a locked .py file.
 
-Loaded from work.py's source rather than by importing work.py, which has
-import-time side effects (config, env). Guards the 2026-09-28 fix: .py files
+Guards the 2026-09-28 fix: .py files
 used to fall through to the Dart extractor and produce an empty stub.
 """
-import ast
+import sys
 from pathlib import Path
 
-WORK = Path(__file__).resolve().parents[1] / "work.py"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from sov import apistubs  # noqa: E402
 
 
 def _load(name: str):
-    src = WORK.read_text()
-    tree = ast.parse(src)
-    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
-    ns: dict = {}
-    exec(compile(ast.Module(body=[fn], type_ignores=[]), str(WORK), "exec"), ns)
-    return ns[name]
+    return getattr(apistubs, name)
 
 
 SAMPLE = '''
@@ -66,5 +61,5 @@ def test_unparseable_source_is_returned_raw():
 
 
 def test_dispatch_routes_py_to_python_extractor():
-    src = WORK.read_text()
-    assert 'if ext == ".py":\n        return _extract_py_api_stub(' in src
+    assert apistubs._extract_api_stub("m.py", "def f(a: int) -> int:\n    return a\n") \
+        == apistubs._extract_py_api_stub("def f(a: int) -> int:\n    return a\n")

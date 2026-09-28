@@ -90,7 +90,7 @@ def sync_index(project_root: str, candidate_files: list[str] | None = None) -> i
     if candidate_files is not None:
         targets = candidate_files
     else:
-        from work import all_source_files  # lazy import — avoid a cycle at module load time
+        from sov.files import all_source_files  # lazy import — avoid a cycle at module load time
         targets = all_source_files(project_root)
 
     reindexed = 0

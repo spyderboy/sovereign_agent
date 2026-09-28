@@ -6,8 +6,7 @@ in-progress file, and merges collided. Also guards the language-agnostic
 task grouping (it only recognised lib/*.dart, so Python same-file tasks were
 dealt round-robin across workers).
 
-Tests the real sov modules (falling back to work.py for anything not yet
-extracted); config values are pinned per test.
+Tests the real sov modules; config values are pinned per test.
 """
 import os
 import subprocess
@@ -18,40 +17,20 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import ast  # noqa: E402
-import importlib  # noqa: E402
+from sov import files, gitops, roadmap, scheduling, state  # noqa: E402
 
-from sov import gitops, state  # noqa: E402
-
-WORK = Path(__file__).resolve().parents[1] / "work.py"
-_NAMES = ["_git", "_merge_lock", "_to_main", "_setup_worker_worktree",
-          "_branch_start", "_branch_merge", "_branch_abandon", "_WORKTREE_SHARED",
-          "mark_done", "_mark_done_locked", "_commit_roadmap_mark",
-          "_task_primary_file", "_assign_chains", "all_source_files"]
+_API = {
+    gitops: ["_git", "_merge_lock", "_to_main", "_setup_worker_worktree",
+             "_branch_start", "_branch_merge", "_branch_abandon", "_WORKTREE_SHARED"],
+    roadmap: ["mark_done", "_mark_done_locked", "_commit_roadmap_mark"],
+    scheduling: ["_task_primary_file", "_assign_chains"],
+    files: ["all_source_files"],
+}
 
 
 def _load(integration_root=None) -> dict:
-    """Each name from the sov module that now owns it; names not yet moved
-    out of work.py are exec'd from its source into a namespace built from
-    the sov modules (work.py itself has import-time side effects)."""
     state.INTEGRATION_ROOT = integration_root
-    ns: dict = {}
-    for m in ("ui", "gitops", "roadmap", "scheduling", "files"):
-        try:
-            ns.update(vars(importlib.import_module(f"sov.{m}")))
-        except ModuleNotFoundError:
-            pass
-    missing = [n for n in _NAMES if n not in ns]
-    if missing:
-        tree = ast.parse(WORK.read_text())
-        want = set(missing) | {"ROADMAP_PATH", "task_text", "_TEST_TASK_RE", "_is_test_task"}
-        body = [n for n in tree.body
-                if (isinstance(n, ast.FunctionDef) and n.name in want)
-                or (isinstance(n, ast.Assign) and any(getattr(t, "id", None) in want for t in n.targets))]
-        ns.update({"os": os, "re": __import__("re"), "Path": Path, "fcntl": __import__("fcntl"),
-                   "time": __import__("time"), "state": state})
-        exec(compile(ast.Module(body=body, type_ignores=[]), str(WORK), "exec"), ns)
-    return {n: ns[n] for n in _NAMES}
+    return {name: getattr(mod, name) for mod, names in _API.items() for name in names}
 
 
 @pytest.fixture(autouse=True)

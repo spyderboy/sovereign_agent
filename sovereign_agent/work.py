@@ -610,8 +610,12 @@ def all_source_files(project_root: str) -> list[str]:
     skip |= roots
     result = []
     for p in Path(project_root).rglob("*"):
-        if p.suffix in exts and not any(s in p.parts for s in skip):
-            result.append(str(p.relative_to(project_root)))
+        # Match skip names against the path RELATIVE to the project: a
+        # project that itself lives under e.g. .git/ or build/ must not have
+        # every file skipped (2026-09-28, parallel-worker worktrees).
+        rel = p.relative_to(project_root)
+        if p.suffix in exts and not any(s in rel.parts for s in skip):
+            result.append(str(rel))
     if len(result) > 1200:
         print(f"  {YELLOW}⚠ {len(result)} source files — the planner prompt will "
               f"be large. Check for a vendored dependency tree in the project."
@@ -2049,8 +2053,8 @@ def _assign_chains(chains: list, stride: int, worker_id: int) -> list:
 # whatever another worker had written mid-attempt, and merges collided
 # ("Merging is not possible because you have unmerged files" — xmeasure's
 # first 2-worker sweep died on task 4 this way). Now, when stride > 1, each
-# worker runs in its own git worktree (under .git/xanadu-worktrees/, so the
-# primary checkout never sees it), on a detached HEAD at main's tip. Only
+# worker runs in its own git worktree (under ~/.cache/xanadu-worktrees/, so
+# the primary checkout never sees it), on a detached HEAD at main's tip. Only
 # the primary checkout ever has main checked out, and every write to main —
 # task merges and ROADMAP [x] marks — happens there under an flock.
 # INTEGRATION_ROOT is None in single-worker mode, and everything below
@@ -2091,7 +2095,17 @@ def _to_main(root: str) -> None:
 def _setup_worker_worktree(primary: str, worker_id: int) -> str:
     """Create (or recreate) this worker's private worktree and return its path."""
     import atexit
-    wt = os.path.join(primary, ".git", "xanadu-worktrees", f"w{worker_id}")
+    # Outside the project AND outside any directory name a file scanner
+    # skips. The first version (2026-09-28) put worktrees under .git/, and
+    # all_source_files() / the grounders skip any path whose components
+    # include ".git" — so workers saw none of the project's own files and
+    # coded blind. ~/.cache/xanadu-worktrees/<project>-<hash>/w<N> is safe.
+    import hashlib
+    real = os.path.realpath(primary)
+    key = hashlib.sha1(real.encode()).hexdigest()[:8]
+    base = os.environ.get("XANADU_WORKTREE_ROOT") or os.path.join(
+        os.path.expanduser("~"), ".cache", "xanadu-worktrees")
+    wt = os.path.join(base, f"{os.path.basename(real)}-{key}", f"w{worker_id}")
     _git(["worktree", "remove", "--force", wt], primary)
     if os.path.exists(wt):
         shutil.rmtree(wt)

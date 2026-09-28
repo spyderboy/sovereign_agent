@@ -28,7 +28,7 @@ _FUNCS = [
     "_git", "_merge_lock", "_to_main", "_setup_worker_worktree",
     "_branch_start", "_branch_merge", "_branch_abandon",
     "mark_done", "_mark_done_locked", "_commit_roadmap_mark",
-    "_task_primary_file", "_assign_chains",
+    "_task_primary_file", "_assign_chains", "all_source_files",
 ]
 _CONSTS = ["_WORKTREE_SHARED"]
 
@@ -42,7 +42,7 @@ def _load(integration_root=None) -> dict:
     ns = {
         "os": os, "re": __import__("re"), "sys": sys, "time": time,
         "shutil": shutil, "fcntl": fcntl, "contextlib": contextlib,
-        "subprocess": subprocess,
+        "subprocess": subprocess, "Path": Path,
         "GIT_BRANCHES": True, "MAIN_BRANCH": "main", "ROADMAP_PATH": "ROADMAP.md",
         "INTEGRATION_ROOT": integration_root,
         "RED": "", "YELLOW": "", "DIM": "", "RESET": "",
@@ -55,6 +55,11 @@ def _load(integration_root=None) -> dict:
 def _sh(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, check=True,
                           capture_output=True, text=True).stdout
+
+
+@pytest.fixture(autouse=True)
+def _worktree_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("XANADU_WORKTREE_ROOT", str(tmp_path / "wt-root"))
 
 
 @pytest.fixture
@@ -96,6 +101,20 @@ def test_worktree_shares_untracked_toolchain_and_stays_clean(repo):
     # clean -fd between tasks must not delete the shared symlinks
     ns["_branch_start"](wt0, 1, "task 1")
     assert os.path.islink(os.path.join(wt0, ".venv"))
+
+
+def test_worker_sees_the_project_files(repo):
+    """Regression: worktrees first lived under .git/, and all_source_files()
+    skips any path containing ".git" — workers got no project files at all."""
+    ns, (wt0, _) = _workers(repo)
+    Path(repo, "pkg").mkdir()
+    Path(repo, "pkg", "mod.py").write_text("y = 2\n")
+    _sh(repo, "add", "-A")
+    _sh(repo, "commit", "-qm", "add pkg")
+    ns["_branch_start"](wt0, 1, "task 1")
+    assert ".git" not in Path(wt0).parts
+    assert ns["all_source_files"](wt0) == ns["all_source_files"](str(repo))
+    assert "pkg/mod.py" in ns["all_source_files"](wt0)
 
 
 def test_one_worker_reset_does_not_wipe_the_other(repo):

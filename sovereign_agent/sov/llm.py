@@ -14,6 +14,7 @@ import requests
 import sys
 import time
 from sov.config import (
+    endpoint_for,
     OLLAMA_THINK,
     MODEL_CTX,
     OLLAMA_URL,
@@ -44,13 +45,13 @@ class PromptTooLargeError(Exception):
 
 # ─── Ollama ───────────────────────────────────────────────────────────────────
 
-def _ollama_installed_tags() -> list[str]:
+def _ollama_installed_tags(url: str | None = None) -> list[str]:
     """Return the list of model tags Ollama currently has, or raise on failure.
 
     Raised exceptions are handled by preflight_models() so it can tell an
     Ollama-not-running error apart from a merely-missing model.
     """
-    resp = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
+    resp = requests.get(f"{url or OLLAMA_URL}/api/tags", timeout=10)
     resp.raise_for_status()
     return [m["name"] for m in resp.json().get("models", [])]
 
@@ -66,12 +67,20 @@ def preflight_models(required: list[str]) -> None:
     start was surprising, and a missing tag is nearly always a typo'd model
     name (e.g. qwen3.6:35b vs qwen3-coder:30b) that a pull would only mask.
     """
-    try:
-        installed = _ollama_installed_tags()
-    except Exception as e:
-        print(f"  {RED}✗ Ollama is not reachable at {OLLAMA_URL}: {e}{RESET}")
-        print(f"    Start it first:  ollama serve")
-        sys.exit(1)
+    # Each model is checked on the server it is served from (endpoint_for):
+    # a tier on a RunPod pod is verified there, not on the local Ollama.
+    by_url: dict[str, list[str]] = {}
+    for m in dict.fromkeys(required):
+        by_url.setdefault(endpoint_for(m), []).append(m)
+    installed: list[str] = []
+    for url, models in by_url.items():
+        try:
+            installed += _ollama_installed_tags(url)
+        except Exception as e:
+            print(f"  {RED}✗ Ollama is not reachable at {url}: {e}{RESET}")
+            print(f"    Start it first:  ollama serve" if url == OLLAMA_URL else
+                  f"    Is the remote server/pod running? (needed for {', '.join(models)})")
+            sys.exit(1)
 
     def _present(tag: str) -> bool:
         return tag in installed or f"{tag}:latest" in installed
@@ -174,7 +183,7 @@ def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
     # content from newline-delimited JSON chunks — callers see no difference.
     def _do_request() -> str:
         resp = requests.post(
-            f"{OLLAMA_URL}/api/chat",
+            f"{endpoint_for(model)}/api/chat",
             json={
                 "model": model,
                 "messages": [

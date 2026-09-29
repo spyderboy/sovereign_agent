@@ -150,6 +150,20 @@ TIER3_MODEL = _s("TIER3_MODEL", _tier(3, "model", None), "qwen3.6:35b-a3b-coding
 TIER4_MODEL = _s("TIER4_MODEL", _tier(4, "model", None), "qwen3.6:35b-a3b-coding-nvfp4")
 TIER_MODELS = [TIER1_MODEL, TIER2_MODEL, TIER3_MODEL, TIER4_MODEL]
 
+# Per-tier endpoint (2026-09-28): a tier may live on another Ollama server — a
+# RunPod pod, a client's own GPU box — while the others stay local. Profile
+# [tiers.N] url = "https://…", or env TIERn_URL. Empty = OLLAMA_URL.
+TIER_URLS: list[str] = [_s(f"TIER{i}_URL", _tier(i, "url", None), "").rstrip("/")
+                        for i in range(1, 5)]
+
+
+def endpoint_for(model: str) -> str:
+    """The Ollama server a model is served from."""
+    for m, url in zip(TIER_MODELS, TIER_URLS):
+        if m == model and url:
+            return url
+    return OLLAMA_URL
+
 # ── Quick-mode parameter gate ────────────────────────────────────────────────
 # --quick may only use models under this total parameter count, enforced via
 # QUICK_MAX_TIER_IDX. Unknown models default to inf, so they are excluded.

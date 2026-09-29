@@ -110,6 +110,11 @@ from datetime import date
 
 OLLAMA_URL    = os.getenv("LOCAL_MODEL_URL", "http://localhost:11434")
 ADVISOR_MODEL = os.getenv("ADVISOR_MODEL",  "qwen2.5-coder:7b-instruct-q4_K_M")
+try:                                   # follow a tier that moved to a remote server
+    from sov.config import endpoint_for as _endpoint_for
+    OLLAMA_URL = _endpoint_for(ADVISOR_MODEL) if ADVISOR_MODEL else OLLAMA_URL
+except Exception:
+    pass
 
 ERRORS_LOG      = "logs/errors.jsonl"
 RULE_DRAFTS_LOG = "logs/rule_drafts.jsonl"

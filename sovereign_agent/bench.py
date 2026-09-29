@@ -106,6 +106,55 @@ def spread(cases: list[dict], n: int) -> list[dict]:
     return out
 
 
+# Settings that only act on attempt 2+: an arm using one can't have made a
+# difference when no case in it ever retried.
+RETRY_ONLY_SETTINGS = {"OLLAMA_THINK_RETRIES"}
+
+
+def pick_winner(arms: list[tuple[str, dict, list[dict]]], min_gain: float = 0.20) -> tuple[str, dict, str]:
+    """Choose between benchmark arms without chasing noise.
+
+    arms: [(label, env, records)], the FIRST being the baseline (current
+    settings). An arm beats the baseline only by passing more cases, or by
+    passing as many while being at least `min_gain` faster on the median AND
+    faster on at least two-thirds of the cases both passed. An arm whose
+    settings can't have taken effect is never chosen. Returns (label, env, why).
+
+    2026-09-29: the old rule (most passes, then lowest median) picked a
+    retry-only setting on a 12% median difference when no case had retried.
+    """
+    def passed(recs):
+        return {r["case"]: r for r in recs if r["passed"]}
+
+    def median(vals):
+        return statistics.median(vals) if vals else float("inf")
+
+    base_label, base_env, base_recs = arms[0]
+    base = passed(base_recs)
+    best, why = (base_label, base_env), "no arm beat the baseline clearly — keeping current settings"
+    best_key = (len(base), 0.0)
+    for label, env, recs in arms[1:]:
+        if set(env) & RETRY_ONLY_SETTINGS and not any((r.get("attempts") or 0) > 1 for r in recs):
+            continue                                  # its setting never engaged
+        got = passed(recs)
+        if len(got) > best_key[0]:
+            best, best_key = (label, env), (len(got), 0.0)
+            why = f"{label} passed {len(got)} vs {len(base)}"
+            continue
+        if len(got) != len(base) or len(got) < best_key[0]:
+            continue
+        shared = [c for c in got if c in base]
+        if not shared:
+            continue
+        m_arm, m_base = median([got[c]["wall_s"] for c in shared]), median([base[c]["wall_s"] for c in shared])
+        faster = sum(got[c]["wall_s"] < base[c]["wall_s"] for c in shared)
+        gain = 1 - m_arm / m_base
+        if gain >= min_gain and faster * 3 >= len(shared) * 2 and gain > best_key[1]:
+            best, best_key = (label, env), (len(got), gain)
+            why = f"{label} {gain:.0%} faster on the median, faster on {faster}/{len(shared)} cases"
+    return best[0], best[1], why
+
+
 def summarize(records: list[dict]) -> dict:
     passed = [r for r in records if r["passed"]]
     first = [r for r in passed if r.get("attempts") == 1]

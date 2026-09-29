@@ -170,6 +170,10 @@ class Night:
         return r.stdout
 
     @staticmethod
+    def records(run: Path) -> list[dict]:
+        return [json.loads(l) for l in (run / "results.jsonl").read_text().splitlines() if l.strip()]
+
+    @staticmethod
     def score(run: Path) -> tuple[int, float]:
         recs = [json.loads(l) for l in (run / "results.jsonl").read_text().splitlines() if l.strip()]
         walls = [r["wall_s"] for r in recs if r["passed"]] or [float("inf")]
@@ -229,11 +233,10 @@ class Night:
             return {}
         for label, env, run in runs[1:]:
             self.compare(runs[0][2], run)
-        scored = [(self.score(run), label, env) for label, env, run in runs]
-        # most passes wins; ties go to the lower median time per pass
-        (best_p, best_m), label, env = max(scored, key=lambda x: (x[0][0], -x[0][1]))
-        summary = ", ".join(f"{lab} {p} passed/{m:.0f}s" for (p, m), lab, _ in scored)
-        self.say(f"thinking-limit: {summary} → winner {label}", notify=True)
+        scored = [(self.score(run), label) for label, env, run in runs]
+        summary = ", ".join(f"{lab} {p} passed/{m:.0f}s" for (p, m), lab in scored)
+        label, env, why = bench.pick_winner([(lab, env, self.records(run)) for lab, env, run in runs])
+        self.say(f"thinking-limit: {summary} → {label} ({why})", notify=True)
         return env
 
     # 7. mine -----------------------------------------------------------------
@@ -291,9 +294,11 @@ def main() -> int:
         if on and off:
             n.compare(on, off)
             (p_on, m_on), (p_off, m_off) = n.score(on), n.score(off)
-            think_off = p_off > p_on or (p_off == p_on and m_off < m_on)
+            label, _, why = bench.pick_winner([("think-default", {}, n.records(on)),
+                                               ("think-off", {"OLLAMA_THINK": "0"}, n.records(off))])
+            think_off = label == "think-off"
             n.say(f"A/B: default {p_on} passed (median {m_on:.0f}s), off {p_off} passed "
-                  f"(median {m_off:.0f}s) → sweep runs with thinking "
+                  f"(median {m_off:.0f}s) → {why}; sweep runs with thinking "
                   f"{'OFF' if think_off else 'as before'}", notify=True)
 
     n.write("\n## Sweep\n")

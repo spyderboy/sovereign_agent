@@ -275,3 +275,43 @@ def test_restart_gives_up_after_max(mon, repo, monkeypatch):
     monkeypatch.setattr(monitor, "launch", lambda *a, **k: pytest.fail("restarted"))
     _dead(mon, monkeypatch)
     assert any("stopped restarting" in m for m in mon.notifier.sent)
+
+
+# ── 2026-09-29 false runaway alerts ───────────────────────────────────────────
+
+def test_timeout_line_ends_the_attempt(mon, monkeypatch):
+    monkeypatch.setattr(monitor, "run_pids", lambda r: [1])
+    feed(mon, "[w0] [1/9] In `pkg/repos.py`: x...",
+         "[w0]   Attempt 1/3 — coding (qwen3.8:27b)...  Loading 17GB model — keeping resident 30m... timeout — retrying")
+    assert mon.workers["w0"].attempt_at is None
+
+
+def test_pass_change_does_not_replay_the_killed_pass(project, tmp_path, monkeypatch):
+    old = tmp_path / "cycle1-cheap.log"
+    old.write_text("[w1] [1/9] In `pkg/a.py`: x...\n[w1]   Attempt 1/2 — coding (m)...")   # killed mid-attempt
+    logs = {"newest": str(old)}
+    monkeypatch.setattr(monitor, "newest_console", lambda r: logs["newest"])
+    monkeypatch.setattr(monitor, "run_pids", lambda r: [1])
+    clock = {"t": 1000.0}
+    m = monitor.Monitor(str(project), _args(), FakeNotifier(), clock=lambda: clock["t"])
+    m.console = monitor.Tail(str(old), from_start=True)
+    m.poll()                                          # sees the unfinished attempt
+    m.on_sweep("[11:00:00] cycle1-strong  profile=qwen38  cap=7200s  workers=1  done=44")
+    m.poll()                                          # new log not created yet
+    assert "w1" not in m.workers                      # the killed pass is not replayed
+    new = tmp_path / "cycle1-strong.log"
+    new.write_text("[w0] [1/5] In `pkg/b.py`: y...\n")
+    logs["newest"] = str(new)
+    clock["t"] += 30 * 60
+    m.poll()
+    assert "w0" in m.workers and "w1" not in m.workers
+    assert not any("running" in s for s in m.notifier.sent)
+
+
+def test_varied_skips_note_depends_on_the_pass(mon, capsys):
+    mon.pass_label = "cycle2-strong"
+    for i, err in enumerate(("KeyError", "TypeError", "NameError", "ValueError"), 1):
+        feed(mon, f"[w0] [{i}/9] In `pkg/t{i}.py`: x...", f"[w0]   Validating... ✗ {err}",
+             "[w0]   ⏭  Skipped — queued for retry pass")
+    out = capsys.readouterr().out
+    assert "strong pass should take these" not in out and "under-specified" in out

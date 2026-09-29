@@ -83,3 +83,28 @@ def test_spread_prefers_different_files():
              enumerate(["a.py", "a.py", "a.py", "b.py", "c.py", "c.py"])]
     assert [c["id"] for c in bench.spread(cases, 3)] == ["t0", "t3", "t4"]
     assert [c["id"] for c in bench.spread(cases, 5)] == ["t0", "t3", "t4", "t1", "t5"]
+
+
+def _recs(spec):
+    return [{"case": c, "passed": p, "wall_s": w, "attempts": a} for c, p, w, a in spec]
+
+
+def test_pick_winner_keeps_baseline_on_noise():
+    base = _recs([("a", True, 800, 1), ("b", True, 700, 1), ("c", True, 900, 1)])
+    arm = _recs([("a", True, 720, 1), ("b", True, 650, 1), ("c", True, 860, 1)])      # ~10% faster
+    assert bench.pick_winner([("base", {}, base), ("arm", {"X": "1"}, arm)])[0] == "base"
+
+
+def test_pick_winner_ignores_retry_only_setting_that_never_engaged():
+    base = _recs([("a", True, 800, 1), ("b", True, 800, 1), ("c", True, 800, 1)])
+    arm = _recs([("a", True, 400, 1), ("b", True, 400, 1), ("c", True, 400, 1)])      # 50% faster, no retries
+    assert bench.pick_winner([("base", {}, base), ("arm", {"OLLAMA_THINK_RETRIES": "0"}, arm)])[0] == "base"
+
+
+def test_pick_winner_takes_more_passes_or_a_clear_consistent_speedup():
+    base = _recs([("a", True, 800, 1), ("b", False, 900, 3), ("c", True, 800, 1)])
+    more = _recs([("a", True, 900, 1), ("b", True, 950, 2), ("c", True, 850, 1)])
+    assert bench.pick_winner([("base", {}, base), ("more", {"X": "1"}, more)])[0] == "more"
+    fast = _recs([("a", True, 500, 1), ("b", False, 900, 3), ("c", True, 560, 1)])     # ~34% faster on both
+    label, _, why = bench.pick_winner([("base", {}, base), ("fast", {"X": "1"}, fast)])
+    assert label == "fast" and "faster" in why

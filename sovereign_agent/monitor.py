@@ -320,6 +320,7 @@ class Monitor:
         self.roadmap_cache = ("", 0.0)
         self.replaying = False
         self.history: list[str] = []
+        self.retired_logs: set = set()
 
     # output ---------------------------------------------------------------
     def stamp(self) -> str:
@@ -368,7 +369,10 @@ class Monitor:
             return
 
         if "Attempt" in s and "coding" in s:
-            done_same_line = any(k in s for k in ("wrote", "no output", "blocked"))
+            # "timeout — retrying" ends an attempt too: counting on from it
+            # measured several attempts as one runaway (2026-09-29).
+            done_same_line = any(k in s for k in ("wrote", "no output", "blocked", "timeout",
+                                                  "exceeded", "failed"))
             w.attempt_at = None if done_same_line else self.clock()
             if "no output" in s:
                 w.last_error = "no output"
@@ -429,8 +433,11 @@ class Monitor:
                                f"{sig}\nA constant cause, not model difficulty. Diagnose before "
                                "spending more attempts.")
                 elif w.skip_streak == self.args.skip_streak:
+                    where = ("the strong pass should take these" if self.pass_label.endswith("-cheap")
+                             else "on the strong model already — check whether these tasks are "
+                                  "under-specified or blocked by an earlier merge")
                     self.event(f"{DIM}  {wid}: {w.skip_streak} skips in a row with varied errors — "
-                               f"model difficulty; the strong pass should take these{RESET}")
+                               f"{where}{RESET}")
 
         if "FATAL" in s or s.startswith("Traceback") or "Unexpected exit code" in s:
             self.alert(f"fatal:{s[:60]}", f"{wid}: {s[:120]}",
@@ -455,7 +462,13 @@ class Monitor:
         if m:
             self.pass_label = m.group(1)
             if not self.replaying:
-                self.console = Tail(newest_console(self.root), from_start=True)
+                # The new pass's log doesn't exist yet at this moment, so the
+                # newest log is still the OLD pass's. Re-opening it replayed a
+                # killed pass — including its unfinished attempt line, which
+                # then read as a 25-minute runaway (2026-09-29). Retire the old
+                # log and wait for a genuinely new one (see poll()).
+                self.retired_logs.add(self.console.path)
+                self.console = Tail(None)
                 self.workers.clear()
             self.event(f"{BOLD}── {m.group(1)}{RESET} {DIM}{m.group(2)}, {m.group(3)} worker(s){RESET}")
         elif "cap reached" in line:
@@ -574,7 +587,7 @@ class Monitor:
         for line in self.sweep.read():
             self.on_sweep(line)
         newest = newest_console(self.root)
-        if newest != self.console.path:
+        if newest and newest != self.console.path and newest not in self.retired_logs:
             self.console = Tail(newest, from_start=True)
         for line in self.console.read():
             self.on_console(line)

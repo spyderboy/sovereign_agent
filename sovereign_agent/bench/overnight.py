@@ -83,12 +83,9 @@ class Night:
 
     # 1. pause ----------------------------------------------------------------
     def pause(self) -> None:
-        real = os.path.realpath(self.root)
-        out = subprocess.run(["ps", "-Ao", "pid=,args="], capture_output=True, text=True).stdout
-        for line in out.splitlines():
-            pid, _, args = line.strip().partition(" ")
-            if "monitor.py" in args and monitor.mentions_project(args, real):
-                os.kill(int(pid), signal.SIGTERM)       # first, or it restarts the sweep
+        from sov import runctl
+        for pid in runctl.processes(self.root)["monitor"]:
+            os.kill(pid, signal.SIGTERM)               # first, or it restarts the sweep
         time.sleep(1)
         for pid in monitor.run_pids(self.root):
             os.kill(pid, signal.SIGKILL)

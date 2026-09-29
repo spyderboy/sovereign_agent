@@ -71,6 +71,7 @@ BOLD = "\033[1m"; RED = "\033[91m"; YEL = "\033[93m"; GRN = "\033[92m"
 DIM = "\033[2m"; RESET = "\033[0m"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 SOVEREIGN = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SOVEREIGN)                   # for sov.procs when run from elsewhere
 
 FINISH_MARKERS = ("sweep finished", "fixpoint reached", "roadmap complete")
 SKIP_MARKERS = ("Skipped — queued", "Still skipped", "Still failing",
@@ -227,13 +228,17 @@ def mentions_project(args: str, real_root: str) -> bool:
 
 
 def run_pids(root: str) -> list[int]:
+    """The run's own processes, matched by the script each actually runs
+    (sov/procs.py). A shell or editor that mentions work.py and the path is
+    not a run process — and must never be killed as one."""
+    from sov.procs import mentions, script_of
     real_root = os.path.realpath(root)
     out = subprocess.run(["ps", "-Ao", "pid=,args="], capture_output=True, text=True).stdout
     pids = []
     for line in out.splitlines():
         pid, _, args = line.strip().partition(" ")
-        if any(k in args for k in ("sweep.sh", "supervisor.sh", "work.py")) \
-                and "monitor.py" not in args and mentions_project(args, real_root):
+        script, rest = script_of(args)
+        if script in ("sweep.sh", "supervisor.sh", "work.py") and mentions(rest, real_root):
             pids.append(int(pid))
     return pids
 

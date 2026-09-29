@@ -186,22 +186,23 @@ def _ps() -> list[tuple[int, str]]:
     return rows
 
 
-def _mentions(args: str, root: str) -> bool:
-    return any(os.path.realpath(os.path.expanduser(t)) == root
-               for t in args.split() if t.startswith(("/", "~")))
-
-
 def processes(project: str) -> dict[str, list[int]]:
+    """Run-related processes for this project, matched by the script each one
+    actually runs (sov/procs.py) — never shells, editors or viewers that merely
+    mention a script name and the path."""
+    from sov.procs import mentions, script_of
     root = os.path.realpath(project)
     found = {"sweep": [], "supervisor": [], "work": [], "monitor": [], "guard": [], "overnight": []}
+    names = {"sweep.sh": "sweep", "supervisor.sh": "supervisor", "work.py": "work",
+             "monitor.py": "monitor", "overnight.py": "overnight"}
     for pid, args in _ps():
-        if not _mentions(args, root):
+        script, rest = script_of(args)
+        if not script or not mentions(rest, root):
             continue
-        for key, needle in (("sweep", "sweep.sh"), ("supervisor", "supervisor.sh"),
-                            ("work", "work.py"), ("monitor", "monitor.py"),
-                            ("guard", "xrun.py guard"), ("overnight", "overnight.py")):
-            if needle in args:
-                found[key].append(pid)
+        if script == "xrun.py" and rest[:1] == ["guard"]:
+            found["guard"].append(pid)
+        elif script in names:
+            found[names[script]].append(pid)
     return found
 
 

@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Xanadu Console</title>
+<style>
+  :root {
+    --bg: #f6f7f8; --panel: #ffffff; --ink: #15191e; --ink-2: #4a525c; --ink-3: #737c87;
+    --line: #e2e5e9; --field: #ffffff; --accent: #1f6f5c; --accent-ink: #ffffff; --accent-soft: #e5f2ee;
+    --ok: #1d7a46; --ok-bg: #e7f5ec; --warn: #9a5b00; --warn-bg: #fdf3e2; --bad: #b42318; --bad-bg: #fdecea;
+    --idle-bg: #eef0f2;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { color-scheme: dark; --bg: #0f1215; --panel: #171b20; --ink: #eceff2; --ink-2: #b5bcc4; --ink-3: #8a929b;
+      --line: #2a3037; --field: #11151a; --accent: #4fb89a; --accent-ink: #0c1512; --accent-soft: #15302a;
+      --ok: #5ccf8a; --ok-bg: #12291c; --warn: #f0b457; --warn-bg: #2d2413; --bad: #ff8a80; --bad-bg: #321715;
+      --idle-bg: #20262c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 var(--sans); }
+  header { display: flex; align-items: center; gap: 16px; padding: 12px 20px; border-bottom: 1px solid var(--line);
+    background: var(--panel); flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .01em; }
+  header .dir { margin-left: auto; display: flex; gap: 8px; align-items: center; color: var(--ink-3); font-size: 13px; }
+  header .dir input { width: 260px; }
+  .layout { display: grid; grid-template-columns: 250px 1fr; min-height: calc(100vh - 53px); }
+  nav { border-right: 1px solid var(--line); padding: 12px; display: flex; flex-direction: column; gap: 6px; background: var(--panel); }
+  nav .label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); padding: 4px 6px; }
+  .proj { width: 100%; text-align: left; border: 1px solid transparent; background: transparent; color: var(--ink); padding: 8px 10px;
+    border-radius: 8px; cursor: pointer; display: grid; gap: 4px; font: inherit; }
+  .proj:hover { background: var(--bg); }
+  .proj[aria-current="true"] { background: var(--accent-soft); border-color: var(--accent); }
+  .proj .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .proj .name { font-weight: 600; }
+  .bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  main { padding: 20px 24px 40px; display: grid; gap: 16px; align-content: start; max-width: 1100px; }
+  .chip { font-size: 12px; padding: 1px 8px; border-radius: 999px; white-space: nowrap; font-weight: 500; }
+  .chip.run { color: var(--ok); background: var(--ok-bg); }
+  .chip.idle { color: var(--ink-2); background: var(--idle-bg); }
+  .chip.warn { color: var(--warn); background: var(--warn-bg); }
+  .head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .head h2 { margin: 0; font-size: 20px; font-weight: 600; }
+  .head .count { font-family: var(--mono); color: var(--ink-2); }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
+  .tabs button { border: 0; background: none; font: inherit; color: var(--ink-2); padding: 8px 12px; cursor: pointer;
+    border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: grid; gap: 12px; }
+  .panel h3 { margin: 0; font-size: 14px; font-weight: 600; }
+  .panel .sub { color: var(--ink-3); font-size: 13px; margin: -6px 0 0; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .stat { display: grid; gap: 2px; }
+  .stat .k { font-size: 12px; color: var(--ink-3); }
+  .stat .v { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  label.f { display: grid; gap: 4px; font-size: 13px; color: var(--ink-2); align-content: start; }
+  label.f small { color: var(--ink-3); font-size: 12px; }
+  .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; align-items: start; }
+  input, select { font: inherit; color: var(--ink); background: var(--field); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 8px; min-width: 0; width: 100%; }
+  input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+  .seg button { border: 0; background: var(--field); color: var(--ink-2); font: inherit; padding: 6px 10px; cursor: pointer; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+  .btn { font: inherit; border-radius: 7px; padding: 7px 14px; cursor: pointer; border: 1px solid var(--line);
+    background: var(--field); color: var(--ink); }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  .btn.danger { color: var(--bad); border-color: var(--bad); }
+  .btn.danger.armed { background: var(--bad); color: #fff; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .msg { font-size: 13px; }
+  .msg.err { color: var(--bad); } .msg.ok { color: var(--ok); }
+  .errors { color: var(--bad); background: var(--bad-bg); border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+  .errors:empty { display: none; }
+  pre { margin: 0; font: 12px/1.5 var(--mono); background: var(--field); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; overflow: auto; max-height: 460px; white-space: pre-wrap; word-break: break-word; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { font-size: 12px; color: var(--ink-3); font-weight: 500; }
+  td.num { font-variant-numeric: tabular-nums; font-family: var(--mono); }
+  .alert { color: var(--warn); background: var(--warn-bg); border-radius: 8px; padding: 6px 10px; font-size: 13px; font-family: var(--mono); }
+  .muted { color: var(--ink-3); }
+  .hide { display: none !important; }
+  .check { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--ink-2); }
+  .check input { width: auto; }
+  .empty { color: var(--ink-3); padding: 40px 0; text-align: center; }
+  @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } nav { border-right: 0; border-bottom: 1px solid var(--line); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Xanadu Console</h1>
+  <span class="muted" id="clock"></span>
+  <div class="dir">
+    <label for="projdir">Projects folder</label>
+    <input id="projdir" spellcheck="false">
+    <button class="btn" id="projdir-save" type="button">Use</button>
+  </div>
+</header>
+<div class="layout">
+  <nav aria-label="Projects">
+    <div class="label">Projects</div>
+    <div id="projects"></div>
+  </nav>
+  <main id="main">
+    <div class="empty" id="empty">Choose a project on the left. A project needs a ROADMAP.md and a .sovereign_config.json.</div>
+
+    <div id="project" class="hide">
+      <div class="head">
+        <h2 id="p-name"></h2>
+        <span class="count" id="p-count"></span>
+        <span class="chip idle" id="p-state">Idle</span>
+      </div>
+      <div class="bar" style="margin-top:8px"><i id="p-bar" style="width:0"></i></div>
+
+      <div class="tabs" role="tablist" style="margin-top:16px">
+        <button role="tab" data-tab="run" aria-selected="true">Run</button>
+        <button role="tab" data-tab="plan" aria-selected="false">Plan</button>
+        <button role="tab" data-tab="runpod" aria-selected="false">RunPod</button>
+        <button role="tab" data-tab="logs" aria-selected="false">Logs</button>
+      </div>
+
+      <!-- RUN -->
+      <section data-pane="run" style="display:grid;gap:16px;margin-top:16px">
+        <div class="panel">
+          <div class="stats">
+            <div class="stat"><span class="k">State</span><span class="v" id="s-state">—</span></div>
+            <div class="stat"><span class="k">Current pass</span><span class="v" id="s-pass">—</span></div>
+            <div class="stat"><span class="k">Workers</span><span class="v" id="s-workers">—</span></div>
+            <div class="stat"><span class="k">Monitor</span><span class="v" id="s-monitor">—</span></div>
+            <div class="stat" id="s-spend-box"><span class="k">RunPod spend</span><span class="v" id="s-spend">—</span></div>
+          </div>
+          <div class="actions">
+            <button class="btn primary" id="launch" type="button">Launch run</button>
+            <button class="btn danger" id="stop" type="button">Stop run</button>
+            <span class="msg" id="run-msg"></span>
+          </div>
+          <p class="sub" style="margin:0">Launch stops anything left over, returns the project to a clean state, and starts the sweep with the saved plan. It refuses if the project has uncommitted changes.</p>
+        </div>
+        <div class="panel">
+          <h3>Needs attention</h3>
+          <div id="alerts"><span class="muted">No alerts.</span></div>
+        </div>
+        <div class="panel">
+          <h3>Recent events</h3>
+          <pre id="recent">—</pre>
+        </div>
+      </section>
+
+      <!-- PLAN -->
+      <section data-pane="plan" class="hide" style="display:grid;gap:16px;margin-top:16px">
+        <div class="errors" id="plan-errors"></div>
+        <div class="grid2" id="passes"></div>
+        <div class="panel" id="rp-plan">
+          <h3>RunPod for this run</h3>
+          <p class="sub">Used by any pass set to RunPod. Its pod starts before that pass and stops before the other pass; the guard stops it when the run ends or the spending cap is reached.</p>
+          <div class="fields">
+            <label class="f">GPU type
+              <select id="rp-gpu"></select></label>
+            <label class="f">GPUs
+              <input id="rp-count" type="number" min="1" max="8"></label>
+            <label class="f">Model storage (GB)
+              <input id="rp-volume" type="number" min="20" step="10"></label>
+            <label class="f">Cloud
+              <select id="rp-cloud"><option value="SECURE">Secure</option><option value="COMMUNITY">Community (cheaper)</option></select></label>
+            <label class="f">Spending cap for the run ($)
+              <input id="rp-cap" type="number" min="1" step="1"></label>
+            <label class="f">When the run ends
+              <select id="rp-after"><option value="stop">Stop pods (keep downloaded models)</option><option value="terminate">Delete pods</option></select></label>
+          </div>
+          <label class="check"><input type="checkbox" id="rp-between"> Stop a pass's pod while the other pass runs</label>
+        </div>
+        <div class="panel">
+          <h3>The run as a whole</h3>
+          <div class="fields">
+            <label class="f">Cycles at most
+              <input id="g-cycles" type="number" min="1" max="20"><small>A cycle is a fast pass then a strong pass; the run also stops when a cycle changes nothing.</small></label>
+            <label class="f">Time limit per task (minutes)
+              <input id="g-ceiling" type="number" min="5"></label>
+            <label class="f">Attempts: first tier
+              <input id="g-a1" type="number" min="1" max="10"></label>
+            <label class="f">Attempts: middle tiers
+              <input id="g-a2" type="number" min="1" max="10"></label>
+            <label class="f">Attempts: last tier
+              <input id="g-a3" type="number" min="1" max="10"></label>
+            <label class="f">Integration branch
+              <input id="g-branch" spellcheck="false"></label>
+          </div>
+          <label class="check"><input type="checkbox" id="m-restart"> Restart the run automatically if it dies (never when it has uncommitted changes)</label>
+          <label class="f" style="max-width:360px">Phone alerts via ntfy.sh topic (optional)
+            <input id="m-ntfy" spellcheck="false" placeholder="an unguessable topic name"></label>
+        </div>
+        <div class="actions">
+          <button class="btn primary" id="save" type="button">Save plan</button>
+          <span class="msg" id="save-msg"></span>
+        </div>
+      </section>
+
+      <!-- RUNPOD -->
+      <section data-pane="runpod" class="hide" style="display:grid;gap:16px;margin-top:16px">
+        <div class="panel">
+          <h3>API key</h3>
+          <p class="sub">From runpod.io → Settings → API Keys. Stored in the Xanadu folder's .env on this machine only.</p>
+          <div class="actions">
+            <input id="rp-key" type="password" autocomplete="off" style="max-width:360px" placeholder="paste a new key to replace">
+            <button class="btn" id="rp-key-save" type="button">Save key</button>
+            <span class="msg" id="rp-key-msg"></span>
+          </div>
+        </div>
+        <div class="panel">
+          <h3>Xanadu pods</h3>
+          <p class="sub">Only pods named xanadu-… are shown or controlled. Stopped pods cost a little for storage; deleted pods cost nothing.</p>
+          <div class="errors" id="rp-error"></div>
+          <table>
+            <thead><tr><th>Name</th><th>Status</th><th>$/hour</th><th>Endpoint</th><th></th></tr></thead>
+            <tbody id="rp-pods"><tr><td colspan="5" class="muted">—</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- LOGS -->
+      <section data-pane="logs" class="hide" style="display:grid;gap:12px;margin-top:16px">
+        <div class="seg" id="log-which">
+          <button type="button" data-log="monitor" aria-pressed="true">Monitor</button>
+          <button type="button" data-log="worker" aria-pressed="false">Workers</button>
+          <button type="button" data-log="sweep" aria-pressed="false">Sweep</button>
+          <button type="button" data-log="pods" aria-pressed="false">Pods</button>
+        </div>
+        <pre id="log" style="max-height:640px">—</pre>
+      </section>
+    </div>
+  </main>
+</div>
+
+<datalist id="model-list"></datalist>
+
+<script>
+const TOKEN = "__TOKEN__";
+const $ = (id) => document.getElementById(id);
+let current = null, plan = null, suggestions = [], gpus = [], logWhich = "monitor", tab = "run", dirty = false;
+
+async function api(path, body) {
+  const opts = { headers: { "X-Xanadu-Token": TOKEN } };
+  if (body !== undefined) { opts.method = "POST"; opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok && !data.errors) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
+}
+const q = (p) => `?project=${encodeURIComponent(p)}`;
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+// ── projects ──────────────────────────────────────────────────────────────
+async function loadProjects() {
+  const d = await api("/api/projects");
+  if (document.activeElement !== $("projdir")) $("projdir").value = d.settings.projects_dir;
+  const box = $("projects");
+  box.innerHTML = d.projects.length ? "" : '<div class="muted" style="padding:6px">No projects found in this folder.</div>';
+  for (const p of d.projects) {
+    const b = document.createElement("button");
+    b.className = "proj"; b.type = "button"; b.setAttribute("aria-current", String(current === p.path));
+    const pct = p.total ? Math.round(100 * p.done / p.total) : 0;
+    b.innerHTML = `<div class="row"><span class="name">${esc(p.name)}</span>
+      <span class="chip ${p.running ? "run" : "idle"}">${p.running ? "Running" : "Idle"}</span></div>
+      <div class="row muted"><span>${p.done}/${p.total} tasks</span><span>${p.has_plan ? "plan saved" : "defaults"}</span></div>
+      <div class="bar"><i style="width:${pct}%"></i></div>`;
+    b.onclick = () => select(p.path, p.name);
+    box.appendChild(b);
+  }
+}
+$("projdir-save").onclick = async () => { await api("/api/settings", { projects_dir: $("projdir").value }); loadProjects(); };
+
+async function select(path, name) {
+  if (dirty && !window.__confirmLeave) { $("save-msg").textContent = "Unsaved plan changes — save first, or click the project again to discard."; $("save-msg").className = "msg err"; window.__confirmLeave = true; return; }
+  window.__confirmLeave = false; dirty = false;
+  current = path; $("p-name").textContent = name;
+  history.replaceState(null, "", "#" + encodeURIComponent(name));
+  $("empty").classList.add("hide"); $("project").classList.remove("hide");
+  await Promise.all([loadPlan(), refreshStatus(), loadProjects()]);
+  if (tab === "runpod") loadRunpod();
+  if (tab === "logs") loadLog();
+}
+
+// ── tabs ──────────────────────────────────────────────────────────────────
+document.querySelectorAll("[role=tab]").forEach(t => t.onclick = () => {
+  tab = t.dataset.tab;
+  document.querySelectorAll("[role=tab]").forEach(x => x.setAttribute("aria-selected", String(x === t)));
+  document.querySelectorAll("[data-pane]").forEach(p => p.classList.toggle("hide", p.dataset.pane !== tab));
+  if (tab === "runpod") loadRunpod();
+  if (tab === "logs") loadLog();
+  if (current) history.replaceState(null, "", "#" + encodeURIComponent($("p-name").textContent) + (tab === "run" ? "" : "/" + tab));
+});
+
+// ── status ────────────────────────────────────────────────────────────────
+async function refreshStatus() {
+  if (!current) return;
+  const s = await api("/api/status" + q(current));
+  $("p-count").textContent = `${s.done} / ${s.total} tasks`;
+  $("p-bar").style.width = (s.total ? 100 * s.done / s.total : 0) + "%";
+  const st = $("p-state"); st.textContent = s.running ? "Running" : "Idle"; st.className = "chip " + (s.running ? "run" : "idle");
+  $("s-state").textContent = s.running ? "Running" : "Idle";
+  $("s-pass").textContent = s.pass ? s.pass.replace("cycle", "cycle ").replace("-cheap", " · fast").replace("-strong", " · strong") : "—";
+  $("s-workers").textContent = s.processes.work ? `${s.processes.work} busy` : "none";
+  $("s-monitor").textContent = s.processes.monitor ? "watching" : (s.running ? "not running" : "—");
+  $("s-spend-box").classList.toggle("hide", s.budget_usd == null);
+  if (s.budget_usd != null) $("s-spend").textContent = `$${(s.spent_usd ?? 0).toFixed(2)} of $${s.budget_usd}`;
+  $("launch").disabled = s.running; $("stop").disabled = !s.running;
+  $("alerts").innerHTML = s.alerts.length ? s.alerts.map(a => `<div class="alert">${esc(a)}</div>`).join("") : '<span class="muted">No alerts.</span>';
+  $("recent").textContent = s.recent.join("\n") || "No events yet.";
+}
+
+$("launch").onclick = async () => {
+  if (dirty) { msg("run-msg", "Save the plan first.", true); return; }
+  msg("run-msg", "Launching…");
+  try { const r = await api("/api/launch", { project: current }); r.ok ? msg("run-msg", "Launched.") : msg("run-msg", r.error, true); }
+  catch (e) { msg("run-msg", e.message, true); }
+  setTimeout(refreshStatus, 1500);
+};
+armed($("stop"), "Confirm stop", async () => {
+  msg("run-msg", "Stopping…");
+  try {
+    const r = await api("/api/stop", { project: current });
+    msg("run-msg", r.stopped ? (r.dirty.length ? "Stopped. The project has uncommitted changes (left untouched)." : "Stopped; project parked clean.") : "Some processes did not stop — check Logs.", !r.stopped);
+  } catch (e) { msg("run-msg", e.message, true); }
+  refreshStatus();
+});
+
+function armed(btn, label, fn) {
+  const orig = btn.textContent; let t = null;
+  btn.onclick = () => {
+    if (btn.classList.contains("armed")) { clearTimeout(t); btn.classList.remove("armed"); btn.textContent = orig; fn(); return; }
+    btn.classList.add("armed"); btn.textContent = label;
+    t = setTimeout(() => { btn.classList.remove("armed"); btn.textContent = orig; }, 4000);
+  };
+}
+function msg(id, text, err) { const m = $(id); m.textContent = text || ""; m.className = "msg " + (err ? "err" : "ok"); }
+
+// ── plan ──────────────────────────────────────────────────────────────────
+const PASSES = [["cheap", "Fast pass", "Clears the easy tasks quickly. Usually a small model on this machine."],
+                ["strong", "Strong pass", "Takes what the fast pass could not. A larger model, here or on RunPod."]];
+
+async function loadPlan() {
+  const d = await api("/api/plan" + q(current));
+  plan = d.plan; suggestions = d.suggestions; gpus = d.gpus;
+  const box = $("passes"); box.innerHTML = "";
+  for (const [key, title, sub] of PASSES) box.appendChild(passCard(key, title, sub));
+  $("rp-gpu").innerHTML = gpus.map(([g, n]) => `<option value="${esc(g)}">${esc(g)} — ${esc(n)}</option>`).join("");
+  if (!gpus.some(([g]) => g === plan.runpod.gpu_type)) $("rp-gpu").insertAdjacentHTML("beforeend", `<option value="${esc(plan.runpod.gpu_type)}">${esc(plan.runpod.gpu_type)}</option>`);
+  $("rp-gpu").value = plan.runpod.gpu_type; $("rp-count").value = plan.runpod.gpu_count; $("rp-volume").value = plan.runpod.volume_gb;
+  $("rp-cloud").value = plan.runpod.cloud; $("rp-cap").value = plan.runpod.max_run_usd; $("rp-after").value = plan.runpod.after_run;
+  $("rp-between").checked = !!plan.runpod.stop_between_passes;
+  $("g-cycles").value = plan.max_cycles; $("g-ceiling").value = Math.round(plan.task_ceiling_s / 60);
+  $("g-a1").value = plan.attempts.tier1; $("g-a2").value = plan.attempts.mid; $("g-a3").value = plan.attempts.last;
+  $("g-branch").value = plan.main_branch; $("m-restart").checked = !!plan.monitor.restart; $("m-ntfy").value = plan.monitor.ntfy_topic || "";
+  $("plan-errors").textContent = (d.errors || []).join(" · ");
+  updateRunpodVisibility(); dirty = false; msg("save-msg", "");
+  const local = await api("/api/models");
+  fillModels(local.models);
+}
+
+function fillModels(extra) {
+  const seen = new Set();
+  $("model-list").innerHTML = [...(extra || []).map(m => ({ model: m, note: "installed" })), ...suggestions]
+    .filter(s => !seen.has(s.model) && seen.add(s.model))
+    .map(s => `<option value="${esc(s.model)}">${esc(s.note || "")}</option>`).join("");
+}
+
+function passCard(key, title, sub) {
+  const p = plan[key];
+  const el = document.createElement("div"); el.className = "panel"; el.dataset.pass = key;
+  el.innerHTML = `<h3>${title}</h3><p class="sub">${sub}</p>
+    <div class="fields">
+      <label class="f" style="grid-column:1/-1">Model
+        <input data-k="model" list="model-list" spellcheck="false" value="${esc(p.model)}"><small data-note></small></label>
+      <label class="f">Size (billions of parameters)<input data-k="params" type="number" min="1" step="1" value="${p.params}"></label>
+      <label class="f">Context window<input data-k="ctx" type="number" min="2048" step="1024" value="${p.ctx}"></label>
+    </div>
+    <div class="f" style="display:grid;gap:6px">Runs on
+      <div class="seg" data-where>
+        <button type="button" data-v="local">This machine</button>
+        <button type="button" data-v="runpod">RunPod</button>
+        <button type="button" data-v="url">Another server</button>
+      </div>
+      <input data-k="url" placeholder="http://gpu-box.internal:11434" spellcheck="false" value="${esc(p.url)}">
+      <div class="actions"><button class="btn" type="button" data-check>Check this server's models</button><span class="msg" data-check-msg></span></div>
+    </div>
+    <div class="fields">
+      <label class="f">Workers<input data-k="workers" type="number" min="1" max="4" value="${p.workers}"><small>More than 1 only on this machine with a small model.</small></label>
+      <label class="f">Pass time cap (minutes)<input data-k="cap_minutes" type="number" min="10" step="10" value="${p.cap_minutes}"></label>
+      <label class="f">Per-attempt limit (minutes)<input data-k="call_timeout_min" type="number" min="0" step="1" value="${Math.round((p.call_timeout_s || 0) / 60)}"><small>0 = model default (30 min large, 10 min small).</small></label>
+      <label class="f">Thinking<select data-k="think">
+        <option value="default">Model decides</option><option value="on">On</option><option value="off">Off (faster, less accurate)</option>
+        <option value="first-only">First attempt only</option></select></label>
+    </div>`;
+  el.querySelector('[data-k="think"]').value = p.think;
+  const seg = el.querySelector("[data-where]");
+  const setWhere = (v) => { p.where = v; seg.querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+    el.querySelector('[data-k="url"]').classList.toggle("hide", v !== "url");
+    el.querySelector("[data-check]").textContent = v === "local" ? "Check installed models" : "Check this server's models";
+    el.querySelector("[data-check]").classList.toggle("hide", v === "runpod");
+    updateRunpodVisibility(); };
+  seg.querySelectorAll("button").forEach(b => b.onclick = () => { setWhere(b.dataset.v); dirty = true; });
+  setWhere(p.where);
+  const note = el.querySelector("[data-note]");
+  const modelIn = el.querySelector('[data-k="model"]');
+  const showNote = () => { const s = suggestions.find(x => x.model === modelIn.value); note.textContent = s ? s.note : "";
+    if (s && document.activeElement === modelIn) el.querySelector('[data-k="params"]').value = s.params; };
+  modelIn.addEventListener("input", showNote); showNote();
+  el.querySelectorAll("input,select").forEach(i => i.addEventListener("input", () => { dirty = true; msg("save-msg", "Unsaved changes"); }));
+  el.querySelector("[data-check]").onclick = async () => {
+    const m = el.querySelector("[data-check-msg]"); m.textContent = "Checking…"; m.className = "msg";
+    const url = p.where === "url" ? el.querySelector('[data-k="url"]').value : "";
+    const r = await api("/api/models" + (url ? `?url=${encodeURIComponent(url)}` : ""));
+    if (r.error) { m.textContent = r.error; m.className = "msg err"; return; }
+    fillModels(r.models);
+    const has = r.models.includes(modelIn.value) || r.models.includes(modelIn.value + ":latest");
+    m.textContent = `${r.models.length} model(s) there` + (modelIn.value ? (has ? ` — ${modelIn.value} is installed` : ` — ${modelIn.value} is NOT installed`) : "");
+    m.className = "msg " + (has ? "ok" : "err");
+  };
+  return el;
+}
+
+function updateRunpodVisibility() {
+  const any = plan && (plan.cheap.where === "runpod" || plan.strong.where === "runpod");
+  $("rp-plan").classList.toggle("hide", !any);
+}
+document.querySelectorAll("#rp-plan input, #rp-plan select, [data-pane=plan] .panel:last-of-type input").forEach(i => i.addEventListener("input", () => { dirty = true; msg("save-msg", "Unsaved changes"); }));
+["g-cycles","g-ceiling","g-a1","g-a2","g-a3","g-branch","m-restart","m-ntfy"].forEach(id => $(id).addEventListener("input", () => { dirty = true; msg("save-msg", "Unsaved changes"); }));
+
+function collectPlan() {
+  const out = { runpod: {}, attempts: {}, monitor: {} };
+  document.querySelectorAll("[data-pass]").forEach(el => {
+    const key = el.dataset.pass, p = { where: plan[key].where };
+    el.querySelectorAll("[data-k]").forEach(i => {
+      const k = i.dataset.k;
+      if (k === "call_timeout_min") p.call_timeout_s = Math.round(Number(i.value || 0) * 60);
+      else p[k] = i.type === "number" ? Number(i.value) : i.value.trim();
+    });
+    out[key] = p;
+  });
+  out.runpod = { gpu_type: $("rp-gpu").value, gpu_count: Number($("rp-count").value), volume_gb: Number($("rp-volume").value),
+    cloud: $("rp-cloud").value, max_run_usd: Number($("rp-cap").value), after_run: $("rp-after").value, stop_between_passes: $("rp-between").checked };
+  out.max_cycles = Number($("g-cycles").value); out.task_ceiling_s = Math.round(Number($("g-ceiling").value) * 60);
+  out.attempts = { tier1: Number($("g-a1").value), mid: Number($("g-a2").value), last: Number($("g-a3").value) };
+  out.main_branch = $("g-branch").value.trim();
+  out.monitor = { restart: $("m-restart").checked, ntfy_topic: $("m-ntfy").value.trim() };
+  return out;
+}
+
+$("save").onclick = async () => {
+  const r = await api("/api/plan", { project: current, plan: collectPlan() });
+  if (r.errors && r.errors.length) { $("plan-errors").textContent = r.errors.join(" · "); msg("save-msg", "Not saved — fix the errors above.", true); return; }
+  $("plan-errors").textContent = ""; dirty = false; msg("save-msg", "Saved. The next launch uses this plan.");
+  loadProjects();
+};
+
+// ── runpod ────────────────────────────────────────────────────────────────
+async function loadRunpod() {
+  const d = await api("/api/runpod");
+  msg("rp-key-msg", d.has_key ? "A key is saved." : "No key saved yet.", !d.has_key);
+  $("rp-error").textContent = d.error || "";
+  const tb = $("rp-pods");
+  if (!d.has_key) { tb.innerHTML = '<tr><td colspan="5" class="muted">Add an API key to see pods.</td></tr>'; return; }
+  if (!d.pods.length) { tb.innerHTML = '<tr><td colspan="5" class="muted">No Xanadu pods. A run creates one when a pass is set to RunPod.</td></tr>'; return; }
+  tb.innerHTML = "";
+  for (const p of d.pods) {
+    const tr = document.createElement("tr");
+    const running = p.status === "RUNNING";
+    tr.innerHTML = `<td>${esc(p.name)}</td><td><span class="chip ${running ? "run" : "idle"}">${esc(p.status)}</span></td>
+      <td class="num">${p.costPerHr ? "$" + Number(p.costPerHr).toFixed(2) : "—"}</td><td class="num">${esc(p.endpoint)}</td>
+      <td class="actions" style="justify-content:flex-end"></td>`;
+    const cell = tr.lastElementChild;
+    const act = (label, path, cls) => { const b = document.createElement("button"); b.className = "btn " + (cls || ""); b.type = "button"; b.textContent = label; cell.appendChild(b); return b; };
+    const go = async (path) => { try { await api(path, { pod_id: p.id }); } catch (e) { $("rp-error").textContent = e.message; } loadRunpod(); };
+    if (running) act("Stop").onclick = () => go("/api/runpod/stop"); else act("Start").onclick = () => go("/api/runpod/start");
+    armed(act("Delete", null, "danger"), "Confirm delete", () => go("/api/runpod/terminate"));
+    tb.appendChild(tr);
+  }
+}
+$("rp-key-save").onclick = async () => {
+  const r = await api("/api/runpod/key", { key: $("rp-key").value });
+  $("rp-key").value = ""; msg("rp-key-msg", r.has_key ? "Key saved." : "Key removed.", !r.has_key); loadRunpod();
+};
+
+// ── logs ──────────────────────────────────────────────────────────────────
+document.querySelectorAll("#log-which button").forEach(b => b.onclick = () => {
+  logWhich = b.dataset.log; document.querySelectorAll("#log-which button").forEach(x => x.setAttribute("aria-pressed", String(x === b))); loadLog();
+});
+async function loadLog() {
+  if (!current) return;
+  const pre = $("log"), atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+  const d = await api(`/api/logs${q(current)}&which=${logWhich}`);
+  pre.textContent = d.text || "Nothing logged yet.";
+  if (atBottom) pre.scrollTop = pre.scrollHeight;
+}
+
+// ── loop ──────────────────────────────────────────────────────────────────
+function tick() { $("clock").textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+tick(); setInterval(tick, 30000);
+loadProjects().then(async () => {
+  // #<project> in the address opens that project (bookmarkable)
+  const [want, wantTab] = decodeURIComponent(location.hash.slice(1)).split("/");
+  if (!want) return;
+  const d = await api("/api/projects");
+  const p = d.projects.find(x => x.name === want);
+  if (p) await select(p.path, p.name);
+  const t = document.querySelector(`[role=tab][data-tab="${wantTab}"]`);
+  if (t) t.click();
+}).catch(e => $("projects").textContent = e.message);
+setInterval(() => { refreshStatus().catch(() => {}); if (tab === "logs") loadLog().catch(() => {}); }, 10000);
+setInterval(() => loadProjects().catch(() => {}), 30000);
+</script>
+</body>
+</html>

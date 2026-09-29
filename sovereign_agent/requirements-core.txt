@@ -1,0 +1,5 @@
+# What Xanadu needs to run sweeps and the console. The full requirements.txt
+# adds optional features: RAG (torch, lancedb, tree-sitter), Firestore lesson
+# sync, and Claude escalation.
+python-dotenv>=1.0.0
+requests>=2.28.0

@@ -43,6 +43,7 @@ from sov.config import (  # noqa: E402
     BUDGET_MULTIPLIER,
     GIT_BRANCHES,
     MAIN_BRANCH,
+    MODEL_PARAMS,
     PHASE_MAX_ATTEMPTS,
     PLANNER_MODEL,
     QUICK_PARAM_LIMIT_B,
@@ -65,6 +66,7 @@ from sov.roadmap import _is_test_task, mark_done, parse_all_tasks, task_text
 from sov.runner import QUICK_MAX_TIER_IDX, run_task
 from sov.scheduling import _feature_stem, _task_primary_file, tasks_for_worker
 from sov.telemetry import _ledger
+from sov import routing
 from sov.ui import BOLD, DIM, GREEN, RED, RESET, YELLOW
 from sov.watchdog import _start_stall_watchdog
 
@@ -639,6 +641,18 @@ def _first_pass(args, indexed_tasks, project_root: str, log_file: str,
 
         if args.dry_run:
             print(f"  {DIM}(dry-run){RESET}")
+            continue
+
+        # Routing policy (opt-in, sov/routing.py): a small-model run leaves a
+        # new layer's first tasks, and tasks small models keep failing, to the
+        # strong pass instead of spending attempts on them.
+        _why = routing.check(task, project_root,
+                             TIER_MODELS[run_start_tier_idx:(run_max_tier_idx or len(TIER_MODELS))],
+                             MODEL_PARAMS)
+        if _why:
+            print(f"  {DIM}[deferred] {_why} — left for the strong pass{RESET}")
+            with open(log_file, "a") as f:
+                f.write(f"Deferred by routing: {_why}\n")
             continue
 
         # Go dependency gating: a prerequisite task failed this run, so this

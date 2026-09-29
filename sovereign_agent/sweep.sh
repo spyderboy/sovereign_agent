@@ -125,6 +125,17 @@ run_pass() {   # $1 profile  $2 cap  $3 label  $4 workers
     before=$(done_count)
     say "${BOLD}$label${RESET}  profile=$prof  cap=${cap}s  workers=$workers  done=$before"
     reset_tree
+    # PASS_HOOK (set by xrun.py / the console): runs before each pass with the
+    # pass label and profile — it starts the pass's RunPod pod and stops idle
+    # ones. A failing hook skips the pass rather than running it against an
+    # endpoint that isn't there.
+    if [ -n "${PASS_HOOK:-}" ]; then
+        if ! $PASS_HOOK "$label" "$prof" >>"$RESULTS/hook.log" 2>&1; then
+            say "${YELLOW}$label skipped — pass hook failed (see $RESULTS/hook.log)${RESET}"
+            PASS_GAIN=0
+            return
+        fi
+    fi
 
     start=$SECONDS
     ( cd "$SOVEREIGN" && SOVEREIGN_PROFILE="$prof" \

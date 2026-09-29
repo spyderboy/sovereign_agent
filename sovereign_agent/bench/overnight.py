@@ -96,26 +96,12 @@ class Night:
         if monitor.run_pids(self.root):
             raise RuntimeError("run processes survived the kill")
         root = self.root
-        if os.path.exists(os.path.join(root, ".git", "MERGE_HEAD")):
-            monitor.git(root, "merge", "--abort")
-        for dirpath, _, files in os.walk(os.path.join(root, ".git")):
-            for f in files:
-                if f.endswith(".lock"):
-                    os.remove(os.path.join(dirpath, f))
-        for item in monitor.stale_tree(root):
-            kind, ref = item.split(" ", 1)
-            if kind == "worktree":
-                monitor.git(root, "worktree", "remove", "--force", ref)
-        monitor.git(root, "worktree", "prune")
-        main = self.env.get("MAIN_BRANCH", "main")
-        monitor.git(root, "checkout", "-q", "-f", main)
-        for item in monitor.stale_tree(root):
-            kind, ref = item.split(" ", 1)
-            if kind == "branch":
-                monitor.git(root, "branch", "-D", ref)
-        dirty = monitor.dirty_main(root)
+        # runctl.park_repo checks for human edits BEFORE any forced checkout
+        # (this used to checkout -f first and would have erased one).
+        from sov import runctl
+        dirty = runctl.park_repo(root, self.env.get("MAIN_BRANCH", "main"))
         if dirty:
-            raise RuntimeError(f"main checkout not clean after pause: {dirty[:5]}")
+            raise RuntimeError(f"main checkout has uncommitted changes — not touching them: {dirty[:5]}")
         d, t = monitor.counts(root)
         self.say(f"paused the sweep at {d}/{t}; repo parked clean")
 

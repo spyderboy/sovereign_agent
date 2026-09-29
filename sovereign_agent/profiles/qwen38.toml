@@ -47,6 +47,3 @@ quick_param_limit_b = 28
 
 [run]
 main_branch = "main"
-# File selection is a small job: a 27B reasoning model took 5+ min and gave up
-# with no output (2026-09-28). The 7B picks files in seconds.
-planner_model = "qwen2.5-coder:7b"

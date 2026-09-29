@@ -33,7 +33,7 @@ PASS_DEFAULTS = {
               "call_timeout_s": 0, "planner_model": ""},
     "strong": {"model": "qwen3.8:27b", "params": 27, "ctx": 16384, "where": "local",
                "url": "", "workers": 1, "cap_minutes": 120, "think": "default",
-               "call_timeout_s": 900, "planner_model": "qwen2.5-coder:7b"},
+               "call_timeout_s": 900, "planner_model": ""},
 }
 PLAN_DEFAULTS = {
     "main_branch": "main",

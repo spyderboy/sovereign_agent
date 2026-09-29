@@ -30,10 +30,10 @@ PY = str(HERE / ".venv" / "bin" / "python") if (HERE / ".venv").exists() else sy
 PASS_DEFAULTS = {
     "cheap": {"model": "qwen2.5-coder:14b", "params": 14, "ctx": 16384, "where": "local",
               "url": "", "workers": 2, "cap_minutes": 90, "think": "default",
-              "call_timeout_s": 0},
+              "call_timeout_s": 0, "planner_model": ""},
     "strong": {"model": "qwen3.8:27b", "params": 27, "ctx": 16384, "where": "local",
                "url": "", "workers": 1, "cap_minutes": 120, "think": "default",
-               "call_timeout_s": 900},
+               "call_timeout_s": 900, "planner_model": "qwen2.5-coder:7b"},
 }
 PLAN_DEFAULTS = {
     "main_branch": "main",
@@ -128,6 +128,8 @@ def profile_text(plan: dict, pass_name: str, url: str = "") -> str:
     if int(p.get("call_timeout_s") or 0):
         lines.append(f"call_timeout_s = {int(p['call_timeout_s'])}")
     lines += ["", "[run]", f'main_branch = "{plan["main_branch"]}"']
+    if p.get("planner_model"):
+        lines.append(f'planner_model = "{p["planner_model"]}"')
     think = p.get("think", "default")
     if think == "on":
         lines.append("think = true")

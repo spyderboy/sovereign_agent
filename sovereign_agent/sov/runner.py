@@ -39,7 +39,7 @@ from sov.lazytools import _get_advisor, _get_autofix, _get_dart_import_fixer
 from sov.llm import PromptTooLargeError
 from sov.prompting import implement_task
 from sov.roadmap import _extract_task_gate, _is_test_task
-from sov.telemetry import REVIEW_LOG, _append_race, _append_velocity, _extract_error_codes, _ledger, _log_attempt_trace, _log_task_summary
+from sov.telemetry import REVIEW_LOG, _append_race, _append_trace, _append_velocity, _extract_error_codes, _ledger, _log_attempt_trace, _log_task_summary
 from sov.ui import DIM, GREEN, RED, RESET, YELLOW
 from sov.validation import _park_for_review, snapshot_baseline_errors, validate
 from sov.watchdog import heartbeat
@@ -511,6 +511,19 @@ def run_task(task: str, project_root: str, log_file: str,
                 changes, call_info = implement_task(task, file_contents, errors, model=current_model,
                                                     is_test=is_test, project_root=project_root)
         except (ReadTimeout, RequestsConnectionError) as exc:
+            # A timed-out attempt produced no output, so it never reached
+            # _log_attempt_trace — hour-long stalls left no data at all
+            # (2026-09-29). Record what the model was given.
+            _append_trace(project_root, {
+                "record_type": "timeout", "trace_id": f"{task_idx}:{attempt}",
+                "date": date.today().isoformat(), "task_idx": task_idx, "task": task,
+                "attempt": attempt, "tier": tier_idx + 1, "model": current_model,
+                "relevant_files": list(rel_files),
+                "context_chars": sum(len(v) for v in file_contents.values()),
+                "errors_fed_in_chars": len(errors or ""),
+                "elapsed_s": round(time.time() - task_start, 1),
+                "error": str(exc)[:300],
+            })
             errors = f"Model timed out or connection failed: {exc}. Retry."
             errors_seen.append("timeout")
             print(f" {YELLOW}timeout — retrying{RESET}")

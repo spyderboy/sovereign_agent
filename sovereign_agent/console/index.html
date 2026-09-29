@@ -394,6 +394,7 @@ function passCard(key, title, sub) {
       <label class="f">Workers<input data-k="workers" type="number" min="1" max="4" value="${p.workers}"><small>More than 1 only on this machine with a small model.</small></label>
       <label class="f">Pass time cap (minutes)<input data-k="cap_minutes" type="number" min="10" step="10" value="${p.cap_minutes}"></label>
       <label class="f">Per-attempt limit (minutes)<input data-k="call_timeout_min" type="number" min="0" step="1" value="${Math.round((p.call_timeout_s || 0) / 60)}"><small>0 = model default (30 min large, 10 min small).</small></label>
+      <label class="f">File-selection model<input data-k="planner_model" list="model-list" spellcheck="false" value="${esc(p.planner_model || "")}"><small>Picks each task's files. Blank = same as the pass. A small local model (7B) is fast and enough.</small></label>
       <label class="f">Thinking<select data-k="think">
         <option value="default">Model decides</option><option value="on">On</option><option value="off">Off (faster, less accurate)</option>
         <option value="first-only">First attempt only</option></select></label>

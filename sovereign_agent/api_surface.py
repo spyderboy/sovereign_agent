@@ -346,6 +346,21 @@ def rows_python(project: str) -> list[str]:
                 out.append(f"| `{name}` fields | "
                            f"{', '.join('`' + f + '`' for f in info['fields'][:12])} | "
                            f"any other attribute; construct with these keywords only |")
+    # WHERE EACH TYPE LIVES. Field rows alone let the model guess the module:
+    # xmeasure's Config is in config_schema, every sibling imported from
+    # xmeasure.model, and the 14B wrote `from xmeasure.model import Config`
+    # 8+ times past a guard (2026-09-30). One import row per locked module.
+    by_mod: dict[str, list[str]] = {}
+    for name, info in sorted(classes.items()):
+        if (info["file"] in locked or info["file"].startswith(prefixes)) and info["fields"]:
+            by_mod.setdefault(info["file"][:-3].replace(os.sep, "."), []).append(name)
+    if len(by_mod) > 1:
+        for mod, names in sorted(by_mod.items()):
+            others = ", ".join(f"`{m}`" for m in sorted(by_mod) if m != mod)
+            out.append(f"| import {', '.join('`' + n + '`' for n in names[:4])}"
+                       f"{', …' if len(names) > 4 else ''} | "
+                       f"`from {mod} import {', '.join(names)}` | "
+                       f"importing them from {others} |")
     for t, cols in sorted(tables.items()):
         out.append(f"| table `{t}` columns | {', '.join('`' + c + '`' for c in cols)} | "
                    f"any other column name |")

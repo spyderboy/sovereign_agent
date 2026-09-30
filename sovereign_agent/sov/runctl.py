@@ -30,10 +30,12 @@ PY = str(HERE / ".venv" / "bin" / "python") if (HERE / ".venv").exists() else sy
 PASS_DEFAULTS = {
     "cheap": {"model": "qwen2.5-coder:14b", "params": 14, "ctx": 16384, "where": "local",
               "url": "", "workers": 2, "cap_minutes": 90, "think": "default",
-              "call_timeout_s": 0, "planner_model": ""},
+              "call_timeout_s": 0, "planner_model": "",
+              "escalation_model": "", "escalation_url": ""},
     "strong": {"model": "qwen3.8:27b", "params": 27, "ctx": 16384, "where": "local",
                "url": "", "workers": 1, "cap_minutes": 120, "think": "default",
-               "call_timeout_s": 900, "planner_model": ""},
+               "call_timeout_s": 900, "planner_model": "",
+              "escalation_model": "", "escalation_url": ""},
 }
 PLAN_DEFAULTS = {
     "main_branch": "main",
@@ -82,6 +84,11 @@ def validate(plan: dict) -> list[str]:
             errs.append(f"{name}: where must be local, runpod or url")
         if p.get("where") == "url" and not str(p.get("url", "")).startswith(("http://", "https://")):
             errs.append(f"{name}: enter the server URL (http://… or https://…)")
+        eu = str(p.get("escalation_url") or "")
+        if eu and not eu.startswith(("http://", "https://")):
+            errs.append(f"{name}: the final-tier server must be a URL (http://… or https://…)")
+        if eu and not p.get("escalation_model"):
+            errs.append(f"{name}: a final-tier server needs a final-tier model")
         if not 1 <= int(p.get("workers", 1)) <= 4:
             errs.append(f"{name}: workers must be 1–4")
         if int(p.get("cap_minutes", 0)) < 10:
@@ -130,6 +137,10 @@ def profile_text(plan: dict, pass_name: str, url: str = "") -> str:
     lines += ["", "[run]", f'main_branch = "{plan["main_branch"]}"']
     if p.get("planner_model"):
         lines.append(f'planner_model = "{p["planner_model"]}"')
+    if p.get("escalation_model"):
+        lines.append(f'escalation_model = "{p["escalation_model"]}"')
+        if p.get("escalation_url"):
+            lines.append(f'escalation_url = "{p["escalation_url"].rstrip("/")}"')
     think = p.get("think", "default")
     if think == "on":
         lines.append("think = true")

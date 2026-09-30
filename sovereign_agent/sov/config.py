@@ -162,6 +162,8 @@ def endpoint_for(model: str) -> str:
     for m, url in zip(TIER_MODELS, TIER_URLS):
         if m == model and url:
             return url
+    if ESCALATION_MODEL and model == ESCALATION_MODEL and ESCALATION_URL:
+        return ESCALATION_URL
     return OLLAMA_URL
 
 # ── Quick-mode parameter gate ────────────────────────────────────────────────
@@ -192,6 +194,13 @@ GIT_BRANCHES  = _b("GIT_BRANCHES",  _RUN.get("git_branches"),  True)
 CLAUDE_MODEL   = _s("CLAUDE_MODEL",   _RUN.get("claude_model"), "claude-sonnet-4-6")
 CLAUDE_ENABLED = _b("CLAUDE_ENABLED", _RUN.get("claude_enabled"), False)
 
+# Self-hosted final tier (2026-09-30): an Ollama model — on this machine, an
+# on-prem server or a RunPod pod — instead of Claude, for teams whose code may
+# not leave the building. Setting it turns the final tier on and takes
+# precedence over Claude.
+ESCALATION_MODEL = _s("ESCALATION_MODEL", _RUN.get("escalation_model"), "")
+ESCALATION_URL   = _s("ESCALATION_URL",   _RUN.get("escalation_url"),   "")
+
 # ── Context windows ──────────────────────────────────────────────────────────
 # Keyed by model name, so two tiers sharing weights share one entry — which is
 # why setting CTX_TIER1 and CTX_ADVISOR differently for the same model silently
@@ -220,6 +229,9 @@ MODEL_CTX.update({
     TIER3_MODEL: _i("CTX_TIER3", _tier(3, "ctx", None), _CTX_DEFAULT),
     TIER4_MODEL: _i("CTX_TIER4", _tier(4, "ctx", None), _CTX_DEFAULT),
 })
+if ESCALATION_MODEL:
+    MODEL_CTX.setdefault(ESCALATION_MODEL,
+                         _i("CTX_ESCALATION", _RUN.get("escalation_ctx"), 32768))
 
 
 def ctx_conflicts() -> str:

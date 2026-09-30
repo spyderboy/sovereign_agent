@@ -97,6 +97,15 @@ office or your own cloud account. Set **Runs on** to **Another server** and
 enter its address, e.g. `http://gpu-box.internal:11434`. Use **Check this
 server's models** to confirm the connection and the model.
 
+## A final tier for the hardest tasks
+
+When every model in a pass has failed a task, Xanadu can try one bigger model
+before leaving the task for a person. Set **Final-tier model** (for example a
+70B model) and, if it isn't on this machine, **Final-tier server** — any Ollama
+address: an office GPU box, or a RunPod pod you started. It is used instead of
+Claude, so the code never leaves your servers. Leave it blank for no final tier.
+The strong pass is the natural place for it.
+
 ## When the console shows an alert
 
 | Alert | What it means | What to do |

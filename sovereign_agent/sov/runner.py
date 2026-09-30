@@ -329,7 +329,7 @@ def run_task(task: str, project_root: str, log_file: str,
     # If this task has been skipped in previous runs, skip local models entirely
     # and call Claude directly with a richer, focused prompt.  If Claude also
     # fails, fall through to the normal tier loop as a last resort.
-    if state.CLAUDE_ENABLED and CHRONIC_BLOCKER_THRESHOLD > 0:
+    if state.FINAL_TIER_ENABLED and CHRONIC_BLOCKER_THRESHOLD > 0:
         prior_skips = _count_prior_skips(task, project_root)
         if prior_skips >= CHRONIC_BLOCKER_THRESHOLD:
             file_contents_c = read_files(rel_files, project_root)
@@ -1018,8 +1018,8 @@ def run_task(task: str, project_root: str, log_file: str,
                 )
                 print(f"\n  {YELLOW}⏭  All local tiers exhausted ({reason}){RESET}")
 
-                if state.CLAUDE_ENABLED:
-                    restore_files(backups, project_root)  # clean slate for Claude
+                if state.FINAL_TIER_ENABLED:
+                    restore_files(backups, project_root)  # clean slate for the final tier
                     file_contents_claude = read_files(rel_files, project_root)
                     claude_changes, _ = _escalate_to_claude(
                         task, file_contents_claude, errors, project_root, is_test)

@@ -152,6 +152,7 @@ def main():
     # and keep these passes purely local-model based.
     if args.quick or args.deep:
         state.CLAUDE_ENABLED = False
+        state.FINAL_TIER_ENABLED = False
 
     _print_banner(args, today_str, indexed_tasks, run_start_tier_idx, run_max_tier_idx)
     if not args.dry_run:

@@ -7,9 +7,12 @@ would go stale on reassignment, so every reader uses `state.NAME`.
 Extracted from work.py (2026-09-28); behaviour unchanged.
 """
 from sov.config import CLAUDE_ENABLED as _CLAUDE_ENABLED_DEFAULT
+from sov.config import ESCALATION_MODEL as _ESCALATION_MODEL
 
 # The CLI may force Claude escalation off for this run (see work.main).
 CLAUDE_ENABLED = _CLAUDE_ENABLED_DEFAULT
+# The final tier after local models: Claude, or the self-hosted ESCALATION_MODEL.
+FINAL_TIER_ENABLED = bool(_CLAUDE_ENABLED_DEFAULT or _ESCALATION_MODEL)
 
 # Per-attempt thinking override set by the runner (OLLAMA_THINK_RETRIES);
 # None means use OLLAMA_THINK.

@@ -8,13 +8,16 @@ import json
 import os
 import re as _re
 from sov.config import (
+    CALL_TIMEOUT_S,
     CLAUDE_MODEL,
+    ESCALATION_MODEL,
     PHASE_STRIKE_LIMIT,
     TIER_MODELS,
 )
 from sov import state
 from sov.files import LOCKED_FILES
 from sov.lazytools import _get_advisor
+from sov import llm
 from sov.llm import _extract_first_json_object
 from sov.telemetry import VELOCITY_LOG
 from sov.ui import DIM, RED, RESET, YELLOW
@@ -83,26 +86,52 @@ def _write_escalation(project_root: str, task_idx: int, task: str,
     return path
 
 
-def _escalate_to_claude(
-    task: str, file_contents: dict, errors: str,
-    project_root: str, is_test: bool,
-) -> tuple[dict, bool]:
-    """Call Claude API as the final escalation tier.
+def final_tier_name() -> str:
+    return ESCALATION_MODEL or f"Claude ({CLAUDE_MODEL})"
 
-    Returns (changes, success) where changes is the same {path: content} dict
-    that implement_task returns, and success=True if validation passed.
-    """
+
+def _final_tier_call(system_prompt: str, user_prompt: str) -> str | None:
+    """One call to the final tier: the self-hosted ESCALATION_MODEL when set,
+    else Claude. Returns the raw text, or None when the tier is unavailable
+    or the call failed (already reported). Never raises."""
+    if ESCALATION_MODEL:
+        try:
+            return llm.ollama(ESCALATION_MODEL, system_prompt, user_prompt,
+                              timeout=CALL_TIMEOUT_S or 1800)
+        except Exception as exc:
+            print(f" {RED}{ESCALATION_MODEL} error: {exc}{RESET}")
+            return None
     try:
         import anthropic
     except ImportError:
         print(f"  {YELLOW}anthropic package not installed — pip install anthropic{RESET}")
-        return {}, False
-
+        return None
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
         print(f"  {YELLOW}ANTHROPIC_API_KEY not set — skipping Claude escalation{RESET}")
-        return {}, False
+        return None
+    try:
+        msg = anthropic.Anthropic(api_key=api_key).messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=8192,
+            messages=[{"role": "user", "content": user_prompt}],
+            system=system_prompt,
+        )
+        return msg.content[0].text if msg.content else ""
+    except Exception as exc:
+        print(f" {RED}Claude API error: {exc}{RESET}")
+        return None
 
+
+def _escalate_to_claude(
+    task: str, file_contents: dict, errors: str,
+    project_root: str, is_test: bool,
+) -> tuple[dict, bool]:
+    """The final escalation tier (Claude, or the self-hosted ESCALATION_MODEL).
+
+    Returns (changes, success) where changes is the same {path: content} dict
+    that implement_task returns, and success=True if validation passed.
+    """
     vision = open("VISION.md").read() if os.path.exists("VISION.md") else ""
     _project_rules = open(".roorules").read() if os.path.exists(".roorules") else ""
     _global_rules_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "global_rules.md")
@@ -119,7 +148,7 @@ def _escalate_to_claude(
     )
 
     system_prompt = (
-        "You are an expert Dart/Flutter coding agent acting as final escalation. "
+        "You are an expert coding agent for this project's language and stack, acting as final escalation. "
         "Previous smaller models failed. Apply precise, minimal fixes.\n"
         "Return ONLY a JSON object where keys are file paths and values are COMPLETE file contents.\n"
         "No explanation, no markdown outside the JSON.\n\n"
@@ -133,27 +162,22 @@ def _escalate_to_claude(
         f"All previous attempts failed with these errors — study them carefully:\n{errors}"
     )
 
-    print(f"  {DIM}☁  Escalating to Claude ({CLAUDE_MODEL})...{RESET}", end="", flush=True)
+    print(f"  {DIM}☁  Escalating to {final_tier_name()}...{RESET}", end="", flush=True)
+    raw = _final_tier_call(system_prompt, user_prompt)
+    if raw is None:
+        return {}, False
     try:
-        client = anthropic.Anthropic(api_key=api_key)
-        msg = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=8192,
-            messages=[{"role": "user", "content": user_prompt}],
-            system=system_prompt,
-        )
-        raw = msg.content[0].text if msg.content else ""
         if "{" not in raw:
             print(f" {YELLOW}no JSON in response{RESET}")
             return {}, False
         changes = _extract_first_json_object(raw)
         if not changes:
-            print(f" {YELLOW}could not parse JSON from Claude response{RESET}")
+            print(f" {YELLOW}could not parse JSON from the response{RESET}")
             return {}, False
         print(f" {DIM}done ({len(changes)} file(s)){RESET}")
         return changes, True
     except Exception as exc:
-        print(f" {RED}Claude API error: {exc}{RESET}")
+        print(f" {RED}escalation error: {exc}{RESET}")
         return {}, False
 
 
@@ -193,18 +217,9 @@ def _escalate_to_claude_chronic(
 
     Also asks Claude to propose a .roorules entry that would prevent this class
     of error from recurring, which is appended to logs/rule_drafts.jsonl.
-    Returns (changes, success).
+    Returns (changes, success). Goes to the self-hosted ESCALATION_MODEL
+    instead when one is configured.
     """
-    try:
-        import anthropic
-    except ImportError:
-        print(f"  {YELLOW}anthropic package not installed — pip install anthropic{RESET}")
-        return {}, False
-
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return {}, False
-
     vision = open("VISION.md").read() if os.path.exists("VISION.md") else ""
     _project_rules = open(".roorules").read() if os.path.exists(".roorules") else ""
     _global_rules_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "global_rules.md")
@@ -236,7 +251,7 @@ def _escalate_to_claude_chronic(
     )
 
     system_prompt = (
-        "You are an expert Dart/Flutter coding agent acting as the final escalation tier.\n"
+        "You are an expert coding agent for this project's language and stack, acting as the final escalation tier.\n"
         "This task is a CHRONIC BLOCKER — smaller models have failed it in previous runs.\n"
         "You have ONE attempt. Apply a precise, minimal, correct fix.\n\n"
         "Return a JSON object with TWO keys:\n"
@@ -256,25 +271,20 @@ def _escalate_to_claude_chronic(
     )
 
     print(
-        f"  {DIM}☁  Chronic blocker → Claude ({CLAUDE_MODEL}) directly "
+        f"  {DIM}☁  Chronic blocker → {final_tier_name()} directly "
         f"(skipped {prior_skips}× before)...{RESET}",
         end="", flush=True,
     )
+    raw = _final_tier_call(system_prompt, user_prompt)
+    if raw is None:
+        return {}, False
     try:
-        client = anthropic.Anthropic(api_key=api_key)
-        msg = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=8192,
-            messages=[{"role": "user", "content": user_prompt}],
-            system=system_prompt,
-        )
-        raw = msg.content[0].text if msg.content else ""
         if "{" not in raw:
             print(f" {YELLOW}no JSON in response{RESET}")
             return {}, False
         parsed = _extract_first_json_object(raw)
         if not parsed:
-            print(f" {YELLOW}could not parse JSON from Claude response{RESET}")
+            print(f" {YELLOW}could not parse JSON from the response{RESET}")
             return {}, False
         files = parsed.get("files", {})
         new_rule = parsed.get("new_rule", "").strip()
@@ -299,13 +309,13 @@ def _escalate_to_claude_chronic(
                         "rule":     new_rule,
                         "task":     task[:120],
                         "date":     date.today().isoformat(),
-                        "source":   "claude_chronic",
+                        "source":   "self_hosted_chronic" if ESCALATION_MODEL else "claude_chronic",
                     }) + "\n")
-                print(f"  {DIM}📝 Claude suggested a new .roorules entry (logged){RESET}")
+                print(f"  {DIM}📝 the final tier suggested a new .roorules entry (logged){RESET}")
 
         return files, bool(files)
     except Exception as exc:
-        print(f" {RED}Claude API error: {exc}{RESET}")
+        print(f" {RED}escalation error: {exc}{RESET}")
         return {}, False
 
 

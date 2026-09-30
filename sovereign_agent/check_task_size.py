@@ -82,6 +82,21 @@ MAX_STEPS = 3           # "(1) … (2) … (3) …" beyond this is a pipeline, n
 # signature and starts being a checklist.
 MAX_CLAUSES = 5
 
+# A VAGUE CALLEE IS A HIDDEN OBLIGATION PER CALL. xmeasure's compute_window
+# (2026-09-30) was one signature and three semicolons — it passed every count
+# above — but said "call that metric's function from xmeasure.metrics.*" over
+# 17 metrics. The model had to recall seventeen signatures; qwen3.8 thought for
+# 15 minutes twice without emitting a character. Split, with every call written
+# out literally, it became four small tasks. Any instruction to call a function
+# the text does not name (and show the arguments of) is flagged.
+_VAGUE_CALL = re.compile(
+    r"\b(?:call|calls|use|uses|invoke|dispatch(?:es)? to)\s+"
+    r"(?:that|each|its|their|every)\s+"     # per-item; "the cached function" refers back to a named one
+    r"(?:\w+(?:'s)?\s+){0,3}?(?:function|handler|method|implementation|helper)s?\b",
+    re.I)
+_VAGUE_WHICH = re.compile(r"\b(?:the\s+)?(?:corresponding|appropriate|matching|respective)\s+"
+                          r"(?:\w+\s+){0,2}?(?:function|handler|method|metric)s?\b", re.I)
+
 
 @dataclass
 class Finding:
@@ -130,6 +145,12 @@ def oversized(roadmap_text: str, include_done: bool = False) -> list[Finding]:
         if clauses > MAX_CLAUSES:
             reasons.append(f"{clauses} semicolon-separated obligations — split on "
                            f"the semicolons")
+        prose = re.sub(r"`[^`]*`", "", line.split("— done when:")[0])
+        vague = _VAGUE_CALL.search(prose) or _VAGUE_WHICH.search(prose)
+        if vague:
+            reasons.append(f'calls functions it does not name ("{vague.group(0)}") — write '
+                           f"every call out with its arguments; if there are many, split "
+                           f"them into helpers by group")
         if reasons:
             out.append(Finding(target, reasons))
     return out

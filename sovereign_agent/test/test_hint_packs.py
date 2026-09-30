@@ -18,9 +18,14 @@ import hints             # noqa: E402
 import hints_legacy      # noqa: E402  the pre-split file, kept for comparison
 
 
+# The packs the pre-split hints.py became. Packs added since (typescript_core,
+# eb9743e; per-project learned packs) never existed in hints_legacy.
+SPLIT_PACKS = ("dart_core", "flutter_ui", "dart_flame", "dart_riverpod", "galaxican")
+
+
 def all_pack_entries():
     bad, errs = [], []
-    for name in hints.AVAILABLE_PACKS:
+    for name in SPLIT_PACKS:
         mod = importlib.import_module(f"hint_packs.{name}")
         bad.extend(mod.BAD_PATTERNS)
         errs.extend(mod.ERROR_HINTS)
@@ -36,8 +41,10 @@ def test_union_of_packs_equals_original_exactly():
 
 
 def test_no_entry_lands_in_two_packs():
+    """Within the split. Another stack's pack may name the same pattern with
+    its own advice (typescript_core: `.withOpacity(` is the wrong stack)."""
     seen = {}
-    for name in hints.AVAILABLE_PACKS:
+    for name in SPLIT_PACKS:
         mod = importlib.import_module(f"hint_packs.{name}")
         for lst in ("BAD_PATTERNS", "ERROR_HINTS"):
             for entry in getattr(mod, lst):
@@ -96,10 +103,12 @@ def test_firebase_hint_is_not_inherited():
     assert "firebase" in blob.lower()
 
 
-def test_non_dart_languages_load_nothing():
-    for lang in ("go", "typescript", "python", "swift", None):
+def test_non_dart_languages_load_no_dart_packs():
+    for lang in ("go", "python", "swift", None):
         hints.load_packs(language=lang, verbose=False)
         assert hints.BAD_PATTERNS == [] and hints.ERROR_HINTS == [], lang
+    hints.load_packs(language="typescript", verbose=False)
+    assert hints.loaded_packs() == ["typescript_core"]
 
 
 # ── Loader behaviour ─────────────────────────────────────────────────────────
@@ -142,7 +151,7 @@ def test_unknown_pack_is_skipped_not_fatal():
 
 
 def test_all_packs_together_still_equal_the_original():
-    hints.load_packs(packs=list(hints.AVAILABLE_PACKS), verbose=False)
+    hints.load_packs(packs=list(SPLIT_PACKS), verbose=False)
     assert len(hints.BAD_PATTERNS) == len(hints_legacy.BAD_PATTERNS)
     assert len(hints.ERROR_HINTS) == len(hints_legacy.ERROR_HINTS)
 

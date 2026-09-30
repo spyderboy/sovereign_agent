@@ -95,3 +95,16 @@ def test_small_model_unloads_only_large_ones(monkeypatch):
     monkeypatch.setattr(llm.requests, "post", lambda url, json=None, **k: posts.append(json["model"]))
     assert llm._unload_others("qwen2.5-coder:14b", only_large=True) == ["qwen3.8:27b"]
     assert posts == ["qwen3.8:27b"]                   # the small advisor stays loaded
+
+
+def test_tiny_models_stay_loaded(monkeypatch):
+    posts = []
+
+    class Ps:
+        def json(self):
+            return {"models": [{"name": "nomic-embed-text:latest", "size": 600 << 20},
+                               {"name": "qwen2.5-coder:14b", "size": 11 << 30}]}
+
+    monkeypatch.setattr(llm.requests, "get", lambda url, **k: Ps())
+    monkeypatch.setattr(llm.requests, "post", lambda url, json=None, **k: posts.append(json["model"]))
+    assert llm._unload_others("qwen3.8:27b") == ["qwen2.5-coder:14b"]   # the RAG embedder stays

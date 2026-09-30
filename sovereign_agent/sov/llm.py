@@ -155,6 +155,9 @@ def _large_model_lock():
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
+_TINY_RESIDENT_BYTES = 1 << 30
+
+
 def _unload_others(model: str, only_large: bool = False) -> list[str]:
     """Unload every other model on the target model's Ollama server before a
     large model runs. The comment in ollama() always said "flush everything
@@ -169,6 +172,8 @@ def _unload_others(model: str, only_large: bool = False) -> list[str]:
         running = requests.get(f"{url}/api/ps", timeout=5).json().get("models", [])
         for m in running:
             name = m.get("name") or m.get("model")
+            if m.get("size") is not None and m["size"] < _TINY_RESIDENT_BYTES:
+                continue          # an embedder (RAG) costs nothing to keep and a reload per retrieval
             if name and name != model and (not only_large
                                            or _model_size_gb(name) >= _LARGE_MODEL_THRESHOLD_GB):
                 requests.post(f"{url}/api/generate", json={"model": name, "keep_alive": 0},

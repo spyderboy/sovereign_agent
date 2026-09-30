@@ -10,6 +10,9 @@ measured instead of guessed.
     python3 bench.py run --suite xmeasure-v1 --profile qwen38 --set OLLAMA_THINK=0 --label think-off
     python3 bench.py compare bench/results/<run A> bench/results/<run B>
 
+    # the same cases through Aider (same model, same gate) — engine vs engine
+    python3 bench.py run --suite xmeasure-v1 --profile qwen38 --engine aider --label aider-qwen38
+
 WHY
 
 On 2026-09-28 the harness changed eight times in one day (worktrees, a
@@ -167,6 +170,7 @@ def summarize(records: list[dict]) -> dict:
         "median_wall_s_passed": round(statistics.median(walls), 1) if walls else None,
         "total_wall_s": round(sum(r["wall_s"] for r in records), 1),
         "harness_lied": sum(1 for r in records if r["marked"] and not r["gate_ok"]),
+        "edited_protected": sum(1 for r in records if r.get("edited_protected")),
     }
 
 
@@ -338,6 +342,79 @@ def run_case(case: dict, suite: dict, env: dict, timeout: int, outdir: Path,
     }
 
 
+# ─── Aider engine arm ─────────────────────────────────────────────────────────
+# Same case, same model (the profile's tier 1), same gate. Aider edits with
+# its repo map and its own test loop (--test-cmd + --auto-test). It has no
+# ROADMAP to tick and no lock rules, so a pass = the gate passes AND no test,
+# spec or locked file changed (rewriting the test to pass is not a pass).
+
+def profile_model(profile: str) -> tuple[str, str]:
+    import tomllib
+    t = tomllib.loads((HERE / "profiles" / f"{profile}.toml").read_text())
+    tier = t.get("tiers", {}).get("1", {})
+    return tier.get("model", ""), tier.get("url", "")
+
+
+def gate_files(gate: str) -> list[str]:
+    """Test files a gate names: `pytest -q "tests/unit/test_x.py::test_a"` → tests/unit/test_x.py."""
+    return sorted({m.split("::")[0] for m in re.findall(r"[\w./-]+\.(?:py|dart|ts|go)(?:::[\w\[\]-]+)?", gate)})
+
+
+def protected_paths(wd: Path) -> tuple[list[str], list[str]]:
+    try:
+        cfg = json.loads((wd / ".sovereign_config.json").read_text())
+    except (OSError, ValueError):
+        cfg = {}
+    prefixes = list(cfg.get("locked_prefixes", [])) + ["tests/", "test/", "spec/", "ROADMAP.md"]
+    return prefixes, list(cfg.get("locked_files", []))
+
+
+def aider_cmd(case: dict, model: str, files: list[str], timeout: int) -> list[str]:
+    return ["aider", "--model", f"ollama_chat/{model}",
+            "--message", task_text(case["task_line"]),
+            "--test-cmd", case["gate"], "--auto-test",
+            "--yes-always", "--no-auto-commits", "--no-check-update", "--no-analytics",
+            "--no-show-model-warnings", "--no-pretty", "--no-stream", "--no-fancy-input",
+            "--no-gitignore", "--timeout", str(timeout), *files]
+
+
+def run_case_aider(case: dict, suite: dict, env: dict, timeout: int, outdir: Path,
+                   config: dict | None = None, profile: str = "") -> dict:
+    wd = prepare(case, suite, config)
+    model, url = profile_model(profile)
+    env = {**env, "OLLAMA_API_BASE": url or env.get("OLLAMA_URL", "http://localhost:11434")}
+    tests = [f for f in gate_files(case["gate"]) if (wd / f).exists()]
+    files = [case["target"]] + tests            # target editable; aider adds more from its map
+    log = outdir / f"{case['id']}.log"
+    t0 = time.time()
+    timed_out, exit_code = False, None
+    with open(log, "w") as f:
+        f.write("$ " + " ".join(aider_cmd(case, model, files, timeout)) + "\n\n")
+        f.flush()
+        try:
+            r = subprocess.run(aider_cmd(case, model, files, timeout), cwd=wd, env=env,
+                               stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                               timeout=timeout)
+            exit_code = r.returncode
+        except subprocess.TimeoutExpired:
+            timed_out = True
+    wall = round(time.time() - t0, 1)
+
+    changed = [l[3:].strip() for l in git(wd, "status", "--porcelain", check=False).splitlines()]
+    prefixes, locked = protected_paths(wd)
+    cheated = [c for c in changed if c in locked or any(c.startswith(p) for p in prefixes)]
+    g = subprocess.run(["bash", "-lc", case["gate"]], cwd=wd, capture_output=True,
+                       text=True, timeout=600)
+    shutil.rmtree(wd, ignore_errors=True)
+    return {
+        "case": case["id"], "target": case["target"], "engine": "aider",
+        "passed": g.returncode == 0 and not cheated and not timed_out, "marked": None,
+        "gate_ok": g.returncode == 0, "edited_protected": cheated,
+        "files_changed": changed, "attempts": None, "outcome": None, "model": model,
+        "harness_s": None, "wall_s": wall, "exit_code": exit_code, "timed_out": timed_out,
+    }
+
+
 def cmd_run(a) -> int:
     suite = json.loads((SUITES / f"{a.suite}.json").read_text())
     live = live_runs()
@@ -371,7 +448,8 @@ def cmd_run(a) -> int:
     label = a.label or a.profile
     outdir = RESULTS / f"{datetime.now():%Y%m%d-%H%M}-{slug(label, 30)}"
     outdir.mkdir(parents=True, exist_ok=True)
-    meta = {"suite": a.suite, "profile": a.profile, "set": a.set, "config": config, "label": label,
+    meta = {"suite": a.suite, "profile": a.profile, "engine": a.engine,
+            "set": a.set, "config": config, "label": label,
             "started": datetime.now().isoformat(timespec="seconds"),
             "forced_during_live_run": bool(live), "cases": [c["id"] for c in cases]}
     (outdir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
@@ -385,14 +463,20 @@ def cmd_run(a) -> int:
                 print(f"stop-at {a.stop_at} reached — {len(cases) - i + 1} case(s) not started")
                 break
             print(f"[{i}/{len(cases)}] {c['id']} …", end=" ", flush=True)
-            rec = run_case(c, suite, env, a.timeout, outdir, config)
+            if a.engine == "aider":
+                rec = run_case_aider(c, suite, env, a.timeout, outdir, config, a.profile)
+            else:
+                rec = run_case(c, suite, env, a.timeout, outdir, config)
             rec["tag"] = tag_of(c)
             records.append(rec)
             rf.write(json.dumps(rec) + "\n")
             rf.flush()
             verdict = "PASS" if rec["passed"] else ("TIMEOUT" if rec["timed_out"] else "fail")
             extra = " (harness said done, gate FAILED)" if rec["marked"] and not rec["gate_ok"] else ""
-            print(f"{verdict} · {rec['attempts']} attempt(s) · {rec['wall_s']:.0f}s{extra}", flush=True)
+            if rec.get("edited_protected"):
+                extra = f" (gate {'passed' if rec['gate_ok'] else 'failed'} but edited {', '.join(rec['edited_protected'][:2])})"
+            tries = f"{rec['attempts']} attempt(s) · " if rec.get("attempts") is not None else ""
+            print(f"{verdict} · {tries}{rec['wall_s']:.0f}s{extra}", flush=True)
     s = summarize(records)
     (outdir / "summary.json").write_text(json.dumps(s, indent=2) + "\n")
     med = f"median {s['median_wall_s_passed']:.0f}s per pass" if s["median_wall_s_passed"] else "no passes"
@@ -445,7 +529,7 @@ def cmd_compare(a) -> int:
 
     def cell(r):
         if r["passed"]:
-            return f"PASS {r['attempts']}× {r['wall_s']:.0f}s"
+            return f"PASS {str(r['attempts']) + '× ' if r.get('attempts') is not None else ''}{r['wall_s']:.0f}s"
         return "TIMEOUT" if r["timed_out"] else f"fail {r['wall_s']:.0f}s"
 
     w = max([len(i) for i in ids] + [4])
@@ -489,6 +573,8 @@ def main() -> int:
     r.add_argument("--sample", type=int, help="N cases spread across different target files")
     r.add_argument("--timeout", type=int, default=3900, help="seconds per case")
     r.add_argument("--force", action="store_true", help="run even while a sweep is live")
+    r.add_argument("--engine", choices=["xanadu", "aider"], default="xanadu",
+                   help="aider: same model and gate, Aider does the editing")
     r.add_argument("--stop-at", metavar="HH:MM", help="start no new case after this time")
     c = sub.add_parser("compare", help="compare two runs case by case")
     c.add_argument("a")

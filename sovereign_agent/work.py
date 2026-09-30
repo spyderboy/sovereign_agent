@@ -131,6 +131,12 @@ def main():
                                               run_start_tier_idx, run_max_tier_idx)
 
     indexed_tasks = tasks_for_worker(tasks, args.stride, args.worker_id)
+    run_models = TIER_MODELS[run_start_tier_idx:(run_max_tier_idx or len(TIER_MODELS))]
+    if routing.is_strong_run(project_root, run_models, MODEL_PARAMS):
+        # Fewest strong-model failures first, so untried tasks aren't starved
+        # behind the same hard failures every cycle (sov/routing.py).
+        indexed_tasks = routing.order_for_strong(indexed_tasks, routing.load_strikes(project_root),
+                                                 task_text)
     if not indexed_tasks:
         if tasks and args.stride > 1:
             # Tasks remain, just none assigned to this worker: idle, not done —
@@ -633,6 +639,8 @@ def _first_pass(args, indexed_tasks, project_root: str, log_file: str,
 
     go_failed_targets: set[str] = set()
     go_task_deps = _go_task_deps(indexed_tasks)
+    strong_run = routing.is_strong_run(
+        project_root, TIER_MODELS[run_start_tier_idx:(run_max_tier_idx or len(TIER_MODELS))], MODEL_PARAMS)
 
     for loop_idx, (task_idx, task_line) in enumerate(indexed_tasks, 1):
         if loop_idx < args.start_at:
@@ -739,6 +747,8 @@ def _first_pass(args, indexed_tasks, project_root: str, log_file: str,
                          start_tier_idx=run_start_tier_idx,
                          skip_advisor=getattr(args, 'no_advisor', False))
         result = _merge_or_requeue(result, branch, project_root, task_idx, task)
+        if strong_run:
+            routing.record_strong_outcome(project_root, task, result is True)
 
         _tm = re.search(r'\bIn ([\w./-]+\.go):', task)
         if result is True:
@@ -806,6 +816,8 @@ def _retry_pass(args, retry_queue, project_root: str, log_file: str,
                           task_idx=task_idx, budget_s=retry_budget,
                           skip_advisor=getattr(args, 'no_advisor', False))
         result = _merge_or_requeue(result, branch, project_root, task_idx, task)
+        if routing.is_strong_run(project_root, TIER_MODELS, MODEL_PARAMS):
+            routing.record_strong_outcome(project_root, task, result is True)
         if result is True:
             mark_done(task_line)
             print(f"  {GREEN}✓ Marked done in ROADMAP.md{RESET}")

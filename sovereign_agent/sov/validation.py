@@ -75,6 +75,7 @@ def validate(
     baseline_errors: frozenset[str] | None = None,
     files_written: list[str] | None = None,
     task_gate: str | None = None,
+    regression_gates: list[str] | tuple = (),
 ) -> tuple[bool, str]:
     # ── Per-project gates (from .sovereign_config.json "validate_commands") ──
     # Run in order, cwd = project root (main() chdirs there at startup).
@@ -106,6 +107,18 @@ def validate(
             if result.returncode != 0:
                 output = (result.stdout + result.stderr).strip()
                 return False, f"$ {task_gate}\n{output[-3000:]}"
+        # ── Same-file regression gates (see roadmap.regression_gates) ────────
+        for gate in regression_gates:
+            try:
+                result = subprocess.run(["bash", "-lc", gate], capture_output=True, text=True,
+                                        timeout=300)
+            except subprocess.TimeoutExpired:
+                return False, f"$ {gate}\n(regression gate timed out after 300 s)"
+            if result.returncode != 0:
+                output = (result.stdout + result.stderr).strip()
+                return False, (f"REGRESSION: your change breaks an earlier finished task on the "
+                               f"same file. Keep every function that file already has — add "
+                               f"yours, don't rewrite theirs away.\n$ {gate}\n{output[-2500:]}")
         return True, "all project validate_commands + task gate passed"
 
     for cmd, label in [

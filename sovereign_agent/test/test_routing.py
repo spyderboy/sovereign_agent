@@ -60,3 +60,37 @@ def test_check_reads_from_disk(tmp_path):
     (tmp_path / "ROADMAP.md").write_text(ROADMAP)
     assert routing.check(TASK_NEW_LAYER, str(tmp_path), ["qwen2.5-coder:14b"], PARAMS)
     assert routing.check(TASK_NEW_LAYER, str(tmp_path), ["qwen3.8:27b"], PARAMS) is None
+
+
+# ── parking and strong-pass ordering (2026-09-30) ─────────────────────────────
+
+def test_strikes_count_and_clear(tmp_path):
+    t = "In `pkg/x.py`: implement x()"
+    assert routing.record_strong_outcome(str(tmp_path), t, False) == 1
+    assert routing.record_strong_outcome(str(tmp_path), t, False) == 2
+    assert routing.record_strong_outcome(str(tmp_path), t, True) == 0
+    assert routing.load_strikes(str(tmp_path)) == {}
+
+
+def test_parked_after_n_strong_failures_on_strong_run(tmp_path):
+    pol = {**POLICY, "park_after_strong_failures": 3}
+    t = "In `pkg/store/e.py`: implement e()"
+    strikes = {t[:100]: 3}
+    why = routing.defer_reason(t, pol, 27, ROADMAP, [], PARAMS, strikes)
+    assert why and why.startswith("parked")
+    assert routing.defer_reason(t, pol, 27, ROADMAP, [], PARAMS, {t[:100]: 2}) is None
+
+
+def test_check_writes_parked_md(tmp_path):
+    (tmp_path / ".sovereign_config.json").write_text(json.dumps({"routing": {**POLICY, "park_after_strong_failures": 1}}))
+    (tmp_path / "ROADMAP.md").write_text(ROADMAP)
+    routing.record_strong_outcome(str(tmp_path), TASK_WARM, False)
+    assert routing.check(TASK_WARM, str(tmp_path), ["qwen3.8:27b"], PARAMS).startswith("parked")
+    assert "pkg/store/e.py" in (tmp_path / "logs" / "parked.md").read_text()
+
+
+def test_order_for_strong_puts_untried_first_keeping_roadmap_order():
+    tasks = [(1, "- [ ] A"), (2, "- [ ] B"), (3, "- [ ] C"), (4, "- [ ] D")]
+    strikes = {"B": 2, "A": 1}
+    ordered = routing.order_for_strong(tasks, strikes, lambda line: line[6:])
+    assert [i for i, _ in ordered] == [3, 4, 1, 2]

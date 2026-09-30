@@ -5,6 +5,7 @@
     python3 xrun.py launch ~/Code/<project>     # safe stop/clean/verify, then sweep + monitor
     python3 xrun.py stop   ~/Code/<project>     # stop everything, park the repo, stop pods
     python3 xrun.py status ~/Code/<project>
+    python3 xrun.py reset-parking ~/Code/<project>   # after fixing parked tasks
 
 Internal (called by sweep.sh and launch):
     python3 xrun.py hook  ~/Code/<project> <pass-label> [<profile>]
@@ -37,6 +38,15 @@ def main(argv: list[str]) -> int:
         print(json.dumps(runctl.stop(plan), indent=2))
     elif cmd == "status":
         print(json.dumps(runctl.status(plan), indent=2))
+    elif cmd == "reset-parking":
+        import os
+        from datetime import date
+        root = plan["project"]
+        for name in ("strong_failures.json", "parked.md"):
+            p = os.path.join(root, "logs", name)
+            if os.path.exists(p):
+                os.replace(p, os.path.join(root, "logs", f"{date.today()}-{name}"))
+        print("parking reset: strong-failure counts cleared (old files kept with a date prefix)")
     elif cmd == "hook":
         return runctl.hook(plan, argv[3] if len(argv) > 3 else "", log)
     elif cmd == "guard":

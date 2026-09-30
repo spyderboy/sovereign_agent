@@ -5,8 +5,15 @@ Opt-in via .sovereign_config.json (kickoff.py writes it for new projects):
     "routing": {
         "strong_min_params_b": 25,          # models below this count as small
         "cold_start_tasks_per_layer": 2,    # a layer's first N tasks go to a strong model
-        "route_after_failures": 2           # after N small-model failures, stop retrying small
+        "route_after_failures": 2,          # after N small-model failures, stop retrying small
+        "park_after_strong_failures": 3     # after N strong-model failures, park for a human
     }
+
+Strong runs also try tasks with the fewest strong failures first, so a pass
+isn't spent re-failing the same hard tasks while untried ones starve
+(2026-09-30: xmeasure's report layer was never attempted in five cycles).
+Strong failures are counted in logs/strong_failures.json — not taken from
+history, so a kit fix can reset them (`xrun.py reset-parking`).
 
 WHY (2026-09-28, xmeasure): the fast pass spent three 90-minute passes
 retrying store-layer tasks the 14B had already failed, landing one task per
@@ -75,14 +82,67 @@ def _guess_params(model: str) -> float:
     return float(m.group(1)) if m else 0.0
 
 
+STRIKES = os.path.join("logs", "strong_failures.json")
+PARKED = os.path.join("logs", "parked.md")
+
+
+def _key(task_text: str) -> str:
+    return task_text.strip()[:100]
+
+
+def load_strikes(project_root: str) -> dict[str, int]:
+    try:
+        return json.load(open(os.path.join(project_root, STRIKES)))
+    except (OSError, ValueError):
+        return {}
+
+
+def record_strong_outcome(project_root: str, task_text: str, passed: bool) -> int:
+    """Count a strong-model failure (or clear the count on a pass); returns the count."""
+    strikes = load_strikes(project_root)
+    k = _key(task_text)
+    if passed:
+        strikes.pop(k, None)
+    else:
+        strikes[k] = strikes.get(k, 0) + 1
+    path = os.path.join(project_root, STRIKES)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(strikes, f, indent=1)
+    os.replace(tmp, path)
+    return strikes.get(k, 0)
+
+
+def order_for_strong(indexed_tasks: list, strikes: dict[str, int], task_text_fn) -> list:
+    """Fewest strong failures first; ROADMAP order kept within each count."""
+    return sorted(indexed_tasks, key=lambda it: strikes.get(_key(task_text_fn(it[1])), 0))
+
+
+def _note_parked(project_root: str, task_text: str, count: int) -> None:
+    path = os.path.join(project_root, PARKED)
+    try:
+        existing = open(path).read()
+    except OSError:
+        existing = "# Parked tasks\n\nThe strong model failed these repeatedly. Usually a gap in the task, its test, or an earlier merge — not model difficulty. Fix, then `xrun.py reset-parking <project>`.\n\n"
+    line = f"- {_key(task_text)}"
+    if line not in existing:
+        with open(path, "w") as f:
+            f.write(existing + f"{line} (strong failures: {count})\n")
+
+
 def defer_reason(task_text: str, policy: dict, run_max_params: float,
                  roadmap_text: str, velocity_lines: list[str],
-                 params: dict[str, float]) -> str | None:
-    """Why a small-model run should leave this task alone, or None."""
+                 params: dict[str, float], strikes: dict[str, int] | None = None) -> str | None:
+    """Why this run should leave the task alone, or None."""
     if not policy:
         return None
     strong_min = float(policy.get("strong_min_params_b", 25))
     if run_max_params >= strong_min:
+        n_park = int(policy.get("park_after_strong_failures", 0))
+        count = (strikes or {}).get(_key(task_text), 0)
+        if n_park and count >= n_park:
+            return f"parked: the strong model failed this {count}× — needs a human (logs/parked.md)"
         return None                                   # this run IS strong
     n_cold = int(policy.get("cold_start_tasks_per_layer", 0))
     layer = task_layer(task_text)
@@ -115,4 +175,16 @@ def check(task_text: str, project_root: str, run_models: list[str],
                         errors="ignore").read().splitlines()
     except OSError:
         velocity = []
-    return defer_reason(task_text, policy, run_max, roadmap, velocity, params)
+    strikes = load_strikes(project_root)
+    why = defer_reason(task_text, policy, run_max, roadmap, velocity, params, strikes)
+    if why and why.startswith("parked"):
+        _note_parked(project_root, task_text, strikes.get(_key(task_text), 0))
+    return why
+
+
+def is_strong_run(project_root: str, run_models: list[str], params: dict[str, float]) -> bool:
+    policy = load_policy(project_root)
+    if not policy:
+        return False
+    run_max = max((params.get(m, _guess_params(m)) for m in run_models), default=0.0)
+    return run_max >= float(policy.get("strong_min_params_b", 25))

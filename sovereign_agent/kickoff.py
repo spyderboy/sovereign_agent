@@ -44,7 +44,7 @@ import monitor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_ROUTING = {"strong_min_params_b": 25, "cold_start_tasks_per_layer": 2,
-                   "route_after_failures": 2}
+                   "route_after_failures": 2, "park_after_strong_failures": 3}
 ROWS_FILE = os.path.join("docs", "API_ROWS.md")
 
 

@@ -94,3 +94,23 @@ def test_order_for_strong_puts_untried_first_keeping_roadmap_order():
     strikes = {"B": 2, "A": 1}
     ordered = routing.order_for_strong(tasks, strikes, lambda line: line[6:])
     assert [i for i, _ in ordered] == [3, 4, 1, 2]
+
+
+# ── 2026-09-30: an edited task starts with a clean small-model record ─────────
+
+def test_edited_task_resets_small_failures(tmp_path):
+    import json as _json
+    from sov import state, telemetry
+    old = "In `pkg/a.py`: implement `f()` — " + "x" * 150 + " import from pkg.metrics"
+    new = old.replace("import from pkg.metrics", "import EXACTLY `from pkg.metrics.f import f`")
+    state.CURRENT_TASK = old
+    for _ in range(2):
+        telemetry._append_velocity(str(tmp_path), {"task": old[:120], "outcome": "skipped",
+                                                   "model": "qwen2.5-coder:14b"})
+    lines = open(tmp_path / "logs" / "velocity.jsonl").read().splitlines()
+    assert all("task_sha" in _json.loads(l) for l in lines)
+    assert routing.small_failures(lines, old, {}, 25) == 2      # same task: still counted
+    assert routing.small_failures(lines, new, {}, 25) == 0      # edited past char 100: clean slate
+    legacy = ['{"task": "%s", "outcome": "skipped", "model": "qwen2.5-coder:14b"}' % old[:120]]
+    assert routing.small_failures(legacy, new, {}, 25) == 1     # old records: prefix match as before
+    state.CURRENT_TASK = ""

@@ -161,6 +161,7 @@ def run_task(task: str, project_root: str, log_file: str,
       False     — all retries exhausted without a stale lock (rare)
       "skipped" — all tiers (up to max_tier_idx) stuck; move to next task
     """
+    state.CURRENT_TASK = task
     import hashlib as _hl
 
     _max_tier = max_tier_idx if max_tier_idx is not None else len(TIER_MODELS)

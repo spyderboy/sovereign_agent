@@ -69,3 +69,8 @@ PROJECT_ALWAYS_INCLUDE: list[str] = []
 # Default off: existing projects are completely unaffected until they opt in.
 RAG_ENABLED: bool = False
 ESCALATE_LOG   = "logs/escalate.md"
+
+# The full text of the task run_task is working on. velocity.jsonl stores the
+# text truncated; telemetry adds a hash of the full text so routing can tell
+# an edited task from the old one (see routing.small_failures).
+CURRENT_TASK = ""

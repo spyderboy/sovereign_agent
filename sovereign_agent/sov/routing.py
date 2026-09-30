@@ -28,6 +28,8 @@ import json
 import os
 import re
 
+from sov.telemetry import task_sha
+
 
 def load_policy(project_root: str) -> dict:
     try:
@@ -67,7 +69,13 @@ def small_failures(velocity_lines: list[str], task_text: str, params: dict[str, 
         except ValueError:
             continue
         stored = r.get("task") or ""
-        if not stored or not task_text.startswith(stored[:100]):
+        if r.get("task_sha"):
+            # An edited task (a kit fix) starts with a clean record; its first
+            # 100 chars often don't change (2026-09-30: compute helpers stayed
+            # deferred for failures the task-text fix had already removed).
+            if r["task_sha"] != task_sha(task_text):
+                continue
+        elif not stored or not task_text.startswith(stored[:100]):
             continue
         if r.get("outcome") == "done":
             continue

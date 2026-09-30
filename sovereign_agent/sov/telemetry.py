@@ -41,7 +41,16 @@ def _extract_error_codes(output: str) -> list[str]:
     return list(dict.fromkeys(re.findall(r'\b([a-z][a-z0-9_]{3,})\b', output)))[:10]
 
 
+def task_sha(text: str) -> str:
+    import hashlib
+    return hashlib.sha1(text.strip().encode()).hexdigest()[:12]
+
+
 def _append_velocity(project_root: str, record: dict):
+    from sov import state
+    cur = state.CURRENT_TASK
+    if cur and "task_sha" not in record and cur.startswith((record.get("task") or "\0").rstrip()):
+        record = {**record, "task_sha": task_sha(cur)}
     path = os.path.join(project_root, VELOCITY_LOG)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a") as f:

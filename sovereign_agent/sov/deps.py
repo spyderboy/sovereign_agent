@@ -139,3 +139,94 @@ def _missing_local_deps(task: str, project_root: str) -> list[str]:
         if not _module_exists(c, project_root):
             missing.append(c)
     return missing
+
+
+def _py_defined_names(project_root: str) -> set[str]:
+    """Top-level functions, classes and assignments across the project's source."""
+    import ast
+    names: set[str] = set()
+    for dirpath, dirs, files in os.walk(project_root):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in
+                   ("tests", "test", "logs", "node_modules", "__pycache__", "venv")]
+        for f in files:
+            if not f.endswith(".py"):
+                continue
+            try:
+                tree = ast.parse(open(os.path.join(dirpath, f), errors="ignore").read())
+            except (SyntaxError, OSError):
+                continue
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    names.add(node.name)
+                elif isinstance(node, ast.Assign):
+                    names |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+    return names
+
+
+def _missing_python_deps(task: str, project_root: str) -> list[str]:
+    """What a Python task needs that hasn't landed: project modules it names
+    (`pkg.mod` / `from pkg.mod import x`) that don't exist, and functions it
+    tells the worker to call that nothing defines yet. 2026-09-30: strong-pass
+    ordering put compute.py before compute_quality.py, which it imports; with
+    no Python check every attempt was certain to fail."""
+    import builtins
+    tm = re.search(r"\bIn `?([\w./-]+\.py)`?:", task)
+    if not tm:
+        return []
+    target = tm.group(1)
+    pkg = target.split("/")[0]
+    body = task.split("— done when:")[0]
+    missing: list[str] = []
+    for dotted in sorted(set(re.findall(rf"\b{re.escape(pkg)}(?:\.\w+)+", body))):
+        parts = dotted.split(".")
+        if parts[-1] in _FILE_EXTS:
+            continue                                 # 'xmeasure.yaml' is a file name
+        for i in range(len(parts), 0, -1):          # longest prefix that exists
+            base = os.path.join(project_root, *parts[:i])
+            if os.path.isfile(base + ".py"):
+                break                                # the rest are attributes
+            if os.path.isdir(base):
+                if i < len(parts):
+                    mod = "/".join(parts[:i + 1]) + ".py"
+                    if mod != target:
+                        missing.append(mod)
+                break
+    defined = _py_defined_names(project_root)
+    own = re.search(r"implement `(?:[\w\[\], |.]+\s)?(\w+)\s*\(", body)
+    own_name = own.group(1) if own else None
+    for code in re.findall(r"`([^`]+)`", body):
+        for name in re.findall(r"(?<![\w.])([a-z_]\w*)\s*\(", code):
+            if name in (own_name,) or hasattr(builtins, name) or name in defined:
+                continue
+            if name in ("from", "import", "raise", "return", "if", "for", "while", "print"):
+                continue
+            missing.append(f"{name}()")
+    # API.md-style cheat sheets map each function to its file (`# pkg/mod.py`
+    # then `def name(`). A function the task names whose file hasn't landed
+    # is missing even when the task doesn't backtick it.
+    for name, path in _api_md_functions(project_root).items():
+        if path != target and not os.path.exists(os.path.join(project_root, path)) \
+                and re.search(rf"(?<![\w.-]){re.escape(name)}\((?!-)", body) and name != own_name:
+            missing.append(path)
+    return sorted(set(missing))
+
+
+_FILE_EXTS = {"yaml", "yml", "json", "db", "csv", "html", "md", "txt", "toml", "j2", "pdf", "log", "jsonl"}
+
+
+def _api_md_functions(project_root: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for dirpath, dirs, files in os.walk(project_root):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("node_modules", "logs", "tests")]
+        if "API.md" not in files:
+            continue
+        current = None
+        for line in open(os.path.join(dirpath, "API.md"), errors="ignore"):
+            h = re.match(r"#\s+([\w./-]+\.py)\b", line.strip())
+            if h:
+                current = h.group(1)
+                continue
+            d = re.match(r"(?:async\s+)?def\s+(\w+)\s*\(", line.strip())
+            if d and current:
+                out.setdefault(d.group(1), current)
+    return out

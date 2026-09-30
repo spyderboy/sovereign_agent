@@ -31,7 +31,7 @@ from sov.config import (
 )
 from sov import state
 from sov.budget import compute_task_budget
-from sov.deps import _missing_dart_deps, _missing_local_deps, _symbol_index
+from sov.deps import _missing_dart_deps, _missing_local_deps, _missing_python_deps, _symbol_index
 from sov.escalation import CHRONIC_BLOCKER_THRESHOLD, _count_prior_skips, _escalate_to_claude, _escalate_to_claude_chronic, _write_escalation, _write_tier2_queue
 from sov.files import LOCKED_FILES, backup_files, find_relevant_files, read_files, restore_files, update_api_guide, write_changes
 from sov.guards import _missing_promised_symbol, _placeholder_body, _unplanned_new_files, apply_error_hints
@@ -305,6 +305,8 @@ def run_task(task: str, project_root: str, log_file: str,
         _missing = _missing_dart_deps(task, project_root)
     elif state.PROJECT_LANGUAGE in ("typescript", "ts", "tsx"):
         _missing = _missing_local_deps(task, project_root)
+    elif state.PROJECT_LANGUAGE == "python":
+        _missing = _missing_python_deps(task, project_root)
     else:
         _missing = []
     if True:

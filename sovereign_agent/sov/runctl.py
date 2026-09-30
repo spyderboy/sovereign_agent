@@ -373,6 +373,37 @@ def sweep_env(plan: dict, profiles: dict) -> dict:
             "STRONG_MAX": str(int(s["cap_minutes"]) * 60), "MAX_CYCLES": str(plan["max_cycles"])}
 
 
+def broken_done_gates(root: str, budget_s: float = 240, per_gate_s: float = 120) -> tuple[list[str], bool]:
+    """Finished tasks whose own gate FAILS on main, and whether every gate was
+    checked within the budget. A broken finished task poisons every later task
+    that imports it — and the worker blamed for it cannot fix it (2026-09-30:
+    build_jql and compare_metric, both merged green, broken on main)."""
+    import re as _re
+    try:
+        text = open(os.path.join(root, "ROADMAP.md"), errors="ignore").read()
+    except OSError:
+        return [], True
+    t0, broken = time.time(), []
+    for line in text.splitlines():
+        if not line.startswith("- [x]"):
+            continue
+        m = _re.search(r"task gate:\s*(.+?)\s+passes\s*$", line.strip())
+        if not m:
+            continue
+        if time.time() - t0 > budget_s:
+            return broken, False
+        try:
+            r = subprocess.run(["bash", "-c", m.group(1)], cwd=root, capture_output=True,
+                               timeout=per_gate_s)
+            ok = r.returncode == 0
+        except subprocess.TimeoutExpired:
+            ok = True                       # slow is not broken; the budget covers the rest
+        if not ok:
+            tm = _re.search(r"In `?([\w./-]+)`?:", line)
+            broken.append(tm.group(1) if tm else line[6:70])
+    return broken, True
+
+
 def launch(plan: dict, log=print) -> dict:
     root = plan["project"]
     errs = validate(plan)
@@ -386,6 +417,13 @@ def launch(plan: dict, log=print) -> dict:
     if dirty:
         return {"ok": False, "error": "the project has uncommitted changes — commit or discard "
                 "them first (never treated as debris): " + ", ".join(dirty[:5])}
+    if not plan.get("skip_done_gate_check"):
+        broken, complete = broken_done_gates(root)
+        if broken:
+            return {"ok": False, "error": "finished task(s) fail their own gate on main — fix them "
+                    "first, every task that builds on them will fail: " + ", ".join(broken[:6])}
+        if not complete:
+            log("done-gate check stopped at its time budget; the rest were not checked")
     state = {"started_at": _now(), "pods": load_state(plan).get("pods", {})}
     save_state(plan, state)
     profiles = write_profiles(plan, state)

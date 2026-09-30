@@ -129,3 +129,15 @@ def test_park_never_discards_an_edit_on_main(repo):
     (repo / "ROADMAP.md").write_text("human edit\n")
     assert runctl.park_repo(str(repo), "main")
     assert (repo / "ROADMAP.md").read_text() == "human edit\n"
+
+
+def test_launch_refuses_when_a_finished_gate_fails_on_main(repo, monkeypatch):
+    run = lambda *a: subprocess.run(["git", *a], cwd=repo, check=True, capture_output=True)  # noqa: E731
+    (repo / "ROADMAP.md").write_text("- [x] In `a.py`: a — task gate: true passes\n"
+                                     "- [x] In `jq.py`: build_jql — task gate: false passes\n"
+                                     "- [ ] In `b.py`: b\n")
+    run("commit", "-qam", "roadmap")
+    monkeypatch.setattr(runctl, "_spawn", lambda *a, **k: pytest.fail("launched"))
+    r = runctl.launch(runctl.load_plan(str(repo)), lambda m: None)
+    assert not r["ok"] and "jq.py" in r["error"] and "a.py" not in r["error"]
+    assert runctl.broken_done_gates(str(repo)) == (["jq.py"], True)

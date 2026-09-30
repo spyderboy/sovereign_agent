@@ -397,7 +397,7 @@ def project_whitelist(project_root: str) -> set[str]:
         return cached[1]
     tokens: set[str] = set()
     for p in Path(project_root).rglob("*.dart"):
-        if any(s in p.parts for s in _SKIP_DIRS):
+        if any(s in p.relative_to(project_root).parts for s in _SKIP_DIRS):
             continue
         try:
             src = p.read_text(errors="ignore")

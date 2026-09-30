@@ -346,7 +346,7 @@ def detect_project_languages(project_root: str, max_files: int = 20000) -> list[
         root = Path(project_root)
         n = 0
         for p in root.rglob("*"):
-            if any(part in _DETECT_SKIP_DIRS for part in p.parts):
+            if any(part in _DETECT_SKIP_DIRS for part in p.relative_to(root).parts):
                 continue
             if not p.is_file():
                 continue
@@ -425,7 +425,7 @@ def project_whitelist(project_root: str, language: str) -> set[str]:
     for pattern in globs:
         try:
             for p in Path(project_root).rglob(pattern):
-                if any(s in p.parts for s in _SKIP_DIRS):
+                if any(s in p.relative_to(project_root).parts for s in _SKIP_DIRS):
                     continue
                 try:
                     src = p.read_text(errors="ignore")

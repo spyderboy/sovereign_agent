@@ -315,3 +315,30 @@ def test_varied_skips_note_depends_on_the_pass(mon, capsys):
              "[w0]   ⏭  Skipped — queued for retry pass")
     out = capsys.readouterr().out
     assert "strong pass should take these" not in out and "under-specified" in out
+
+
+# ── 2026-09-30 startup replayed the previous sweep ────────────────────────────
+
+def test_finished_sweep_has_no_current_console(tmp_path):
+    root, old = tmp_path / "proj", tmp_path / "sweep-old"
+    (root / "logs").mkdir(parents=True)
+    old.mkdir()
+    (old / "cycle5-strong.log").write_text("[w0] [1/9] In `pkg/a.py`: x...\n")
+    sweep = root / "logs" / "sweep.log"
+    sweep.write_text(f"[09:00:00] sweep starting — project={root} results={old}\n"
+                     "[10:32:04] sweep finished — 71 done, 25 open\n")
+    assert monitor.newest_console(str(root)) is None      # the old sweep is not "this pass"
+    new = tmp_path / "sweep-new"
+    new.mkdir()
+    with open(sweep, "a") as f:
+        f.write(f"[12:46:59] sweep starting — project={root} results={new}\n")
+    assert monitor.newest_console(str(root)) is None      # started, first log not written yet
+    (new / "cycle1-cheap.log").write_text("")
+    assert monitor.newest_console(str(root)) == str(new / "cycle1-cheap.log")
+
+
+def test_sweep_start_clears_the_previous_finish(mon):
+    mon.on_sweep("[10:32:04] sweep finished — 71 done, 25 open")
+    assert mon.finished
+    mon.on_sweep("[12:46:59] sweep starting — project=/x results=/y")
+    assert not mon.finished

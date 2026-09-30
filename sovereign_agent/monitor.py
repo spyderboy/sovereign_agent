@@ -192,6 +192,11 @@ class Tail:
 
 
 def results_dir(root: str) -> str | None:
+    """The CURRENT sweep's results dir — None once that sweep has finished.
+    A monitor launched alongside a new sweep can start before sweep.sh writes
+    its `results=` line; reading the finished sweep's dir then replayed a day
+    of old passes as "earlier in this pass" and counted their failures toward
+    the no-merge alert (2026-09-30)."""
     p = os.path.join(root, "logs", "sweep.log")
     if not os.path.exists(p):
         return None
@@ -200,6 +205,8 @@ def results_dir(root: str) -> str | None:
         m = re.search(r"results=(\S+)", line)
         if m:
             found = m.group(1)
+        elif any(k in line for k in FINISH_MARKERS):
+            found = None
     return found
 
 
@@ -209,8 +216,14 @@ def newest_console(root: str) -> str | None:
         logs = [os.path.join(rd, f) for f in os.listdir(rd) if f.startswith("cycle")]
         if logs:
             return max(logs, key=os.path.getmtime)
+        return None                       # sweep started, first pass log not yet written
     sup = os.path.join(root, "logs", "supervisor.log")
-    return sup if os.path.exists(sup) else None
+    if not os.path.exists(sup):
+        return None
+    sweep = os.path.join(root, "logs", "sweep.log")
+    if os.path.exists(sweep) and os.path.getmtime(sweep) >= os.path.getmtime(sup):
+        return None                       # between sweeps: the supervisor log is the old sweep's
+    return sup
 
 
 # ─── Processes and git ────────────────────────────────────────────────────────
@@ -458,6 +471,9 @@ class Monitor:
 
     # sweep.log --------------------------------------------------------------
     def on_sweep(self, line: str) -> None:
+        if "sweep starting" in line:           # sweep.log keeps every sweep; each start is a clean slate
+            self.finished = False
+            self.fired.discard("finished")
         m = re.search(r"(cycle\d+-\w+)\s+profile=(\S+).*workers=(\d+)", line)
         if m:
             self.pass_label = m.group(1)

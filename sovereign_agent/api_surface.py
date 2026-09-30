@@ -251,7 +251,7 @@ def py_surfaces(project: str) -> tuple[dict, dict, dict]:
             elif isinstance(node, ast.ImportFrom):
                 names += [a.asname or a.name for a in node.names]
             if isinstance(node, ast.ClassDef):
-                fields, methods = [], []
+                fields, methods, props = [], [], []
                 for item in node.body:
                     if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
                         fields.append(item.target.id)
@@ -259,8 +259,10 @@ def py_surfaces(project: str) -> tuple[dict, dict, dict]:
                         fields += [t.id for t in item.targets if isinstance(t, ast.Name)]
                     elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         methods.append(item.name)
+                        if any(getattr(d, "id", "") == "property" for d in item.decorator_list):
+                            props.append(item.name)
                 bases = {getattr(b, "id", getattr(b, "attr", "")) for b in node.bases}
-                classes[node.name] = {"file": rel, "fields": fields, "methods": methods,
+                classes[node.name] = {"file": rel, "fields": fields, "methods": methods, "props": props,
                                       "enum": bool(bases & {"Enum", "IntEnum", "StrEnum"})}
         modules[dotted] = {"file": rel, "names": [n for n in names if not n.startswith("_")]}
     return classes, modules, tables
@@ -343,9 +345,17 @@ def rows_python(project: str) -> list[str]:
                            f"{', '.join('`' + name + '.' + f + '`' for f in info['fields'][:12])} | "
                            f"any other member; lowercase or string spellings |")
             else:
+                # EVERY field, plus properties and public methods. Cutting at 12
+                # hid Config.config_sha256, and leaving out properties hid
+                # RepoConfig.name — while the row said "any other attribute" is
+                # wrong, so the cheat sheet forbade what the task required
+                # (2026-09-30).
+                extra = [f"`{p}` (property)" for p in info.get("props", [])] + \
+                        [f"`{m}()`" for m in info.get("methods", [])
+                         if not m.startswith("_") and m not in info.get("props", [])]
                 out.append(f"| `{name}` fields | "
-                           f"{', '.join('`' + f + '`' for f in info['fields'][:12])} | "
-                           f"any other attribute; construct with these keywords only |")
+                           f"{', '.join(['`' + f + '`' for f in info['fields']] + extra)} | "
+                           f"any other attribute; construct with the fields as keywords only |")
     # WHERE EACH TYPE LIVES. Field rows alone let the model guess the module:
     # xmeasure's Config is in config_schema, every sibling imported from
     # xmeasure.model, and the 14B wrote `from xmeasure.model import Config`

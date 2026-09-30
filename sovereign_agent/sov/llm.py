@@ -155,6 +155,31 @@ def _large_model_lock():
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
+def _unload_others(model: str) -> list[str]:
+    """Unload every other model on the target model's Ollama server before a
+    large model runs. The comment in ollama() always said "flush everything
+    first"; nothing did. Small models load with keep_alive=-1 (forever), so
+    after a fast pass the 14B stayed pinned (11 GB) while qwen3.8 (17 GB)
+    loaded beside it on a 34 GB Mac: heavy swapping, and 15-minute silences
+    with zero bytes streamed (2026-09-29) — the tasks that passed in 12-15 min
+    in isolated benchmarks timed out in the sweep. Never raises."""
+    url = endpoint_for(model)
+    unloaded = []
+    try:
+        running = requests.get(f"{url}/api/ps", timeout=5).json().get("models", [])
+        for m in running:
+            name = m.get("name") or m.get("model")
+            if name and name != model:
+                requests.post(f"{url}/api/generate", json={"model": name, "keep_alive": 0},
+                              timeout=30)
+                unloaded.append(name)
+        if unloaded:
+            print(f"  {DIM}unloaded {', '.join(unloaded)} to make room{RESET}")
+    except Exception:
+        pass
+    return unloaded
+
+
 def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
     # Flush VRAM before loading any large model to avoid swap on 32GB Mac.
     # Tier1/2 (7b/16b) stay resident together (~13GB combined) — no flush needed.
@@ -168,6 +193,7 @@ def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
         # won't coexist (19 GB each), so deep must always use a single worker.
         print(f"  {DIM}Loading {size_gb:.0f}GB model ({model.split(':')[0]}) — keeping resident 30m...{RESET}")
         keep_alive = "30m"
+        _unload_others(model)
 
     # ── Pre-flight prompt size check ──────────────────────────────────────────
     # Estimate token count before sending so we never pay for a full inference

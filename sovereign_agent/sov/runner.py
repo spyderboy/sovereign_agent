@@ -340,7 +340,7 @@ def run_task(task: str, project_root: str, log_file: str,
                 written_c, pat_errs_c = write_changes(
                     claude_changes, project_root, test_only=is_test)
                 if not pat_errs_c:
-                    passed_c, output_c = validate(baseline_errors, files_written=written_c, task_gate=_extract_task_gate(task), regression_gates=regression_gates(task))
+                    passed_c, output_c = validate(baseline_errors, files_written=written_c, task_gate=_extract_task_gate(task), regression_gates=regression_gates(task, files=written_c))
                     if passed_c:
                         print(f"  {GREEN}✓ Chronic blocker solved by Claude{RESET}")
                         update_api_guide(written_c, claude_changes, project_root)
@@ -737,7 +737,7 @@ def run_task(task: str, project_root: str, log_file: str,
                 pass
 
         print(f"  {DIM}Validating...{RESET}", end="", flush=True)
-        passed, output = validate(baseline_errors, files_written=written, task_gate=_extract_task_gate(task), regression_gates=regression_gates(task))
+        passed, output = validate(baseline_errors, files_written=written, task_gate=_extract_task_gate(task), regression_gates=regression_gates(task, files=written))
 
         with open(log_file, "a") as log:
             log.write(f"\n### Attempt {attempt}\nFiles changed: {changed_list}\n")
@@ -874,7 +874,7 @@ def run_task(task: str, project_root: str, log_file: str,
                 fix_count, _ = af.apply_mechanical_fixes(output, project_root)
             if fix_count > 0:
                 print(f"  {DIM}⚙  Auto-fixed {fix_count} issue(s) — re-validating...{RESET}", end="", flush=True)
-                passed2, output2 = validate(baseline_errors, files_written=written, task_gate=_extract_task_gate(task), regression_gates=regression_gates(task))
+                passed2, output2 = validate(baseline_errors, files_written=written, task_gate=_extract_task_gate(task), regression_gates=regression_gates(task, files=written))
                 if passed2:
                     print(f" {GREEN}✓ passed after autofix{RESET}")
                     errors_seen.append("autofix_resolved")
@@ -1028,7 +1028,7 @@ def run_task(task: str, project_root: str, log_file: str,
                         written_c, pat_errs_c = write_changes(
                             claude_changes, project_root, test_only=is_test)
                         if not pat_errs_c:
-                            passed_c, output_c = validate(baseline_errors, files_written=written_c, task_gate=_extract_task_gate(task), regression_gates=regression_gates(task))
+                            passed_c, output_c = validate(baseline_errors, files_written=written_c, task_gate=_extract_task_gate(task), regression_gates=regression_gates(task, files=written_c))
                             if passed_c:
                                 print(f"  {GREEN}✓ Claude solved it{RESET}")
                                 update_api_guide(written_c, claude_changes, project_root)

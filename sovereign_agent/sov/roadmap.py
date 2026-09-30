@@ -113,8 +113,12 @@ def _commit_roadmap_mark(task_line: str, attempts: int = 4) -> None:
 _TASK_GATE_RE = re.compile(r"task gate:\s*(.+?)(?:\s+passes)?\s*$", re.IGNORECASE)
 
 
-def regression_gates(task: str, roadmap_text: str | None = None) -> list[str]:
-    """Gates of FINISHED tasks that target the same file as `task`.
+def regression_gates(task: str, roadmap_text: str | None = None,
+                     files=()) -> list[str]:
+    """Gates of FINISHED tasks that target the same file as `task` — or any
+    other file this attempt wrote (`files`). 2026-09-30: fetch_issues
+    (target connectors/jira.py) re-created build_jql wrongly inside
+    mappers/jira_query.py; only jira.py's tasks were re-checked.
 
     A task that rewrites a whole file can silently delete functions earlier
     tasks put there: on xmeasure (2026-09-30) task 18 (pr_is_ai) rewrote
@@ -125,7 +129,7 @@ def regression_gates(task: str, roadmap_text: str | None = None) -> list[str]:
     m = re.search(r"\bIn `?([\w./-]+\.\w+)`?:", task or "")
     if not m:
         return []
-    target = m.group(1)
+    targets = {m.group(1)} | {f for f in files if f}
     if roadmap_text is None:
         try:
             roadmap_text = open(ROADMAP_PATH, errors="ignore").read()
@@ -136,7 +140,7 @@ def regression_gates(task: str, roadmap_text: str | None = None) -> list[str]:
     for line in roadmap_text.splitlines():
         if not line.startswith("- [x]"):
             continue
-        if f"`{target}`" not in line and f"In {target}:" not in line:
+        if not any(f"In `{t}`:" in line or f"In {t}:" in line for t in targets):
             continue
         g = _extract_task_gate(line)
         if g and g != own and g not in gates:

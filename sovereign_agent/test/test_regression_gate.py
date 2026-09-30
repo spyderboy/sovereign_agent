@@ -27,3 +27,14 @@ def test_validate_reports_a_regression(monkeypatch):
     assert not ok and out.startswith("REGRESSION")
     ok, _ = validation.validate(task_gate="true", regression_gates=["true"])
     assert ok
+
+
+def test_gates_cover_every_file_the_attempt_wrote():
+    """2026-09-30: fetch_issues (target jira.py) broke build_jql in jira_query.py."""
+    from sov.roadmap import regression_gates
+    rm = ("- [x] In `pkg/jira_query.py`: implement `build_jql()` — task gate: pytest -q tests/test_jql.py passes\n"
+          "- [x] In `pkg/other.py`: uses `pkg/jira_query.py` — task gate: pytest -q tests/test_other.py passes\n"
+          "- [ ] In `pkg/jira.py`: implement `fetch_issues()` — task gate: pytest -q tests/test_jira.py passes\n")
+    task = rm.splitlines()[2][6:]
+    assert regression_gates(task, rm) == []
+    assert regression_gates(task, rm, files=["pkg/jira.py", "pkg/jira_query.py"]) == ["pytest -q tests/test_jql.py"]

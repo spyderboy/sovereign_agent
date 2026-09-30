@@ -237,3 +237,12 @@ def test_branch_with_unmerged_work_is_reused(repo):
     _sh(repo, "checkout", "-q", "main")
     ns["_branch_start"](str(repo), 1, "task 1")
     assert Path(repo, "work.py").exists()           # the committed work survives
+
+
+def test_rag_index_survives_the_between_task_clean(repo):
+    ns, (wt0, _) = _workers(repo)
+    idx = Path(wt0, ".sovereign_rag")
+    idx.mkdir()
+    (idx / "chunks.lance").write_text("index")
+    ns["_branch_start"](wt0, 1, "task 1")
+    assert (idx / "chunks.lance").exists()          # rebuilt-every-task bug (2026-09-30)

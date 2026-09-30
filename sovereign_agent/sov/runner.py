@@ -281,7 +281,12 @@ def run_task(task: str, project_root: str, log_file: str,
             import rag_index, rag_retrieve
             rag_index.sync_index(project_root, candidate_files=rel_files)
             _target_path = _target_m.group(1) if _target_m else None
-            support_files = [f for f in rel_files if f != _target_path]
+            # Never excerpt the always-included contract files (model.py,
+            # API.md, API_ROWS.md…): an excerpt can drop exactly the fields a
+            # model keeps inventing (2026-09-30). Only other support files are
+            # chunked; these stay whole.
+            support_files = [f for f in rel_files
+                             if f != _target_path and f not in state.PROJECT_ALWAYS_INCLUDE]
             rag_grouped = rag_retrieve.retrieve_context_chunks(task, support_files, project_root)
             if rag_grouped:
                 print(f"  {DIM}RAG: {sum(len(c) for c in rag_grouped.values())} chunk(s) "

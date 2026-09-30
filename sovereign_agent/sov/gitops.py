@@ -131,7 +131,7 @@ def _branch_start(project_root: str, task_idx: int, task: str) -> str | None:
     # -e logs: never clean the logs/ dir — tier2_queue.jsonl, velocity.jsonl,
     # the failure ledger etc. live there untracked; a bare `clean -fd` was
     # deleting the --deep queue between tasks (2026-07-13).
-    _git(["clean", "-fd", "-e", "logs"], project_root)
+    _git(["clean", "-fd", "-e", "logs", "-e", ".sovereign_rag"], project_root)
     r = _git(["checkout", "-b", branch], project_root)
     if r.returncode != 0:
         # Branch exists from a previous aborted run. Reuse it only if it holds
@@ -242,7 +242,7 @@ def _branch_abandon(project_root: str, branch: str) -> None:
     (non-forced) checkout isn't enough here.
     """
     _to_main(project_root)
-    _git(["clean", "-fd", "-e", "logs"], project_root)
+    _git(["clean", "-fd", "-e", "logs", "-e", ".sovereign_rag"], project_root)
     _git(["branch", "-D", branch], project_root)
 
 

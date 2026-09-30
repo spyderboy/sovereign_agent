@@ -390,6 +390,19 @@ if [[ "$WORKERS" -gt 1 ]]; then
         done
         WORK_PIDS=()
 
+        # Every worker had nothing it could attempt (all deferred by routing or
+        # blocked on dependencies): end this pass instead of respawning until
+        # the time cap. work.py exits 5 for that (2026-09-29: 65 idle minutes).
+        all_idle=1
+        for ((w=0; w<WORKERS; w++)); do
+            [ "${WORKER_EXITS[$w]}" -eq 5 ] || all_idle=0
+        done
+        if [ $all_idle -eq 1 ]; then
+            log "${YELLOW}No task was attemptable by any worker this pass — ending it${RESET}"
+            write_status "idle"
+            break
+        fi
+
         # Honour Ctrl+C from any worker
         if [ $any_interrupted -eq 1 ]; then
             write_status "stopped"
@@ -496,6 +509,12 @@ while true; do
         echo -e "\n  Supervisor interrupted."
         write_status "stopped"
         exit 130
+    fi
+
+    if [ $EXIT -eq 5 ]; then
+        log "${YELLOW}No task was attemptable this pass (all deferred or blocked) — ending it${RESET}"
+        write_status "idle"
+        break
     fi
 
     if [ $EXIT -eq 0 ]; then

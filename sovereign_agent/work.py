@@ -74,6 +74,7 @@ _cw = _ctx_conflicts()
 if _cw:
     print(_cw)
 LOG_DIR        = "logs"
+EXIT_NOTHING_ATTEMPTABLE = 5   # supervisor.sh ends the pass on this
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -131,6 +132,12 @@ def main():
 
     indexed_tasks = tasks_for_worker(tasks, args.stride, args.worker_id)
     if not indexed_tasks:
+        if tasks and args.stride > 1:
+            # Tasks remain, just none assigned to this worker: idle, not done —
+            # otherwise the supervisor never sees "every worker idle" and
+            # respawns once a second (found testing exit 5, 2026-09-30).
+            print(f"  {DIM}worker {args.worker_id}: no tasks assigned this pass.{RESET}")
+            sys.exit(EXIT_NOTHING_ATTEMPTABLE)
         print(f"{YELLOW}No unchecked tasks found anywhere in ROADMAP.md.{RESET}")
         print(f"Add tasks to ROADMAP.md or run plan_week.py first.")
         sys.exit(0)
@@ -152,7 +159,7 @@ def main():
                 + (f"Worker: {args.worker_id}/{args.stride}\n" if args.stride > 1 else ""))
 
     session_start = time.time()
-    passed_count, failed_count, skipped_tasks, retry_queue = _first_pass(
+    passed_count, failed_count, skipped_tasks, retry_queue, attempted = _first_pass(
         args, indexed_tasks, project_root, log_file, get_first_pass_budget,
         run_start_tier_idx, run_max_tier_idx)
     skipped_count = len(skipped_tasks)
@@ -172,6 +179,7 @@ def main():
 
     if retry_queue and not args.dry_run and not args.no_retry:
         _retry_pass(args, retry_queue, project_root, log_file, session_start)
+        attempted += len(retry_queue)
 
     # ── Deep run cleanup ──────────────────────────────────────────────────────
     # After a --deep run completes (including its retry pass), clear the queue
@@ -188,6 +196,13 @@ def main():
     # future local runs start with the full accumulated knowledge base.
     if FIRESTORE_PROJECT:
         _firestore_push_lessons(project_root)
+
+    # Nothing attemptable: every task was deferred by routing or blocked on a
+    # dependency. Exit 5 so supervisor.sh ends the pass instead of respawning
+    # workers until its time cap (2026-09-29: 65 min, 0 attempts, 38 respawns).
+    if attempted == 0 and indexed_tasks and not args.dry_run:
+        print(f"  {DIM}No task was attemptable in this run (all deferred or blocked).{RESET}")
+        sys.exit(EXIT_NOTHING_ATTEMPTABLE)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -601,6 +616,7 @@ def _first_pass(args, indexed_tasks, project_root: str, log_file: str,
     retry_queue)."""
     passed_count  = 0
     failed_count  = 0
+    attempted     = 0                                      # tasks actually handed to a model
     skipped_tasks: list[tuple[int, str]] = []              # (task_idx, task_text)
     retry_queue:   list[tuple[int, str, str]] = []         # (task_idx, task_line, task_text)
 
@@ -716,6 +732,7 @@ def _first_pass(args, indexed_tasks, project_root: str, log_file: str,
         if branch:
             print(f"  {DIM}⎇  Branch: {branch}{RESET}")
 
+        attempted += 1
         result = run_task(task, project_root, log_file, task_idx=task_idx,
                          budget_s=get_first_pass_budget(),
                          max_tier_idx=run_max_tier_idx,
@@ -753,7 +770,7 @@ def _first_pass(args, indexed_tasks, project_root: str, log_file: str,
             failed_count += 1
             print(f"  {YELLOW}Continuing to next task...{RESET}")
 
-    return passed_count, failed_count, skipped_tasks, retry_queue
+    return passed_count, failed_count, skipped_tasks, retry_queue, attempted
 
 
 def _retry_pass(args, retry_queue, project_root: str, log_file: str,

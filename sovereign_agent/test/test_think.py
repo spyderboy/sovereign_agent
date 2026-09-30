@@ -82,3 +82,16 @@ def test_unload_never_raises(monkeypatch):
         raise RuntimeError("ollama down")
     monkeypatch.setattr(llm.requests, "get", boom)
     assert llm._unload_others("qwen3.8:27b") == []
+
+
+def test_small_model_unloads_only_large_ones(monkeypatch):
+    posts = []
+
+    class Ps:
+        def json(self):
+            return {"models": [{"name": "qwen3.8:27b"}, {"name": "qwen2.5-coder:7b-instruct-q4_K_M"}]}
+
+    monkeypatch.setattr(llm.requests, "get", lambda url, **k: Ps())
+    monkeypatch.setattr(llm.requests, "post", lambda url, json=None, **k: posts.append(json["model"]))
+    assert llm._unload_others("qwen2.5-coder:14b", only_large=True) == ["qwen3.8:27b"]
+    assert posts == ["qwen3.8:27b"]                   # the small advisor stays loaded

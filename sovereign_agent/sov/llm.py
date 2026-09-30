@@ -155,7 +155,7 @@ def _large_model_lock():
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
-def _unload_others(model: str) -> list[str]:
+def _unload_others(model: str, only_large: bool = False) -> list[str]:
     """Unload every other model on the target model's Ollama server before a
     large model runs. The comment in ollama() always said "flush everything
     first"; nothing did. Small models load with keep_alive=-1 (forever), so
@@ -169,7 +169,8 @@ def _unload_others(model: str) -> list[str]:
         running = requests.get(f"{url}/api/ps", timeout=5).json().get("models", [])
         for m in running:
             name = m.get("name") or m.get("model")
-            if name and name != model:
+            if name and name != model and (not only_large
+                                           or _model_size_gb(name) >= _LARGE_MODEL_THRESHOLD_GB):
                 requests.post(f"{url}/api/generate", json={"model": name, "keep_alive": 0},
                               timeout=30)
                 unloaded.append(name)
@@ -194,6 +195,11 @@ def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
         print(f"  {DIM}Loading {size_gb:.0f}GB model ({model.split(':')[0]}) — keeping resident 30m...{RESET}")
         keep_alive = "30m"
         _unload_others(model)
+    else:
+        # The reverse case: a strong pass leaves the 27B resident for 30 min,
+        # and the next fast pass loads the 14B beside it. Unload only LARGE
+        # models here — small ones (14B + 7B advisor) fit together.
+        _unload_others(model, only_large=True)
 
     # ── Pre-flight prompt size check ──────────────────────────────────────────
     # Estimate token count before sending so we never pay for a full inference

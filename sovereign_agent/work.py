@@ -747,15 +747,15 @@ def _first_pass(args, indexed_tasks, project_root: str, log_file: str,
             # the pass cap kills mid-attempt still leaves its strike. Otherwise
             # compute_window timed out cycle after cycle with a clean record
             # and could never be parked (2026-09-30).
-            routing.record_strong_outcome(project_root, task, False)
+            routing.begin_strong_attempt(project_root, task)
         result = run_task(task, project_root, log_file, task_idx=task_idx,
                          budget_s=get_first_pass_budget(),
                          max_tier_idx=run_max_tier_idx,
                          start_tier_idx=run_start_tier_idx,
                          skip_advisor=getattr(args, 'no_advisor', False))
         result = _merge_or_requeue(result, branch, project_root, task_idx, task)
-        if strong_run and result is True:
-            routing.record_strong_outcome(project_root, task, True)
+        if strong_run:
+            routing.end_strong_attempt(project_root, task, result is True)
 
         _tm = re.search(r'\bIn ([\w./-]+\.go):', task)
         if result is True:
@@ -821,13 +821,13 @@ def _retry_pass(args, retry_queue, project_root: str, log_file: str,
 
         retry_strong = routing.is_strong_run(project_root, TIER_MODELS, MODEL_PARAMS)
         if retry_strong:
-            routing.record_strong_outcome(project_root, task, False)   # see the first pass
+            routing.begin_strong_attempt(project_root, task)   # see the first pass
         result = run_task(task, project_root, log_file,
                           task_idx=task_idx, budget_s=retry_budget,
                           skip_advisor=getattr(args, 'no_advisor', False))
         result = _merge_or_requeue(result, branch, project_root, task_idx, task)
-        if retry_strong and result is True:
-            routing.record_strong_outcome(project_root, task, True)
+        if retry_strong:
+            routing.end_strong_attempt(project_root, task, result is True)
         if result is True:
             mark_done(task_line)
             print(f"  {GREEN}✓ Marked done in ROADMAP.md{RESET}")

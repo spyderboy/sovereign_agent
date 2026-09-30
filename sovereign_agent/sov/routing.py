@@ -122,6 +122,49 @@ def record_strong_outcome(project_root: str, task_text: str, passed: bool) -> in
     return strikes.get(k, 0)
 
 
+INFLIGHT = os.path.join("logs", "strong_inflight.json")
+
+
+def begin_strong_attempt(project_root: str, task_text: str) -> None:
+    """Count the strike up front (so a pass-cap kill still counts) and mark
+    the task in flight, so a deliberate stop can take it back."""
+    record_strong_outcome(project_root, task_text, False)
+    try:
+        with open(os.path.join(project_root, INFLIGHT), "w") as f:
+            json.dump({"task": _key(task_text)}, f)
+    except OSError:
+        pass
+
+
+def end_strong_attempt(project_root: str, task_text: str, passed: bool) -> None:
+    try:
+        os.remove(os.path.join(project_root, INFLIGHT))
+    except OSError:
+        pass
+    if passed:
+        record_strong_outcome(project_root, task_text, True)
+
+
+def forgive_inflight(project_root: str) -> str | None:
+    """A human stopped the run (xrun stop): the in-flight attempt was not a
+    failure. 2026-09-30: two stops to fix the kit left compute helpers with
+    strikes they never earned. Returns the forgiven task key, if any."""
+    path = os.path.join(project_root, INFLIGHT)
+    try:
+        key = json.load(open(path)).get("task")
+        os.remove(path)
+    except (OSError, ValueError):
+        return None
+    strikes = load_strikes(project_root)
+    if strikes.get(key, 0) > 0:
+        strikes[key] -= 1
+        if not strikes[key]:
+            del strikes[key]
+        with open(os.path.join(project_root, STRIKES), "w") as f:
+            json.dump(strikes, f, indent=1)
+    return key
+
+
 def order_for_strong(indexed_tasks: list, strikes: dict[str, int], task_text_fn) -> list:
     """Fewest strong failures first; ROADMAP order kept within each count."""
     return sorted(indexed_tasks, key=lambda it: strikes.get(_key(task_text_fn(it[1])), 0))

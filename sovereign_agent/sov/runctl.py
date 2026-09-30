@@ -271,6 +271,11 @@ def stop(plan: dict, stop_pods: bool = True) -> dict:
         _kill(pid, signal.SIGKILL)
     time.sleep(2)
     left = is_running(root)
+    try:
+        from sov import routing
+        routing.forgive_inflight(root)           # a deliberate stop is not a strike
+    except Exception:
+        pass
     dirty = [] if left else park_repo(root, plan["main_branch"])
     pods = stop_run_pods(plan) if stop_pods else []
     return {"stopped": not left, "dirty": dirty, "pods_stopped": pods}

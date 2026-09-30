@@ -114,3 +114,16 @@ def test_edited_task_resets_small_failures(tmp_path):
     legacy = ['{"task": "%s", "outcome": "skipped", "model": "qwen2.5-coder:14b"}' % old[:120]]
     assert routing.small_failures(legacy, new, {}, 25) == 1     # old records: prefix match as before
     state.CURRENT_TASK = ""
+
+
+def test_deliberate_stop_forgives_the_inflight_strike(tmp_path):
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    t = "In `pkg/a.py`: implement `f()`"
+    routing.begin_strong_attempt(str(tmp_path), t)
+    assert routing.load_strikes(str(tmp_path)) == {t: 1}          # a cap kill leaves this
+    assert routing.forgive_inflight(str(tmp_path)) == t          # xrun stop takes it back
+    assert routing.load_strikes(str(tmp_path)) == {}
+    routing.begin_strong_attempt(str(tmp_path), t)
+    routing.end_strong_attempt(str(tmp_path), t, passed=False)   # a real failure stays
+    assert routing.forgive_inflight(str(tmp_path)) is None
+    assert routing.load_strikes(str(tmp_path)) == {t: 1}

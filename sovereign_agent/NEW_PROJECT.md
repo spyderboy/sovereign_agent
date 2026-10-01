@@ -25,6 +25,8 @@ obligation per task, each ending `task gate: <cmd> passes`), and
 ```bash
 python3 check_task_size.py ~/Code/<project>      # one obligation per task
 python3 api_surface.py ~/Code/<project> --check  # no locked type named without its shape
+python3 preflight.py ~/Code/<project>             # broken done tasks, coverage, order, size
+python3 preflight.py ~/Code/<project> --solve qwen38   # dry-run every open task (Ollama free)
 python3 <project>/tools/preflight.py             # if the project has one
 ```
 

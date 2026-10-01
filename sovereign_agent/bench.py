@@ -80,11 +80,15 @@ def find_task_line(roadmap: str, prefix: str) -> str | None:
 
 
 def only_open(roadmap: str, keep_line: str) -> str:
-    """ROADMAP with every open task ticked except `keep_line`."""
+    """ROADMAP with `keep_line` as the only open task. Other open tasks are
+    DROPPED, not ticked: a ticked future task reads as finished, and the
+    same-file regression check then runs its gate against a function nobody
+    has written (2026-10-01: both format.py tasks failed each other's gate in
+    a preflight dry run)."""
     out = []
     for line in roadmap.splitlines(keepends=True):
         if line.startswith("- [ ] ") and line.rstrip("\n") != keep_line:
-            line = "- [x] " + line[len("- [ ] "):]
+            continue
         out.append(line)
     return "".join(out)
 

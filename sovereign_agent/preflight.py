@@ -231,16 +231,9 @@ def dry_run(root: str, profile: str, timeout: int, log=print) -> list[dict]:
         for b in git(wd, "for-each-ref", "--format=%(refname:short)", "refs/heads/task-*",
                      check=False).split():
             git(wd, "branch", "-D", b, check=False)
-        # reopen what only_open ticked: originally-open tasks the dry run hasn't solved
-        orig_open = {l[6:] for l in open_tasks(full)}
-        restored = []
-        for l in (wd / "ROADMAP.md").read_text().splitlines():
-            body = l[6:] if l.startswith(("- [x] ", "- [ ] ")) else None
-            if body in solved:
-                l = "- [x] " + body                  # solved stays solved, committed or not
-            elif body in orig_open:
-                l = "- [ ] " + body                  # everything else goes back to open
-            restored.append(l)
+        # rebuild from the original: solved tasks ticked, the rest open again
+        restored = ["- [x] " + l[6:] if l.startswith("- [ ] ") and l[6:] in solved else l
+                    for l in full.splitlines()]
         (wd / "ROADMAP.md").write_text("\n".join(restored) + "\n")
         git(wd, "commit", "-qam", "preflight: restore open tasks", check=False)
     return results

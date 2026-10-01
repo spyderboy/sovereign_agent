@@ -26,7 +26,8 @@ def test_find_task_line_by_commit_prefix():
 def test_only_open_keeps_exactly_one_task_open():
     out = bench.only_open(ROADMAP, LINE_A)
     assert LINE_A in out
-    assert "- [ ] In `pkg/b.py`" not in out and "- [x] In `pkg/b.py`" in out
+    assert "In `pkg/b.py`" not in out          # dropped, not ticked: a ticked future task
+                                               # would get its gate run as a regression check
     assert out.count("- [ ] ") == 1
 
 

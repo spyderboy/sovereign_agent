@@ -342,3 +342,9 @@ def test_sweep_start_clears_the_previous_finish(mon):
     assert mon.finished
     mon.on_sweep("[12:46:59] sweep starting — project=/x results=/y")
     assert not mon.finished
+
+
+def test_retry_line_starts_a_new_task(mon):
+    feed(mon, "[w0] [7/7] In `pkg/cli.py`: implement main...",
+         "[w0] [retry 7] In `pkg/repos.py`: implement `parse_repos()`...")
+    assert mon.workers["w0"].target == "pkg/repos.py"

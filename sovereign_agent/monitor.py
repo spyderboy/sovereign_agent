@@ -370,11 +370,15 @@ class Monitor:
         w = self.workers.setdefault(wid, Worker())
         s = line.strip()
 
-        m = re.match(r"\[(\d+)/(\d+)\]\s+(.*)", s)
+        # "[retry 6] In …" starts a task too: missing it left the previous
+        # task's name in place, so a retry's merge was credited to the wrong
+        # file and its context checked against the wrong gate (2026-09-30).
+        m = re.match(r"\[(?:(\d+)/(\d+)|retry (\d+))\]\s+(.*)", s)
         if m:
-            w.task, w.target = m.group(3), task_target(m.group(3))
+            w.task, w.target = m.group(4), task_target(m.group(4))
             w.errors, w.blocked, w.foreign, w.attempt_at = [], 0, 0, None
-            self.event(f"{BOLD}▶ {wid} {m.group(1)}/{m.group(2)}{RESET} {w.target or w.task[:60]}")
+            where = f"{m.group(1)}/{m.group(2)}" if m.group(1) else f"retry {m.group(3)}"
+            self.event(f"{BOLD}▶ {wid} {where}{RESET} {w.target or w.task[:60]}")
             return
 
         if s.startswith("Files:") and w.target:

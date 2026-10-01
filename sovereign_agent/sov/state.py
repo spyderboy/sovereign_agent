@@ -74,3 +74,5 @@ ESCALATE_LOG   = "logs/escalate.md"
 # text truncated; telemetry adds a hash of the full text so routing can tell
 # an edited task from the old one (see routing.small_failures).
 CURRENT_TASK = ""
+# Set by run_task when it deferred the task for a missing dependency (no attempt made).
+LAST_TASK_DEFERRED = False

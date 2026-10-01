@@ -192,8 +192,14 @@ def _missing_python_deps(task: str, project_root: str) -> list[str]:
                         missing.append(mod)
                 break
     defined = _py_defined_names(project_root)
-    own = re.search(r"implement `(?:[\w\[\], |.]+\s)?(\w+)\s*\(", body)
+    own = re.search(r"implement `(?:[\w\[\], |.]+\s)?(\w+)\s*\(([^`]*)\)", body)
     own_name = own.group(1) if own else None
+    # Its own parameters are callable too: `log(...)` in collect(…, log=print)
+    # deferred collect forever (2026-09-30).
+    params = set(re.findall(r"(?:^|,)\s*(\w+)\s*[:=]", own.group(2))) if own else set()
+    imported = {n.strip().split(" as ")[-1] for grp in re.findall(r"\bimport\s+([\w, ]+)", body)
+                for n in grp.split(",") if n.strip()}
+    defined = defined | params | imported                # `from dataclasses import replace`
     for code in re.findall(r"`([^`]+)`", body):
         for name in re.findall(r"(?<![\w.])([a-z_]\w*)\s*\(", code):
             if name in (own_name,) or hasattr(builtins, name) or name in defined:
@@ -201,6 +207,22 @@ def _missing_python_deps(task: str, project_root: str) -> list[str]:
             if name in ("from", "import", "raise", "return", "if", "for", "while", "print"):
                 continue
             missing.append(f"{name}()")
+    # The gate's own test may import modules the task text never names:
+    # test_report_html imports report.build, so html.py could not pass before
+    # build.py landed (two 15-min attempts on an unfixable error, 2026-09-30).
+    gate = re.search(r"task gate:\s*(.+?)\s+passes", task)
+    if gate:
+        for tf in set(re.findall(r"([\w./-]+\.py)", gate.group(1))):
+            try:
+                tsrc = open(os.path.join(project_root, tf), errors="ignore").read()
+            except OSError:
+                continue
+            for mod in set(re.findall(rf"^\s*(?:from|import)\s+({re.escape(pkg)}(?:\.\w+)+)", tsrc, re.M)):
+                path = mod.replace(".", "/") + ".py"
+                if path != target and not os.path.exists(os.path.join(project_root, path)) \
+                        and not os.path.isdir(os.path.join(project_root, mod.replace(".", "/"))):
+                    missing.append(path)
+
     # API.md-style cheat sheets map each function to its file (`# pkg/mod.py`
     # then `def name(`). A function the task names whose file hasn't landed
     # is missing even when the task doesn't backtick it.

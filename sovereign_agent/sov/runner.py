@@ -162,6 +162,7 @@ def run_task(task: str, project_root: str, log_file: str,
       "skipped" — all tiers (up to max_tier_idx) stuck; move to next task
     """
     state.CURRENT_TASK = task
+    state.LAST_TASK_DEFERRED = False
     import hashlib as _hl
 
     _max_tier = max_tier_idx if max_tier_idx is not None else len(TIER_MODELS)
@@ -314,6 +315,7 @@ def run_task(task: str, project_root: str, log_file: str,
             print(f"  {YELLOW}⏭  Deferred: depends on file(s) not yet present — "
                   f"{', '.join(_missing)}{RESET}")
             print(f"     (will be retried after its dependencies land)")
+            state.LAST_TASK_DEFERRED = True
             _append_velocity(project_root, {
                 "date": date.today().isoformat(), "task": task[:120],
                 "outcome": "skipped", "attempts": 0,

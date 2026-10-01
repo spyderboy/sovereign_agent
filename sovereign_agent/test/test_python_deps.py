@@ -34,3 +34,18 @@ def test_no_false_positives(tmp_path):
     task = ("In `pkg/cli.py`: implement `main(argv) -> int` — collect (--since), default 'pkg.yaml', "
             "`flow_metric(i, d, w)`, `len(x)`, `print(y)`" + GATE)
     assert _missing_python_deps(task, root) == []
+
+
+def test_own_parameters_and_imports_are_not_missing(tmp_path):
+    root = _proj(tmp_path)
+    task = ("In `pkg/c.py`: implement `collect(config: C, log=print, get=fetch) -> dict` — `log(f\"done\")`, "
+            "`get(url)`, `replace(config, pilot=None)`; imports `from dataclasses import replace`" + GATE)
+    assert _missing_python_deps(task, root) == []
+
+
+def test_modules_the_gate_test_imports(tmp_path):
+    root = _proj(tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_html.py").write_text("from pkg.build import build\nfrom pkg.flow import flow_metric\n")
+    task = ("In `pkg/html.py`: implement `render(d) -> str` — task gate: pytest -q \"tests/test_html.py\" passes")
+    assert _missing_python_deps(task, root) == ["pkg/build.py"]

@@ -127,3 +127,11 @@ def test_deliberate_stop_forgives_the_inflight_strike(tmp_path):
     routing.end_strong_attempt(str(tmp_path), t, passed=False)   # a real failure stays
     assert routing.forgive_inflight(str(tmp_path)) is None
     assert routing.load_strikes(str(tmp_path)) == {t: 1}
+
+
+def test_a_deferral_is_not_a_strike(tmp_path):
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    t = "In `pkg/a.py`: implement `f()`"
+    routing.begin_strong_attempt(str(tmp_path), t)
+    routing.forgive_inflight(str(tmp_path))              # what work.py does when run_task deferred
+    assert routing.load_strikes(str(tmp_path)) == {}

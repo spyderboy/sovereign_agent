@@ -755,7 +755,10 @@ def _first_pass(args, indexed_tasks, project_root: str, log_file: str,
                          skip_advisor=getattr(args, 'no_advisor', False))
         result = _merge_or_requeue(result, branch, project_root, task_idx, task)
         if strong_run:
-            routing.end_strong_attempt(project_root, task, result is True)
+            if state.LAST_TASK_DEFERRED:
+                routing.forgive_inflight(project_root)     # deferred, never attempted
+            else:
+                routing.end_strong_attempt(project_root, task, result is True)
 
         _tm = re.search(r'\bIn ([\w./-]+\.go):', task)
         if result is True:
@@ -827,7 +830,10 @@ def _retry_pass(args, retry_queue, project_root: str, log_file: str,
                           skip_advisor=getattr(args, 'no_advisor', False))
         result = _merge_or_requeue(result, branch, project_root, task_idx, task)
         if retry_strong:
-            routing.end_strong_attempt(project_root, task, result is True)
+            if state.LAST_TASK_DEFERRED:
+                routing.forgive_inflight(project_root)
+            else:
+                routing.end_strong_attempt(project_root, task, result is True)
         if result is True:
             mark_done(task_line)
             print(f"  {GREEN}✓ Marked done in ROADMAP.md{RESET}")

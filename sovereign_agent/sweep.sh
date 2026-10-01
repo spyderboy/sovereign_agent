@@ -43,6 +43,10 @@ STRONG_MAX="${STRONG_MAX:-7200}"
 CHEAP_WORKERS="${CHEAP_WORKERS:-2}"
 STRONG_WORKERS="${STRONG_WORKERS:-1}"
 MAX_CYCLES="${MAX_CYCLES:-5}"
+# Soft cap: at a pass's cap, workers finish the task in hand (start no new one)
+# for up to this many seconds before being killed. 0 = kill at the cap.
+SOFT_CAP_GRACE="${SOFT_CAP_GRACE:-1200}"
+STOP_FLAG="$PROJECT/logs/stop_after_task"
 RESULTS="$HOME/sweep-$(date +%m%d-%H%M)"
 
 BOLD="\033[1m"; GREEN="\033[92m"; YELLOW="\033[93m"; RED="\033[91m"; DIM="\033[2m"; RESET="\033[0m"
@@ -137,20 +141,30 @@ run_pass() {   # $1 profile  $2 cap  $3 label  $4 workers
         fi
     fi
 
+    rm -f "$STOP_FLAG"
     start=$SECONDS
     ( cd "$SOVEREIGN" && SOVEREIGN_PROFILE="$prof" \
         ./supervisor.sh "$PROJECT" --workers "$workers" --features-only >>"$log" 2>&1 ) &
     local sup=$!
     while kill -0 "$sup" 2>/dev/null; do
         if [ $((SECONDS - start)) -ge "$cap" ]; then
-            say "${YELLOW}cap reached — stopping $label${RESET}"
-            pkill -9 -f supervisor.sh 2>/dev/null
-            pkill -9 -f work.py 2>/dev/null
-            killed=1; break
+            # Killing mid-attempt threw away up to 15 min of model time per
+            # cap (2026-09-30). Ask workers to stop after the task in hand.
+            if [ "$SOFT_CAP_GRACE" -gt 0 ] && [ ! -e "$STOP_FLAG" ]; then
+                touch "$STOP_FLAG"
+                say "${YELLOW}cap reached — $label finishes its current task (up to ${SOFT_CAP_GRACE}s)${RESET}"
+            fi
+            if [ $((SECONDS - start)) -ge $((cap + SOFT_CAP_GRACE)) ]; then
+                say "${YELLOW}cap reached — stopping $label${RESET}"
+                pkill -9 -f supervisor.sh 2>/dev/null
+                pkill -9 -f work.py 2>/dev/null
+                killed=1; break
+            fi
         fi
         sleep 20
     done
     wait "$sup" 2>/dev/null
+    rm -f "$STOP_FLAG"
     elapsed=$((SECONDS - start)); after=$(done_count)
     local note=""; [ "$killed" = "1" ] && note=" (hit cap)"
     say "${GREEN}$label: $before → $after in ${elapsed}s${note}${RESET}"

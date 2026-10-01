@@ -616,6 +616,15 @@ def _merge_or_requeue(result, branch: str | None, project_root: str,
     return result
 
 
+def _stop_requested(args) -> bool:
+    """sweep.sh's soft pass cap: finish the task in hand, start no new one.
+    Killing mid-attempt threw away up to 15 minutes of model time per cap
+    (2026-09-30: jira_issue, compute.py). The flag lives in the PRIMARY
+    checkout's logs/, which every worker's args.project points at."""
+    root = os.path.abspath(args.project) if args.project else os.getcwd()
+    return os.path.exists(os.path.join(root, "logs", "stop_after_task"))
+
+
 def _first_pass(args, indexed_tasks, project_root: str, log_file: str,
                 get_first_pass_budget, run_start_tier_idx: int,
                 run_max_tier_idx: int | None):
@@ -644,6 +653,9 @@ def _first_pass(args, indexed_tasks, project_root: str, log_file: str,
         project_root, TIER_MODELS[run_start_tier_idx:(run_max_tier_idx or len(TIER_MODELS))], MODEL_PARAMS)
 
     for loop_idx, (task_idx, task_line) in enumerate(indexed_tasks, 1):
+        if _stop_requested(args):
+            print(f"  {YELLOW}pass cap reached — stopping before the next task{RESET}")
+            sys.exit(EXIT_NOTHING_ATTEMPTABLE)
         if loop_idx < args.start_at:
             print(f"{DIM}[{loop_idx}/{len(indexed_tasks)}] Skipping: {task_text(task_line)[:60]}{RESET}")
             continue
@@ -808,6 +820,9 @@ def _retry_pass(args, retry_queue, project_root: str, log_file: str,
 
     retry_passed = retry_failed = retry_skipped = 0
     for task_idx, task_line, task in retry_queue:
+        if _stop_requested(args):
+            print(f"  {YELLOW}pass cap reached — stopping before the next retry{RESET}")
+            sys.exit(EXIT_NOTHING_ATTEMPTABLE)
         print(f"\n{BOLD}[retry {task_idx}] "
               f"{task[:70]}{'...' if len(task) > 70 else ''}{RESET}")
         with open(log_file, "a") as lf:

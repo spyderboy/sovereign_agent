@@ -189,6 +189,11 @@ def dry_run(root: str, profile: str, timeout: int, log=print) -> list[dict]:
     wd.parent.mkdir(parents=True, exist_ok=True)
     git(wd.parent, "clone", "-q", root, str(wd))
     git(wd, "remote", "remove", "origin", check=False)       # never push anywhere
+    # Our own branch: the source may be on any branch or detached (a detached
+    # source made MAIN_BRANCH "HEAD" and stranded every task after the first).
+    git(wd, "checkout", "-q", "-B", "preflight")
+    git(wd, "config", "user.email", "preflight@xanadu.local")
+    git(wd, "config", "user.name", "xanadu-preflight")
     for link in (".venv", "node_modules", ".dart_tool"):
         if (Path(root) / link).exists() and not (wd / link).exists():
             (wd / link).symlink_to(Path(root) / link)
@@ -196,7 +201,7 @@ def dry_run(root: str, profile: str, timeout: int, log=print) -> list[dict]:
                 f.write(f"\n/{link}\n")
     full = (wd / "ROADMAP.md").read_text()
     env = {**os.environ, "SOVEREIGN_PROFILE": profile, "FIRESTORE_PROJECT_ID": "",
-           "MAIN_BRANCH": git(wd, "rev-parse", "--abbrev-ref", "HEAD").strip()}
+           "MAIN_BRANCH": "preflight"}
     results, solved = [], set()
     for i, line in enumerate(open_tasks(full), 1):
         target = target_of(line)
@@ -220,11 +225,22 @@ def dry_run(root: str, profile: str, timeout: int, log=print) -> list[dict]:
         log(f"    {'PASS' if passed else 'fail — ' + cause} ({results[-1]['minutes']} min)")
         if passed:
             solved.add(line[6:])
+        # back on our branch with no leftovers, whatever the attempt did
+        git(wd, "checkout", "-q", "-f", "preflight", check=False)
+        git(wd, "clean", "-fdq", "-e", "logs", check=False)
+        for b in git(wd, "for-each-ref", "--format=%(refname:short)", "refs/heads/task-*",
+                     check=False).split():
+            git(wd, "branch", "-D", b, check=False)
         # reopen what only_open ticked: originally-open tasks the dry run hasn't solved
         orig_open = {l[6:] for l in open_tasks(full)}
-        restored = ["- [ ] " + l[6:] if l.startswith("- [x] ") and l[6:] in orig_open
-                    and l[6:] not in solved else l
-                    for l in (wd / "ROADMAP.md").read_text().splitlines()]
+        restored = []
+        for l in (wd / "ROADMAP.md").read_text().splitlines():
+            body = l[6:] if l.startswith(("- [x] ", "- [ ] ")) else None
+            if body in solved:
+                l = "- [x] " + body                  # solved stays solved, committed or not
+            elif body in orig_open:
+                l = "- [ ] " + body                  # everything else goes back to open
+            restored.append(l)
         (wd / "ROADMAP.md").write_text("\n".join(restored) + "\n")
         git(wd, "commit", "-qam", "preflight: restore open tasks", check=False)
     return results

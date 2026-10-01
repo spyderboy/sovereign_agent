@@ -60,10 +60,16 @@ def test_dry_run_keeps_passes_and_reopens_the_rest(tmp_path, monkeypatch):
         subprocess.run(["git", *args], cwd=proj, check=True, capture_output=True)
     monkeypatch.setattr(preflight, "WORK", tmp_path / "work")
     real_run = subprocess.run
+    subprocess.run(["git", "checkout", "-q", "--detach"], cwd=proj, check=True)   # like a snapshot
 
     def fake_run(cmd, **kw):
         if "work.py" in " ".join(map(str, cmd)):
-            rm = (tmp_path / "work" / "proj" / "ROADMAP.md")
+            wdir = tmp_path / "work" / "proj"
+            assert kw["env"]["MAIN_BRANCH"] == "preflight"
+            assert real_run(["git", "branch", "--show-current"], cwd=wdir, capture_output=True,
+                            text=True).stdout.strip() == "preflight"         # never stranded
+            real_run(["git", "checkout", "-q", "-b", "task-9-x"], cwd=wdir, check=True)  # a worker leaves this
+            rm = (wdir / "ROADMAP.md")
             text = rm.read_text()
             if "- [ ] In `b.py`" in text:                      # b passes, c fails
                 rm.write_text(text.replace("- [ ] In `b.py`", "- [x] In `b.py`"))

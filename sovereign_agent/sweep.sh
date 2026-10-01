@@ -142,6 +142,9 @@ run_pass() {   # $1 profile  $2 cap  $3 label  $4 workers
     fi
 
     rm -f "$STOP_FLAG"
+    # A cap kill leaves the in-flight marker behind; a later `xrun stop` would
+    # then "forgive" a strike the cap kill earned (2026-10-01: cli.py).
+    rm -f "$PROJECT/logs/strong_inflight.json"
     start=$SECONDS
     ( cd "$SOVEREIGN" && SOVEREIGN_PROFILE="$prof" \
         ./supervisor.sh "$PROJECT" --workers "$workers" --features-only >>"$log" 2>&1 ) &

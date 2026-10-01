@@ -171,6 +171,7 @@ CAUSES = [
     ("wrong import", r"ImportError: cannot import name '(\w+)' from '([\w.]+)'"),
     ("contract gap", r"AttributeError: '?(\w+)'? object has no attribute '(\w+)'|"
                      r"has no attribute '(\w+)'|NameError: name '(\w+)' is not defined"),
+    ("copied, not called", r"CONTRACT NOT USED[^\n]*"),
     ("guard conflict", r"blocked bad pattern"),
     ("foreign file", r"may be innocent|errors name no file this task wrote"),
 ]

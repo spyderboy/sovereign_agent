@@ -31,6 +31,7 @@ from sov.config import (
 )
 from sov import state
 from sov.budget import compute_task_budget
+from sov.contract_use import unused_contract
 from sov.deps import _missing_dart_deps, _missing_local_deps, _missing_python_deps, _symbol_index
 from sov.escalation import CHRONIC_BLOCKER_THRESHOLD, _count_prior_skips, _escalate_to_claude, _escalate_to_claude_chronic, _write_escalation, _write_tier2_queue
 from sov.files import LOCKED_FILES, backup_files, find_relevant_files, read_files, restore_files, update_api_guide, write_changes
@@ -708,6 +709,13 @@ def run_task(task: str, project_root: str, log_file: str,
         if _nosym:
             pattern_errs = list(pattern_errs) + [_nosym]
             print(f"  {RED}(blocked: task not actually implemented){RESET}")
+
+        # Used the contract, or copied it? (sov/contract_use.py)
+        if state.PROJECT_LANGUAGE == "python" and not _nosym:
+            _copied = unused_contract(task, list(written), project_root)
+            if _copied:
+                pattern_errs = list(pattern_errs) + [_copied]
+                print(f"  {RED}(blocked: copied instead of calling the existing function){RESET}")
 
         if pattern_errs:
             errors = "\n".join(pattern_errs) + ("\n\n" + errors if errors else "")

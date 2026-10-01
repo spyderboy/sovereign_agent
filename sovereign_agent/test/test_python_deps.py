@@ -49,3 +49,16 @@ def test_modules_the_gate_test_imports(tmp_path):
     (tmp_path / "tests" / "test_html.py").write_text("from pkg.build import build\nfrom pkg.flow import flow_metric\n")
     task = ("In `pkg/html.py`: implement `render(d) -> str` — task gate: pytest -q \"tests/test_html.py\" passes")
     assert _missing_python_deps(task, root) == ["pkg/build.py"]
+
+
+def test_a_template_another_task_builds_is_a_dependency(tmp_path):
+    root = _proj(tmp_path)
+    (tmp_path / "ROADMAP.md").write_text(
+        "- [ ] In `pkg/report.html.j2`: create the template — task gate: true passes\n"
+        "- [ ] In `pkg/html.py`: implement `render(d) -> str` — render 'report.html.j2' — task gate: true passes\n")
+    task = "In `pkg/html.py`: implement `render(d) -> str` — render 'report.html.j2'" + GATE
+    assert _missing_python_deps(task, root) == ["pkg/report.html.j2"]
+    (tmp_path / "pkg" / "report.html.j2").write_text("<html></html>")
+    assert _missing_python_deps(task, root) == []
+    cfg_task = "In `pkg/cli.py`: implement `main() -> int` — default 'pkg.yaml', `timedelta(days=1)`" + GATE
+    assert _missing_python_deps(cfg_task, root) == []      # a config name and a stdlib call

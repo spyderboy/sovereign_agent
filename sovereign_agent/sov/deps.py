@@ -202,7 +202,7 @@ def _missing_python_deps(task: str, project_root: str) -> list[str]:
     defined = defined | params | imported                # `from dataclasses import replace`
     for code in re.findall(r"`([^`]+)`", body):
         for name in re.findall(r"(?<![\w.])([a-z_]\w*)\s*\(", code):
-            if name in (own_name,) or hasattr(builtins, name) or name in defined:
+            if name in (own_name,) or hasattr(builtins, name) or name in defined or name in _stdlib_names():
                 continue
             if name in ("from", "import", "raise", "return", "if", "for", "while", "print"):
                 continue
@@ -222,6 +222,28 @@ def _missing_python_deps(task: str, project_root: str) -> list[str]:
                 if path != target and not os.path.exists(os.path.join(project_root, path)) \
                         and not os.path.isdir(os.path.join(project_root, mod.replace(".", "/"))):
                     missing.append(path)
+
+    # Non-Python files another task builds (templates, data): html.py's task
+    # names report.html.j2, and with the template task failed, html.py burned
+    # 30 minutes on a file that did not exist (2026-10-01 dry run). Only files
+    # some ROADMAP task creates count, so config names like 'xmeasure.yaml' don't.
+    try:
+        rm_text = open(os.path.join(project_root, "ROADMAP.md"), errors="ignore").read()
+    except OSError:
+        rm_text = ""
+    gate_src = ""
+    if gate:
+        for tf in set(re.findall(r"([\w./-]+\.py)", gate.group(1))):
+            try:
+                gate_src += open(os.path.join(project_root, tf), errors="ignore").read()
+            except OSError:
+                pass
+    for other in set(re.findall(r"^- \[[ x]\] In `?([\w./-]+\.\w+)`?:", rm_text, re.M)):
+        if other == target or other.endswith(".py"):
+            continue
+        name = os.path.basename(other)
+        if (name in body or name in gate_src) and not os.path.exists(os.path.join(project_root, other)):
+            missing.append(other)
 
     # API.md-style cheat sheets map each function to its file (`# pkg/mod.py`
     # then `def name(`). A function the task names whose file hasn't landed
@@ -252,3 +274,25 @@ def _api_md_functions(project_root: str) -> dict[str, str]:
             if d and current:
                 out.setdefault(d.group(1), current)
     return out
+
+
+_STDLIB_CACHE: set[str] | None = None
+
+
+def _stdlib_names() -> set[str]:
+    """Callables exported by the standard-library modules tasks mention most.
+    `timedelta(days=…)` in a task text is not a missing project function."""
+    global _STDLIB_CACHE
+    if _STDLIB_CACHE is None:
+        import importlib
+        names: set[str] = set()
+        for mod in ("datetime", "pathlib", "collections", "itertools", "functools", "math",
+                    "statistics", "re", "json", "os", "os.path", "csv", "dataclasses", "typing",
+                    "urllib.parse", "urllib.request", "time", "sqlite3", "subprocess", "argparse",
+                    "fnmatch", "hashlib", "base64", "enum", "shutil", "tempfile", "random", "uuid"):
+            try:
+                names |= {n for n in dir(importlib.import_module(mod)) if not n.startswith("_")}
+            except ImportError:
+                pass
+        _STDLIB_CACHE = names
+    return _STDLIB_CACHE

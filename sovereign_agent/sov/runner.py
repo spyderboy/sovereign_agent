@@ -140,6 +140,21 @@ def _race_implement(
     return {}, {}, None, stats
 
 
+def _note_needs_split(project_root: str, task: str) -> None:
+    path = os.path.join(project_root, "logs", "needs_split.md")
+    line = f"- {task.strip()[:160]}"
+    try:
+        existing = open(path).read()
+    except OSError:
+        existing = ("# Tasks that look over-scoped\n\nThe model timed out twice without writing "
+                    "code. Split each into one obligation per task (see check_task_size.py), "
+                    "with exact imports and calls.\n\n")
+    if line not in existing:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(existing + line + "\n")
+
+
 def run_task(task: str, project_root: str, log_file: str,
              task_idx: int = 1,
              budget_s: float | None = None,
@@ -177,6 +192,7 @@ def run_task(task: str, project_root: str, log_file: str,
     tier_idx: int  = min(start_tier_idx, _max_tier - 1)
     current_model  = TIER_MODELS[tier_idx]
     phase_stale: int        = 0   # same-error streak within current tier
+    silent_timeouts: int    = 0   # timeouts that produced (almost) no code
     phase_attempts: int     = 0   # total validation failures in current tier (catches thrashing)
     consecutive_bad_pattern: int = 0  # bad-pattern blocks in a row; escalate after limit
     last_err_sig   = ""
@@ -538,6 +554,32 @@ def run_task(task: str, project_root: str, log_file: str,
             errors_seen.append("timeout")
             print(f" {YELLOW}timeout — retrying{RESET}")
             phase_attempts += 1
+            # TWO SILENT TIMEOUTS = OVER-SCOPED. A model that thinks for the
+            # whole limit without writing code is not close; a third attempt
+            # spends another 15 minutes the same way. compute_window and
+            # collect each burned three (2026-09-30); split, each piece passed
+            # in minutes. Escalate if a different model is left, else stop and
+            # say the task needs splitting.
+            _m = re.search(r"\((\d+) chars produced\)", str(exc))
+            if _m and int(_m.group(1)) < 2000:
+                silent_timeouts += 1
+            if silent_timeouts >= 2:
+                silent_timeouts = 0
+                if not _advance_tier(attempt):
+                    restore_files(backups, project_root)
+                    _note_needs_split(project_root, task)
+                    print(f"  {YELLOW}✂  two timeouts with no code — likely over-scoped; "
+                          f"noted in logs/needs_split.md{RESET}")
+                    _append_velocity(project_root, {
+                        "date": date.today().isoformat(), "task": task[:120],
+                        "outcome": "skipped", "attempts": attempt,
+                        "duration_s": round(time.time() - task_start, 1),
+                        "error_types": list(dict.fromkeys(errors_seen + ["silent_timeout"])),
+                    })
+                    _log_task_summary(project_root, task_idx, task, "timeout",
+                                      attempt, current_model, task_start)
+                    return "skipped"
+                continue
             if phase_attempts >= _max_attempts_for_tier(tier_idx):
                 if not _advance_tier(attempt):
                     restore_files(backups, project_root)

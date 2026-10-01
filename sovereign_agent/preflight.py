@@ -165,7 +165,8 @@ def static_checks(root: str) -> dict:
 # ─── dry run ─────────────────────────────────────────────────────────────────
 
 CAUSES = [
-    ("over-scoped", r"two timeouts with no code|chars produced\) — the model is streaming"),
+    ("over-scoped", r"two timeouts with no code|chars produced\) — the model is streaming|"
+                    r"\(preflight: task timeout\)"),
     ("missing dependency", r"Deferred: depends on|ModuleNotFoundError: No module named '([\w.]+)'"),
     ("wrong import", r"ImportError: cannot import name '(\w+)' from '([\w.]+)'"),
     ("contract gap", r"AttributeError: '?(\w+)'? object has no attribute '(\w+)'|"

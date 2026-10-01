@@ -45,6 +45,7 @@ def test_classify_names_the_likely_cause():
     assert preflight.classify("E   ImportError: cannot import name 'Config' from 'pkg.model'")[0] == "wrong import"
     assert preflight.classify("AttributeError: 'RepoConfig' object has no attribute 'nam'")[0] == "contract gap"
     assert preflight.classify("(blocked bad pattern: x)")[0] == "guard conflict"
+    assert preflight.classify("Attempt 1/3...\n(preflight: task timeout)\n")[0] == "over-scoped"
     assert preflight.classify("assert 1 == 2")[0] == "model"
 
 

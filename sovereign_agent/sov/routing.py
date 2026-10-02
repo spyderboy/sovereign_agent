@@ -79,7 +79,7 @@ def small_failures(velocity_lines: list[str], task_text: str, params: dict[str, 
             continue
         if r.get("outcome") == "done":
             continue
-        if not r.get("attempts"):
+        if r.get("attempts") == 0:
             continue      # a deferral (dependency not landed yet) is not a failed attempt
         size = params.get(r.get("model") or "", _guess_params(r.get("model") or ""))
         if size < strong_min:

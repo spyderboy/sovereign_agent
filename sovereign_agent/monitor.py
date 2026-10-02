@@ -377,6 +377,7 @@ class Monitor:
         if m:
             w.task, w.target = m.group(4), task_target(m.group(4))
             w.errors, w.blocked, w.foreign, w.attempt_at = [], 0, 0, None
+            w.last_error = ""     # a deferral after a failed task showed the OLD task's error
             where = f"{m.group(1)}/{m.group(2)}" if m.group(1) else f"retry {m.group(3)}"
             self.event(f"{BOLD}▶ {wid} {where}{RESET} {w.target or w.task[:60]}")
             return

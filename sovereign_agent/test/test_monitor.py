@@ -348,3 +348,9 @@ def test_retry_line_starts_a_new_task(mon):
     feed(mon, "[w0] [7/7] In `pkg/cli.py`: implement main...",
          "[w0] [retry 7] In `pkg/repos.py`: implement `parse_repos()`...")
     assert mon.workers["w0"].target == "pkg/repos.py"
+
+
+def test_new_task_clears_the_previous_error(mon):
+    feed(mon, "[w0] [1/9] In `pkg/a.py`: x...", "[w0]   Validating... ✗ E   boom",
+         "[w0] [2/9] In `pkg/b.py`: y...")
+    assert mon.workers["w0"].last_error == ""

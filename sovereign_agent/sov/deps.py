@@ -207,7 +207,10 @@ def _missing_python_deps(task: str, project_root: str) -> list[str]:
     no Python check every attempt was certain to fail."""
     import builtins
     import keyword
-    tm = re.search(r"\bIn `?([\w./-]+\.py)`?:", task)
+    # Any target — a template's gate runs Python tests too: report.html.j2's
+    # gate needed compute.py (v2) and its partials, and ran 3 times before
+    # they existed because non-.py targets skipped this check (2026-10-02).
+    tm = re.search(r"\bIn `?([\w./-]+\.\w+)`?:", task)
     if not tm:
         return []
     target = tm.group(1)

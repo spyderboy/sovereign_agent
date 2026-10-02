@@ -101,3 +101,11 @@ def test_project_import_of_an_unbuilt_function_is_missing(tmp_path):
     task = ("In `pkg/reopen.py`: implement `r(x) -> int` — calls it. Imports, EXACTLY: "
             "`from pkg.flow import flow_metric, was_reopened`, `from dataclasses import replace`" + GATE)
     assert _missing_python_deps(task, root) == ["was_reopened()"]
+
+
+def test_template_target_waits_for_what_its_gate_imports(tmp_path):
+    root = _proj(tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_t.py").write_text("def test_it():\n    from pkg.build import build\n")
+    task = "In `pkg/report.html.j2`: include the partials — task gate: pytest -q \"tests/test_t.py\" passes"
+    assert _missing_python_deps(task, root) == ["pkg/build.py"]

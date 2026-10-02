@@ -238,9 +238,25 @@ def _missing_python_deps(task: str, project_root: str) -> list[str]:
     # Its own parameters are callable too: `log(...)` in collect(…, log=print)
     # deferred collect forever (2026-09-30).
     params = {p for _, args in sigs for p in re.findall(r"(?:^|,)\s*(\w+)\s*[:=]", args)}
-    imported = {n.strip().split(" as ")[-1] for grp in re.findall(r"\bimport\s+([\w, ]+)", body)
-                for n in grp.split(",") if n.strip()}
-    defined = defined | params | imported                # `from dataclasses import replace`
+    # Names the task imports from OUTSIDE the project are available (`from
+    # dataclasses import replace`). Names it imports from a project module must
+    # really exist there: `from xmeasure.metrics.issue_history import
+    # was_reopened` hid that was_reopened's task hadn't landed, and reopen.py
+    # failed three times on the ImportError (2026-10-02).
+    imported: set[str] = set()
+    for mod, grp in re.findall(r"\bfrom\s+([\w.]+)\s+import\s+([\w, ]+)", body):
+        names = [n.strip().split(" as ")[-1] for n in grp.split(",") if n.strip()]
+        if mod.split(".")[0] != pkg:
+            imported |= set(names)
+            continue
+        mpath = os.path.join(project_root, *mod.split(".")) + ".py"
+        if mpath.endswith(target) or not os.path.exists(mpath):
+            continue                                  # a missing module is reported above
+        have = _module_names(mpath)
+        missing += [f"{n}()" for n in names if n not in have and n[:1].islower()]
+    imported |= {n.strip().split(" as ")[-1] for grp in re.findall(r"(?<![\w.])import\s+([\w, ]+)", body)
+                 if not grp.strip().startswith(pkg) for n in grp.split(",") if n.strip()}
+    defined = defined | params | imported
     for code in re.findall(r"`([^`]+)`", body):
         # A call is `name(` with no space ("report ({e})" inside a format string is
         # not one); _private helpers belong to the task that writes them.
@@ -329,3 +345,21 @@ def _stdlib_names() -> set[str]:
                 pass
         _STDLIB_CACHE = names
     return _STDLIB_CACHE
+
+
+def _module_names(path: str) -> set[str]:
+    """Top-level names a module defines or imports."""
+    import ast
+    try:
+        tree = ast.parse(open(path, errors="ignore").read())
+    except (SyntaxError, OSError):
+        return set()
+    out: set[str] = set()
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(n.name)
+        elif isinstance(n, ast.Assign):
+            out |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            out |= {a.asname or a.name.split(".")[0] for a in n.names}
+    return out

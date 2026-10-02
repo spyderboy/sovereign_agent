@@ -94,3 +94,10 @@ def test_pairs_private_helpers_and_format_strings(tmp_path):
             "`load_x(conn)` round-trips; private helper `_rate(n)` is allowed; "
             "error `f'{name}: unreadable report ({e})'`" + GATE)
     assert _missing_python_deps(task, root) == []
+
+
+def test_project_import_of_an_unbuilt_function_is_missing(tmp_path):
+    root = _proj(tmp_path)                                     # pkg/flow.py defines flow_metric only
+    task = ("In `pkg/reopen.py`: implement `r(x) -> int` — calls it. Imports, EXACTLY: "
+            "`from pkg.flow import flow_metric, was_reopened`, `from dataclasses import replace`" + GATE)
+    assert _missing_python_deps(task, root) == ["was_reopened()"]

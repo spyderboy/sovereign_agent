@@ -136,7 +136,7 @@ def main():
         # Fewest strong-model failures first, so untried tasks aren't starved
         # behind the same hard failures every cycle (sov/routing.py).
         indexed_tasks = routing.order_for_strong(indexed_tasks, routing.load_strikes(project_root),
-                                                 task_text)
+                                                 task_text, lambda t: _missing_deps(t, project_root))
     if not indexed_tasks:
         if tasks and args.stride > 1:
             # Tasks remain, just none assigned to this worker: idle, not done —
@@ -210,6 +210,19 @@ def main():
     if attempted == 0 and indexed_tasks and not args.dry_run:
         print(f"  {DIM}No task was attemptable in this run (all deferred or blocked).{RESET}")
         sys.exit(EXIT_NOTHING_ATTEMPTABLE)
+
+
+def _missing_deps(task: str, project_root: str) -> list[str]:
+    """The run_task dependency check, for ordering a pass before it starts."""
+    from sov.deps import _missing_dart_deps, _missing_local_deps, _missing_python_deps
+    lang = state.PROJECT_LANGUAGE
+    if lang == "dart":
+        return _missing_dart_deps(task, project_root)
+    if lang in ("typescript", "ts", "tsx"):
+        return _missing_local_deps(task, project_root)
+    if lang == "python":
+        return _missing_python_deps(task, project_root)
+    return []
 
 
 def _build_parser() -> argparse.ArgumentParser:

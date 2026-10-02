@@ -202,6 +202,38 @@ def run_task(task: str, project_root: str, log_file: str,
     call_info: dict = {}    # populated by implement_task on each attempt
     context_trimmed = False  # True after first prompt-too-large trim
 
+    # ── Dependency-abort guard (TS projects) ──────────────────────────────────
+    # If the task names sibling project modules that don't exist yet, it can't
+    # pass — the worker would just hallucinate the missing symbol and burn every
+    # attempt (observed: GameCanvas run before useGameLoop.ts landed → "Cannot
+    # find name 'useGameLoop'"). Defer to the retry pass so the dependency can
+    # land first, instead of failing the task outright.
+    # Runs BEFORE the planner: it needs only the task text, and a deferral
+    # after find_relevant_files cost a 27B planner call (~4 min) per blocked
+    # task — a strong pass spent 30+ minutes deferring dependents before it
+    # reached the blockers themselves (2026-10-02).
+    if state.PROJECT_LANGUAGE == "dart":
+        _missing = _missing_dart_deps(task, project_root)
+    elif state.PROJECT_LANGUAGE in ("typescript", "ts", "tsx"):
+        _missing = _missing_local_deps(task, project_root)
+    elif state.PROJECT_LANGUAGE == "python":
+        _missing = _missing_python_deps(task, project_root)
+    else:
+        _missing = []
+    if True:
+        if _missing:
+            print(f"  {YELLOW}⏭  Deferred: depends on file(s) not yet present — "
+                  f"{', '.join(_missing)}{RESET}")
+            print(f"     (will be retried after its dependencies land)")
+            state.LAST_TASK_DEFERRED = True
+            _append_velocity(project_root, {
+                "date": date.today().isoformat(), "task": task[:120],
+                "outcome": "skipped", "attempts": 0,
+                "duration_s": round(time.time() - task_start, 1),
+                "error_types": ["missing_dependency"],
+            })
+            return "skipped"
+
     print(f"  {DIM}Finding relevant files ({PLANNER_MODEL})...{RESET}")
     rel_files = find_relevant_files(task, project_root)
     # The test files the gate runs are ALWAYS context: the planner picks by
@@ -321,34 +353,6 @@ def run_task(task: str, project_root: str, log_file: str,
                       f"across {len(rag_grouped)} of {len(support_files)} support file(s){RESET}")
         except Exception as exc:
             print(f"  {YELLOW}(RAG retrieval unavailable: {exc} — using whole-file context){RESET}")
-
-    # ── Dependency-abort guard (TS projects) ──────────────────────────────────
-    # If the task names sibling project modules that don't exist yet, it can't
-    # pass — the worker would just hallucinate the missing symbol and burn every
-    # attempt (observed: GameCanvas run before useGameLoop.ts landed → "Cannot
-    # find name 'useGameLoop'"). Defer to the retry pass so the dependency can
-    # land first, instead of failing the task outright.
-    if state.PROJECT_LANGUAGE == "dart":
-        _missing = _missing_dart_deps(task, project_root)
-    elif state.PROJECT_LANGUAGE in ("typescript", "ts", "tsx"):
-        _missing = _missing_local_deps(task, project_root)
-    elif state.PROJECT_LANGUAGE == "python":
-        _missing = _missing_python_deps(task, project_root)
-    else:
-        _missing = []
-    if True:
-        if _missing:
-            print(f"  {YELLOW}⏭  Deferred: depends on file(s) not yet present — "
-                  f"{', '.join(_missing)}{RESET}")
-            print(f"     (will be retried after its dependencies land)")
-            state.LAST_TASK_DEFERRED = True
-            _append_velocity(project_root, {
-                "date": date.today().isoformat(), "task": task[:120],
-                "outcome": "skipped", "attempts": 0,
-                "duration_s": round(time.time() - task_start, 1),
-                "error_types": ["missing_dependency"],
-            })
-            return "skipped"
 
     # Snapshot pre-existing errors so the validator only fails on NEW ones
     baseline_errors = snapshot_baseline_errors(project_root)

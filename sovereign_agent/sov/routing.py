@@ -167,9 +167,23 @@ def forgive_inflight(project_root: str) -> str | None:
     return key
 
 
-def order_for_strong(indexed_tasks: list, strikes: dict[str, int], task_text_fn) -> list:
-    """Fewest strong failures first; ROADMAP order kept within each count."""
-    return sorted(indexed_tasks, key=lambda it: strikes.get(_key(task_text_fn(it[1])), 0))
+def order_for_strong(indexed_tasks: list, strikes: dict[str, int], task_text_fn,
+                     blocked_fn=None) -> list:
+    """Runnable tasks before blocked ones, then fewest strong failures first;
+    ROADMAP order kept within each group.
+
+    blocked_fn(text) -> truthy when the task would only defer (a dependency
+    is missing). Without it, a blocker with one strike sorted behind every
+    task waiting on it, and the pass spent its cap deferring dependents
+    before it reached the one task that unblocks them (2026-10-02)."""
+    def key(it):
+        text = task_text_fn(it[1])
+        try:
+            blocked = bool(blocked_fn(text)) if blocked_fn else False
+        except Exception:
+            blocked = False
+        return (blocked, strikes.get(_key(text), 0))
+    return sorted(indexed_tasks, key=key)
 
 
 def _note_parked(project_root: str, task_text: str, count: int) -> None:

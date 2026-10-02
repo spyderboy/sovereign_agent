@@ -96,6 +96,14 @@ def test_order_for_strong_puts_untried_first_keeping_roadmap_order():
     assert [i for i, _ in ordered] == [3, 4, 1, 2]
 
 
+def test_order_for_strong_runs_a_struck_blocker_before_its_blocked_dependents():
+    tasks = [(1, "- [ ] uses_x"), (2, "- [ ] x"), (3, "- [ ] other")]
+    strikes = {"x": 1}
+    ordered = routing.order_for_strong(tasks, strikes, lambda line: line[6:],
+                                       blocked_fn=lambda t: t == "uses_x")
+    assert [i for i, _ in ordered] == [3, 2, 1]
+
+
 # ── 2026-09-30: an edited task starts with a clean small-model record ─────────
 
 def test_edited_task_resets_small_failures(tmp_path):

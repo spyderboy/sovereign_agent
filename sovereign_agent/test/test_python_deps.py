@@ -62,3 +62,21 @@ def test_a_template_another_task_builds_is_a_dependency(tmp_path):
     assert _missing_python_deps(task, root) == []
     cfg_task = "In `pkg/cli.py`: implement `main() -> int` — default 'pkg.yaml', `timedelta(days=1)`" + GATE
     assert _missing_python_deps(cfg_task, root) == []      # a config name and a stdlib call
+
+
+def test_gate_node_scans_only_its_own_test(tmp_path):
+    """Sibling tests' imports are not this task's dependencies (2026-10-01: a
+    whole-file scan made jira_issue_v2 wait for jira_history, which needs it)."""
+    from sov.deps import _missing_python_deps, gate_test_sources
+    root = _proj(tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_j.py").write_text(
+        "import json\n\ndef helper():\n    return 1\n\n"
+        "def test_mine():\n    from pkg.flow import flow_metric\n\n"
+        "def test_sibling():\n    from pkg.history import fetch_all\n")
+    src = gate_test_sources('pytest -q "tests/test_j.py::test_mine"', root)[0]
+    assert "test_mine" in src and "helper" in src and "test_sibling" not in src
+    task = "In `pkg/issue.py`: implement `map_it(x) -> int` — task gate: pytest -q \"tests/test_j.py::test_mine\" passes"
+    assert _missing_python_deps(task, root) == []
+    whole = "In `pkg/issue.py`: implement `map_it(x) -> int` — task gate: pytest -q \"tests/test_j.py\" passes"
+    assert _missing_python_deps(whole, root) == ["pkg/history.py"]

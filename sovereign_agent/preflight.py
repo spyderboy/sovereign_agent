@@ -103,11 +103,9 @@ def coverage_gaps(line: str, root: str, ctx: str) -> list[str]:
     pkg = target.split("/")[0]
     own_mod = target[:-3].replace("/", ".")
     gaps = []
-    for tf in sorted(set(re.findall(r"([\w./-]+\.py)", gate))):
-        try:
-            src = open(os.path.join(root, tf), errors="ignore").read()
-        except OSError:
-            continue
+    from sov.deps import gate_test_sources
+    for src in gate_test_sources(gate, root):
+        tf = "gate test"
         for mod, names in re.findall(rf"^\s*from\s+({re.escape(pkg)}[\w.]*)\s+import\s+([\w, ]+)", src, re.M):
             if mod == own_mod:
                 continue

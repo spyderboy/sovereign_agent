@@ -163,6 +163,42 @@ def _py_defined_names(project_root: str) -> set[str]:
     return names
 
 
+def gate_test_sources(gate_cmd: str, project_root: str) -> list[str]:
+    """Source of the tests a gate actually runs. A node `file.py::test_x` keeps the
+    module-level code (imports, helpers) and ONLY the named test functions — every
+    other `test_*` is stripped. Scanning whole files attributed sibling tests'
+    imports to the task: jira_issue_v2 then "depended on" jira_history, which
+    depends on it — a deferral deadlock (2026-10-01)."""
+    import ast
+    picked: dict[str, set[str] | None] = {}
+    for node in re.findall(r"([\w./-]+\.py(?:::[\w\[\]-]+)?)", gate_cmd):
+        path, _, test = node.partition("::")
+        if test:
+            if picked.get(path, set()) is not None:
+                picked.setdefault(path, set()).add(test)
+        else:
+            picked[path] = None                       # whole file
+    out = []
+    for path, tests in picked.items():
+        try:
+            src = open(os.path.join(project_root, path), errors="ignore").read()
+        except OSError:
+            continue
+        if tests is None:
+            out.append(src)
+            continue
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            out.append(src)
+            continue
+        keep = [n for n in tree.body
+                if not (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test_")
+                        and n.name not in tests)]
+        out.append("\n".join(ast.get_source_segment(src, n) or "" for n in keep))
+    return out
+
+
 def _missing_python_deps(task: str, project_root: str) -> list[str]:
     """What a Python task needs that hasn't landed: project modules it names
     (`pkg.mod` / `from pkg.mod import x`) that don't exist, and functions it
@@ -212,11 +248,7 @@ def _missing_python_deps(task: str, project_root: str) -> list[str]:
     # build.py landed (two 15-min attempts on an unfixable error, 2026-09-30).
     gate = re.search(r"task gate:\s*(.+?)\s+passes", task)
     if gate:
-        for tf in set(re.findall(r"([\w./-]+\.py)", gate.group(1))):
-            try:
-                tsrc = open(os.path.join(project_root, tf), errors="ignore").read()
-            except OSError:
-                continue
+        for tsrc in gate_test_sources(gate.group(1), project_root):
             for mod in set(re.findall(rf"^\s*(?:from|import)\s+({re.escape(pkg)}(?:\.\w+)+)", tsrc, re.M)):
                 path = mod.replace(".", "/") + ".py"
                 if path != target and not os.path.exists(os.path.join(project_root, path)) \
@@ -231,13 +263,7 @@ def _missing_python_deps(task: str, project_root: str) -> list[str]:
         rm_text = open(os.path.join(project_root, "ROADMAP.md"), errors="ignore").read()
     except OSError:
         rm_text = ""
-    gate_src = ""
-    if gate:
-        for tf in set(re.findall(r"([\w./-]+\.py)", gate.group(1))):
-            try:
-                gate_src += open(os.path.join(project_root, tf), errors="ignore").read()
-            except OSError:
-                pass
+    gate_src = "\n".join(gate_test_sources(gate.group(1), project_root)) if gate else ""
     for other in set(re.findall(r"^- \[[ x]\] In `?([\w./-]+\.\w+)`?:", rm_text, re.M)):
         if other == target or other.endswith(".py"):
             continue

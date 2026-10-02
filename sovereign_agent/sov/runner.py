@@ -207,9 +207,12 @@ def run_task(task: str, project_root: str, log_file: str,
     # The test files the gate runs are ALWAYS context: the planner picks by
     # name, and a shared test file (test_jira_v2.py for jira_query_v2.py) was
     # left out, so the worker coded blind against its own gate (2026-10-01).
-    for _gt in re.findall(r"([\w./-]+\.(?:py|dart|ts|tsx|go))(?:::[\w\[\]-]+)?", _extract_task_gate(task) or ""):
-        if _gt not in rel_files and os.path.exists(os.path.join(project_root, _gt)):
-            rel_files.append(_gt)
+    # They go FIRST: the context-budget trim below drops from the end, and an
+    # appended test was the first file cut (jira_history, same day).
+    _gate_tests = [g for g in re.findall(r"([\w./-]+\.(?:py|dart|ts|tsx|go))(?:::[\w\[\]-]+)?",
+                                         _extract_task_gate(task) or "")
+                   if os.path.exists(os.path.join(project_root, g))]
+    rel_files = list(dict.fromkeys(_gate_tests + [f for f in rel_files if f not in _gate_tests]))
 
     # Always-include context (config "context_always_include") plus any
     # spec/*.md files the task text references (e.g. "per spec/03-simulation.md §2").

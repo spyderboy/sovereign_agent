@@ -135,3 +135,13 @@ def test_a_deferral_is_not_a_strike(tmp_path):
     routing.begin_strong_attempt(str(tmp_path), t)
     routing.forgive_inflight(str(tmp_path))              # what work.py does when run_task deferred
     assert routing.load_strikes(str(tmp_path)) == {}
+
+
+def test_deferrals_are_not_small_model_failures():
+    """A deferral writes outcome 'skipped' with 0 attempts; counting it routed
+    jira_issue_v2 to the strong pass for two false deferrals (2026-10-01)."""
+    t = "In `pkg/a.py`: implement `f()`"
+    lines = ['{"task": "%s", "outcome": "skipped", "attempts": 0, "model": "qwen2.5-coder:14b", "error_types": ["missing_dependency"]}' % t] * 2
+    assert routing.small_failures(lines, t, {}, 25) == 0
+    lines.append('{"task": "%s", "outcome": "skipped", "attempts": 3, "model": "qwen2.5-coder:14b"}' % t)
+    assert routing.small_failures(lines, t, {}, 25) == 1

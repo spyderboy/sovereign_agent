@@ -44,7 +44,7 @@ PLAN_DEFAULTS = {
     "attempts": {"tier1": 3, "mid": 2, "last": 2},
     "runpod": {"gpu_type": "NVIDIA L40S", "gpu_count": 1, "volume_gb": 200,
                "cloud": "SECURE", "max_run_usd": 40.0, "after_run": "stop",
-               "stop_between_passes": True},
+               "stop_between_passes": True, "shared_pod": False},
     "monitor": {"restart": True, "ntfy_topic": ""},
 }
 
@@ -151,12 +151,20 @@ def profile_text(plan: dict, pass_name: str, url: str = "") -> str:
     return "\n".join(lines) + "\n"
 
 
+def pod_key(plan: dict, pass_name: str) -> str:
+    """Which pod serves this pass: its own, or one pod for both passes when
+    the plan says shared_pod (a GPU big enough to hold both models — saves a
+    second boot, a second volume and a restart that can fail for lack of GPUs)."""
+    both = plan["cheap"]["where"] == plan["strong"]["where"] == "runpod"
+    return "shared" if both and plan["runpod"].get("shared_pod") else pass_name
+
+
 def pass_url(plan: dict, pass_name: str, state: dict) -> str:
     p = plan[pass_name]
     if p["where"] == "url":
         return p["url"].rstrip("/")
     if p["where"] == "runpod":
-        pod = state.get("pods", {}).get(pass_name)
+        pod = state.get("pods", {}).get(pod_key(plan, pass_name))
         return f"https://{pod}-11434.proxy.runpod.net" if pod else ""
     return ""
 
@@ -304,7 +312,8 @@ def ensure_pod(plan: dict, pass_name: str, log=print) -> str:
     spent = runpod.spend_since(state.get("started_at") or _now())
     if spent >= float(rp["max_run_usd"]):
         raise runpod.RunPodError(f"run budget reached (${spent:.2f} of ${rp['max_run_usd']})")
-    name = f"{runpod.PREFIX}{slug(os.path.basename(plan['project']))}-{pass_name}"
+    key = pod_key(plan, pass_name)
+    name = f"{runpod.PREFIX}{slug(os.path.basename(plan['project']))}-{key}"
     pods = {p["name"]: p for p in runpod.list_pods()}
     pod = pods.get(name)
     if pod and pod.get("desiredStatus") == "RUNNING":
@@ -317,7 +326,7 @@ def ensure_pod(plan: dict, pass_name: str, log=print) -> str:
         pod = runpod.create_pod(name, rp["gpu_type"], int(rp["gpu_count"]),
                                 int(rp["volume_gb"]), rp["cloud"])
     url = runpod.endpoint(pod["id"])
-    state.setdefault("pods", {})[pass_name] = pod["id"]
+    state.setdefault("pods", {})[key] = pod["id"]
     save_state(plan, state)
     log(f"waiting for Ollama at {url}")
     if not runpod.wait_ready(url):
@@ -457,7 +466,8 @@ def hook(plan: dict, label: str, log=print) -> int:
     pass's pod if the plan says so. Non-zero exit = sweep.sh skips the pass."""
     pass_name = "strong" if label.endswith("-strong") else "cheap"
     other = "cheap" if pass_name == "strong" else "strong"
-    if plan["runpod"].get("stop_between_passes") and plan[other]["where"] == "runpod":
+    if (plan["runpod"].get("stop_between_passes") and plan[other]["where"] == "runpod"
+            and pod_key(plan, other) != pod_key(plan, pass_name)):
         stopped = stop_run_pods(plan, only=other)
         if stopped:
             log(f"stopped idle {other} pod(s) {stopped} before {label}")

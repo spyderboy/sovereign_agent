@@ -89,6 +89,23 @@ def test_hook_starts_this_pass_pod_and_stops_the_idle_one(repo, monkeypatch):
     assert calls == [("stop", "strong")]                     # strong pod idle during cheap pass
 
 
+def test_shared_pod_serves_both_passes_and_is_never_stopped_between(repo, monkeypatch):
+    plan = runctl.load_plan(str(repo))
+    plan["cheap"]["where"] = plan["strong"]["where"] = "runpod"
+    plan["runpod"]["shared_pod"] = True
+    assert runctl.pod_key(plan, "cheap") == runctl.pod_key(plan, "strong") == "shared"
+    calls = []
+    monkeypatch.setattr(runctl, "ensure_pod", lambda p, name, log: calls.append(("ensure", name)) or "u")
+    monkeypatch.setattr(runctl, "stop_run_pods", lambda p, only=None: calls.append(("stop", only)) or [])
+    assert runctl.hook(plan, "cycle1-strong", lambda m: None) == 0
+    assert calls == [("ensure", "strong")]
+    url = runctl.pass_url(plan, "cheap", {"pods": {"shared": "abc"}})
+    assert url == runctl.pass_url(plan, "strong", {"pods": {"shared": "abc"}})
+    assert url == "https://abc-11434.proxy.runpod.net"
+    plan["cheap"]["where"] = "local"                          # one pass local: no sharing
+    assert runctl.pod_key(plan, "strong") == "strong"
+
+
 def test_hook_failure_skips_the_pass(repo, monkeypatch):
     plan = runctl.load_plan(str(repo))
     plan["strong"]["where"] = "runpod"

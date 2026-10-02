@@ -260,7 +260,7 @@ def _missing_python_deps(task: str, project_root: str) -> list[str]:
     imported |= {n.strip().split(" as ")[-1] for grp in re.findall(r"(?<![\w.])import\s+([\w, ]+)", body)
                  if not grp.strip().startswith(pkg) for n in grp.split(",") if n.strip()}
     defined = defined | params | imported
-    for code in re.findall(r"`([^`]+)`", body):
+    for code in (re.findall(r"`([^`]+)`", body) if target.endswith(".py") else []):   # templates: Jinja calls
         # A call is `name(` with no space ("report ({e})" inside a format string is
         # not one); _private helpers belong to the task that writes them.
         for name in re.findall(r"(?<![\w.])([a-z]\w*)\(", code):
@@ -296,6 +296,27 @@ def _missing_python_deps(task: str, project_root: str) -> list[str]:
         name = os.path.basename(other)
         if (name in body or name in gate_src) and not os.path.exists(os.path.join(project_root, other)):
             missing.append(other)
+
+    # An EARLIER open task on a module the gate imports (or the task names) is
+    # unfinished work this task needs even though the module exists: the
+    # scorecard partials render through build_report_data, whose v2 task in
+    # report/build.py was still open (2026-10-02). Earlier tasks only — no cycles.
+    gate_text = "\n".join(gate_test_sources(gate.group(1), project_root)) if gate else ""
+    gate_mods = {m.replace(".", "/") + ".py"
+                 for m in re.findall(rf"^\s*(?:from|import)\s+({re.escape(pkg)}(?:\.\w+)+)", gate_text, re.M)}
+    gate_mods |= {m.replace(".", "/") + ".py" for m in re.findall(rf"\b{re.escape(pkg)}(?:\.\w+)+", body)}
+    me = task.strip()[:100]
+    for line in rm_text.splitlines():
+        if line[6:].strip()[:100] == me:
+            break                                     # only tasks BEFORE this one
+        om = re.match(r"^- \[ \] In `?([\w./-]+\.\w+)`?:", line)
+        if not om or om.group(1) not in gate_mods or om.group(1) == target:
+            continue
+        # ...and only when this task or its gate USES a function that task builds
+        # (estimate_consistency needs history_by_key, not the still-open was_reopened)
+        built = {n for n, _ in re.findall(r"`(?:[\w\[\], |.]+\s)?(\w+)\s*\(([^`]*)\)", line[6:].split(" — ", 1)[0])}
+        if not built or any(re.search(rf"\b{re.escape(n)}\b", gate_text + "\n" + body) for n in built):
+            missing.append(om.group(1))
 
     # API.md-style cheat sheets map each function to its file (`# pkg/mod.py`
     # then `def name(`). A function the task names whose file hasn't landed

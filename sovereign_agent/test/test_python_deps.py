@@ -109,3 +109,23 @@ def test_template_target_waits_for_what_its_gate_imports(tmp_path):
     (tmp_path / "tests" / "test_t.py").write_text("def test_it():\n    from pkg.build import build\n")
     task = "In `pkg/report.html.j2`: include the partials — task gate: pytest -q \"tests/test_t.py\" passes"
     assert _missing_python_deps(task, root) == ["pkg/build.py"]
+
+
+def test_waits_for_an_earlier_open_task_on_an_imported_module(tmp_path):
+    root = _proj(tmp_path)                                       # pkg/flow.py exists (v1)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_p.py").write_text("def test_it():\n    from pkg.flow import flow_metric\n")
+    later = "In `pkg/partial.html.j2`: render — task gate: pytest -q \"tests/test_p.py\" passes"
+    (tmp_path / "ROADMAP.md").write_text("- [ ] In `pkg/flow.py`: extend `flow_metric(i, d, w)` (v2) — x\n- [ ] " + later + "\n")
+    assert _missing_python_deps(later, root) == ["pkg/flow.py"]
+    (tmp_path / "ROADMAP.md").write_text("- [x] In `pkg/flow.py`: extend `flow_metric(i, d, w)` (v2) — x\n- [ ] " + later + "\n")
+    assert _missing_python_deps(later, root) == []
+
+
+def test_earlier_open_task_only_matters_if_its_function_is_used(tmp_path):
+    root = _proj(tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_e.py").write_text("def test_it():\n    from pkg.flow import flow_metric\n")
+    later = "In `pkg/est.py`: implement `est(x) -> int` — task gate: pytest -q \"tests/test_e.py\" passes"
+    (tmp_path / "ROADMAP.md").write_text("- [ ] In `pkg/flow.py`: implement `was_reopened(h)` — x\n- [ ] " + later + "\n")
+    assert _missing_python_deps(later, root) == []              # uses flow_metric, not was_reopened

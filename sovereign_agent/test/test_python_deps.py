@@ -80,3 +80,17 @@ def test_gate_node_scans_only_its_own_test(tmp_path):
     assert _missing_python_deps(task, root) == []
     whole = "In `pkg/issue.py`: implement `map_it(x) -> int` — task gate: pytest -q \"tests/test_j.py\" passes"
     assert _missing_python_deps(whole, root) == ["pkg/history.py"]
+
+
+def test_python_keywords_are_not_calls(tmp_path):
+    root = _proj(tmp_path)
+    task = ("In `pkg/m.py`: implement `m(item) -> int` — `x if a else ()`, `y or (1)`, `not (b)`" + GATE)
+    assert _missing_python_deps(task, root) == []
+
+
+def test_pairs_private_helpers_and_format_strings(tmp_path):
+    root = _proj(tmp_path)
+    task = ("In `pkg/io.py`: implement the pair `save_x(conn, xs) -> int` / `load_x(conn) -> tuple` — "
+            "`load_x(conn)` round-trips; private helper `_rate(n)` is allowed; "
+            "error `f'{name}: unreadable report ({e})'`" + GATE)
+    assert _missing_python_deps(task, root) == []

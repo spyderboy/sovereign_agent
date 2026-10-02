@@ -204,6 +204,12 @@ def run_task(task: str, project_root: str, log_file: str,
 
     print(f"  {DIM}Finding relevant files ({PLANNER_MODEL})...{RESET}")
     rel_files = find_relevant_files(task, project_root)
+    # The test files the gate runs are ALWAYS context: the planner picks by
+    # name, and a shared test file (test_jira_v2.py for jira_query_v2.py) was
+    # left out, so the worker coded blind against its own gate (2026-10-01).
+    for _gt in re.findall(r"([\w./-]+\.(?:py|dart|ts|tsx|go))(?:::[\w\[\]-]+)?", _extract_task_gate(task) or ""):
+        if _gt not in rel_files and os.path.exists(os.path.join(project_root, _gt)):
+            rel_files.append(_gt)
 
     # Always-include context (config "context_always_include") plus any
     # spec/*.md files the task text references (e.g. "per spec/03-simulation.md §2").

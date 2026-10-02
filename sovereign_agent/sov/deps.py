@@ -206,6 +206,7 @@ def _missing_python_deps(task: str, project_root: str) -> list[str]:
     ordering put compute.py before compute_quality.py, which it imports; with
     no Python check every attempt was certain to fail."""
     import builtins
+    import keyword
     tm = re.search(r"\bIn `?([\w./-]+\.py)`?:", task)
     if not tm:
         return []
@@ -228,19 +229,25 @@ def _missing_python_deps(task: str, project_root: str) -> list[str]:
                         missing.append(mod)
                 break
     defined = _py_defined_names(project_root)
-    own = re.search(r"implement `(?:[\w\[\], |.]+\s)?(\w+)\s*\(([^`]*)\)", body)
-    own_name = own.group(1) if own else None
+    # The functions THIS task defines: every signature before the first " — "
+    # ("implement the pair `save_x(...)` / `load_x(...)`", "extend `f(...)`").
+    head = body.split(" — ", 1)[0]
+    sigs = re.findall(r"`(?:[\w\[\], |.]+\s)?(\w+)\s*\(([^`]*)\)", head)
+    own_names = {n for n, _ in sigs}
+    own_name = sigs[0][0] if sigs else None
     # Its own parameters are callable too: `log(...)` in collect(…, log=print)
     # deferred collect forever (2026-09-30).
-    params = set(re.findall(r"(?:^|,)\s*(\w+)\s*[:=]", own.group(2))) if own else set()
+    params = {p for _, args in sigs for p in re.findall(r"(?:^|,)\s*(\w+)\s*[:=]", args)}
     imported = {n.strip().split(" as ")[-1] for grp in re.findall(r"\bimport\s+([\w, ]+)", body)
                 for n in grp.split(",") if n.strip()}
     defined = defined | params | imported                # `from dataclasses import replace`
     for code in re.findall(r"`([^`]+)`", body):
-        for name in re.findall(r"(?<![\w.])([a-z_]\w*)\s*\(", code):
-            if name in (own_name,) or hasattr(builtins, name) or name in defined or name in _stdlib_names():
+        # A call is `name(` with no space ("report ({e})" inside a format string is
+        # not one); _private helpers belong to the task that writes them.
+        for name in re.findall(r"(?<![\w.])([a-z]\w*)\(", code):
+            if name in own_names or hasattr(builtins, name) or name in defined or name in _stdlib_names():
                 continue
-            if name in ("from", "import", "raise", "return", "if", "for", "while", "print"):
+            if keyword.iskeyword(name) or name == "print":    # `else (` in `… if x else ()` is not a call
                 continue
             missing.append(f"{name}()")
     # The gate's own test may import modules the task text never names:

@@ -3,6 +3,7 @@
 
     python3 preflight.py ~/Code/<project>                    # static checks (seconds, no model)
     python3 preflight.py ~/Code/<project> --solve qwen38     # + dry-run every open task on a profile
+    python3 preflight.py ~/Code/<project> --reference DIR    # + build order and weak gates vs a reference solution
 
 WHY (2026-09-30, xmeasure)
 
@@ -29,6 +30,14 @@ DRY RUN (--solve PROFILE)
   (silent timeouts), missing dependency, wrong import, contract gap (unknown
   attribute), guard conflict, foreign file. Run it when no sweep is using
   Ollama.
+
+REFERENCE (--reference DIR, 2026-10-03)
+  DIR mirrors the project with a reference solution. On a copy, each open task
+  in ROADMAP order: its gate must fail before its code exists, pass once the
+  task's own functions are applied from DIR, and — the part a green run never
+  shows — fail on small plausible mistakes in those functions (sov/refcheck.py).
+  Surviving mutants are mistakes a worker could merge green. --no-mutants
+  skips that step.
 
 Writes logs/preflight-<date>.md in the project and prints the summary.
 """
@@ -241,7 +250,7 @@ def dry_run(root: str, profile: str, timeout: int, log=print) -> list[dict]:
 
 # ─── report ──────────────────────────────────────────────────────────────────
 
-def report(root: str, st: dict, runs: list[dict] | None) -> str:
+def report(root: str, st: dict, runs: list[dict] | None, ref: list[dict] | None = None) -> str:
     lines = [f"# Preflight — {os.path.basename(root)} — {datetime.now():%Y-%m-%d %H:%M}", "",
              f"{st['open']} open task(s).", ""]
     def section(title, items):
@@ -259,6 +268,17 @@ def report(root: str, st: dict, runs: list[dict] | None) -> str:
             lines.append(f"- {'PASS' if r['passed'] else 'FAIL'} {r['target']} ({r['minutes']} min)"
                          + ("" if r["passed"] else f" — **{r['cause']}**: `{r['evidence']}`"))
         lines.append("")
+    if ref is not None:
+        bad = [r for r in ref if r["fails_before"] is False or r["passes_after"] is False]
+        weak = sorted((r for r in ref if r["survivors"]), key=lambda r: -len(r["survivors"]))
+        lines += [f"## Reference — {len(bad)} gate problem(s), {len(weak)} weak gate(s) of {len(ref)}", ""]
+        for r in bad:
+            why = "passes without the task's code" if r["fails_before"] is False else "fails on the reference"
+            lines.append(f"- **{r['target']}**: gate {why} — `{r['task'][:80]}`")
+        for r in weak:
+            lines.append(f"- {r['target']}: {len(r['survivors'])}/{r['mutants']} mistakes pass the gate — "
+                         + "; ".join(r["survivors"][:4]) + (" …" if len(r["survivors"]) > 4 else ""))
+        lines.append("")
     if not st["done_gates_complete"]:
         lines.append("_Done-gate check skipped (a run is live on this project) or stopped at its time budget._")
     return "\n".join(lines)
@@ -270,6 +290,8 @@ def main() -> int:
     ap.add_argument("--solve", metavar="PROFILE", help="dry-run every open task on this profile")
     ap.add_argument("--timeout", type=int, default=3600, help="seconds per task in the dry run")
     ap.add_argument("--force", action="store_true", help="dry-run even while a run uses Ollama")
+    ap.add_argument("--reference", metavar="DIR", help="check build order and gate strength against a reference solution")
+    ap.add_argument("--no-mutants", action="store_true", help="with --reference: skip the weak-gate mutants")
     a = ap.parse_args()
     root = os.path.realpath(os.path.expanduser(a.project))
     st = static_checks(root)
@@ -280,14 +302,19 @@ def main() -> int:
             print("refusing the dry run: a run is using Ollama (stop it, or pass --force)")
             return 1
         runs = dry_run(root, a.solve, a.timeout)
-    text = report(root, st, runs)
+    ref = None
+    if a.reference:
+        from sov.refcheck import simulate
+        ref = simulate(root, os.path.realpath(os.path.expanduser(a.reference)), mutate=not a.no_mutants)
+    text = report(root, st, runs, ref)
     out = Path(root) / "logs" / f"preflight-{datetime.now():%Y%m%d-%H%M}.md"
     out.parent.mkdir(exist_ok=True)
     out.write_text(text + "\n")
     print(text)
     print(f"\n→ {out}")
     problems = st["done_gates_broken"] or st["oversized"] or st["coverage"] or st["order"] \
-        or (runs and not all(r["passed"] for r in runs))
+        or (runs and not all(r["passed"] for r in runs)) \
+        or (ref and any(r["fails_before"] is False or r["passes_after"] is False for r in ref))
     return 1 if problems else 0
 
 

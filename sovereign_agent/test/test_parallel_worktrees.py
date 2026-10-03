@@ -38,6 +38,9 @@ def _isolated_config(monkeypatch):
     monkeypatch.setattr(gitops, "MAIN_BRANCH", "main")
     monkeypatch.setattr(gitops, "GIT_BRANCHES", True)
     monkeypatch.setattr(state, "INTEGRATION_ROOT", None)
+    # _setup_worker_worktree sets these for gate isolation; restore after each test
+    monkeypatch.setenv("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", os.environ.get("PYTHONDONTWRITEBYTECODE", ""))
 
 
 def _sh(cwd, *args):
@@ -89,6 +92,18 @@ def test_worktree_shares_untracked_toolchain_and_stays_clean(repo):
     # clean -fd between tasks must not delete the shared symlinks
     ns["_branch_start"](wt0, 1, "task 1")
     assert os.path.islink(os.path.join(wt0, ".venv"))
+
+
+def test_worker_gates_are_isolated_from_the_primary_checkout(repo, monkeypatch):
+    """A shared venv's editable install must not resolve modules the worktree
+    lacks to the primary checkout (2026-10-03)."""
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    ns, (wt0, _) = _workers(repo)
+    site = os.environ["PYTHONPATH"].split(os.pathsep)[0]
+    assert os.path.isfile(os.path.join(site, "sitecustomize.py"))
+    assert not site.startswith(wt0)                     # outside the worktree: never dirties it
+    assert os.environ["PYTHONDONTWRITEBYTECODE"] == "1" and _status(wt0) == ""
 
 
 def test_worker_sees_the_project_files(repo):

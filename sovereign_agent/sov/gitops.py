@@ -103,6 +103,14 @@ def _setup_worker_worktree(primary: str, worker_id: int) -> str:
         with open(exclude_path, "a") as f:
             f.write("\n" + "\n".join(new_lines) + "\n")
     atexit.register(lambda: _git(["worktree", "remove", "--force", wt], primary))
+    # Gates must import THIS worktree's code. The shared .venv's editable
+    # install (`pip install -e`) resolves any module the worktree lacks to the
+    # PRIMARY checkout — verified in a clone on 2026-10-03, where a deleted
+    # module still imported. Gate subprocesses inherit this environment.
+    from sov.refcheck import isolated_env
+    iso = isolated_env(os.path.join(os.path.dirname(wt), f"env-w{worker_id}"))
+    os.environ["PYTHONPATH"] = iso["PYTHONPATH"]
+    os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     print(f"  {DIM}worker {worker_id}: isolated worktree {wt}{RESET}")
     return wt
 

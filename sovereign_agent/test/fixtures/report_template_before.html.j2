@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>xmeasure — {{ d.team }}</title>
+<style>
+body{font-family:system-ui,sans-serif;margin:2rem;color:#111}
+table{border-collapse:collapse;width:100%;margin:0 0 1.5rem}
+th,td{border-bottom:1px solid #ddd;padding:.35rem .5rem;text-align:left;font-size:.9rem}
+.methodology{page-break-before:always;break-before:page}
+@media print{body{margin:0}}
+</style></head><body>
+<h1>{{ d.team }} — engineering measurement</h1>
+<p>Generated {{ d.generated_at.strftime('%Y-%m-%d') }}</p>
+{% set base = {} %}{% for r in d.baseline.results %}{% set _ = base.update({r.metric_id: r}) %}{% endfor %}
+{% set comp = {} %}{% for c in d.comparisons %}{% set _ = comp.update({c.metric_id: c}) %}{% endfor %}
+{% set by_id = {} %}{% for m in metrics %}{% set _ = by_id.update({m.id: m}) %}{% endfor %}
+<h2>Summary</h2>
+<table><tr><th>Metric</th><th>Baseline</th><th>Pilot</th><th>Change</th><th>Verdict</th></tr>
+{% for mid in ["throughput", "cycle_time", "escaped_defects", "change_failure_rate"] %}{% set r = base[mid] %}
+<tr><td>{{ by_id[mid].name }}</td><td>{{ fmt(r.value, r.unit) }} (n={{ r.n }})</td>
+{% if mid in comp %}{% set c = comp[mid] %}<td>{{ fmt(c.pilot.value, c.pilot.unit) }} (n={{ c.pilot.n }})</td>
+<td>{{ '—' if c.change_pct is none else '%.1f%%' % c.change_pct }}</td><td>{{ verdict(c.verdict) }}</td>
+{% else %}<td>—</td><td>—</td><td>—</td>{% endif %}</tr>{% endfor %}
+</table>
+{% for group, title in [("flow", "Flow"), ("quality", "Quality"), ("ai", "AI work"), ("survey", "Team pulse")] %}
+<h2>{{ title }}</h2>
+<table><tr><th>Metric</th><th>Unit</th><th>Value(s)</th><th>n</th><th>Detail</th><th>Note</th></tr>
+{% for m in metrics if m.group == group %}{% set r = base[m.id] %}
+<tr><td>{{ m.name }}</td><td>{{ m.unit }}</td>
+<td>{{ fmt(r.value, r.unit) }}{% if m.id in comp %} → {{ fmt(comp[m.id].pilot.value, r.unit) }}{% endif %}</td>
+<td>{{ r.n }}</td><td>{% for k, v in (r.detail or {}).items() %}{{ k }}: {{ v }} {% endfor %}</td><td>{{ r.note or '' }}</td></tr>
+{% endfor %}</table>
+{% endfor %}
+{% if first_read %}
+<h2>Two-week first read</h2>
+<p>Quality metrics lag; they are shown from week 3.</p>
+{% endif %}
+<h2>Data gaps</h2>
+<ul>{% for g in d.data_gaps %}<li>{{ g }}</li>{% else %}<li>None.</li>{% endfor %}</ul>
+<section class="methodology"><h2>Methodology</h2>
+<p>Baseline: {{ d.baseline.window.label }} {{ d.baseline.window.start.date() }} – {{ d.baseline.window.end.date() }}{% if d.pilot %}; pilot: {{ d.pilot.window.start.date() }} – {{ d.pilot.window.end.date() }}{% endif %}.</p>
+<p>Bot and excluded authors are filtered before any metric. Config SHA-256: {{ d.config_sha256 }}.</p>
+<p>Team-level metrics only. No individual is measured or ranked.</p></section>
+</body></html>

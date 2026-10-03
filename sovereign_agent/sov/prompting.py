@@ -16,7 +16,7 @@ from sov.config import (
 from sov import state
 from sov.apistubs import _extract_api_stub
 from sov.deps import _symbol_index, _target_ts_file
-from sov.files import LOCKED_FILES, _DIFF_MODE_LINE_THRESHOLD
+from sov.files import LOCKED_FILES, MARKUP_EXTS, _DIFF_MODE_LINE_THRESHOLD
 from sov.lazytools import _get_advisor
 from sov.llm import _LARGE_MODEL_THRESHOLD_GB, _extract_json_candidate, _model_size_gb, _normalize_backtick_strings, ollama
 
@@ -204,7 +204,11 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
     _target = _tgt.group(1) if _tgt else None
     _has_prior = bool(_target and _target in editable and editable[_target].strip())
     _target_lines = editable[_target].count("\n") + 1 if _has_prior else 0
-    _use_diff_mode = _has_prior and _target_lines > _DIFF_MODE_LINE_THRESHOLD
+    # Templates and markup use SEARCH/REPLACE at any size: a two-line include
+    # in a 40-line template came back as a stub from the 14B and timed out
+    # twice on the 27B as a full rewrite (xmeasure report.html.j2, 2026-10-03).
+    _markup = bool(_target) and os.path.splitext(_target)[1].lower() in MARKUP_EXTS
+    _use_diff_mode = _has_prior and (_target_lines > _DIFF_MODE_LINE_THRESHOLD or _markup)
     if errors and _has_prior:
         _return_instr = (
             f"Return SEARCH/REPLACE block(s) for `{_target}` per the format below — "
@@ -247,8 +251,12 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
     # slow enough to time out on this model/hardware for files this size.
     # Scoped to _target ONLY — any other file in this same response still
     # uses complete content as normal.
-    diff_mode_block = (
+    _diff_header = (
         f"\n\n=== {_target} IS LARGE ({_target_lines} lines) — USE SEARCH/REPLACE ===\n"
+        if _target_lines > _DIFF_MODE_LINE_THRESHOLD else
+        f"\n\n=== {_target} ALREADY EXISTS — EDIT IT WITH SEARCH/REPLACE, DO NOT REWRITE IT ===\n")
+    diff_mode_block = (
+        f"{_diff_header}"
         f"For `{_target}` ONLY, return one or more SEARCH/REPLACE blocks instead of "
         f"the full file, in this exact format:\n"
         f"<<<<<<< SEARCH\n"

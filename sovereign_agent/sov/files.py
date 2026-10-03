@@ -260,6 +260,50 @@ def _apply_search_replace(rel_path: str, patch_text: str,
     return new_content, None
 
 
+# Placeholder lines a model writes instead of reproducing a file:
+# "<!-- Existing content -->", "# ... rest of the file ...", "// unchanged".
+_ELISION_RE = re.compile(
+    r"(?:<!--|\{#|#|//|/\*|;)\s*(?:\.\.\.\s*)?(?:(?:the\s+)?(?:existing|previous|original|other|remaining)\s+"
+    r"(?:content|code|lines|markup|template|sections?|functions?)|rest\s+of\s+(?:the\s+)?(?:file|code|template|content)"
+    r"|(?:everything\s+)?(?:else\s+)?unchanged|same\s+as\s+before|\.\.\.\s*$)", re.I)
+
+
+MARKUP_EXTS = (".html", ".htm", ".j2", ".jinja", ".jinja2", ".md", ".yaml", ".yml", ".json", ".css",
+               ".toml", ".xml")
+
+
+def _dropped_content(old: str, new: str, rel_path: str = "") -> str | None:
+    """Why a rewrite of an existing file must be rejected, or None.
+
+    The line-count guard above needs 30+ deleted lines, so it missed a 40-line
+    template replaced by a 12-line stub ending in '<!-- Existing content -->'
+    (xmeasure report.html.j2, 2026-10-03). This checks content, not length:
+    a rewrite must keep most of the original lines and must not stand in for
+    them with a placeholder comment.
+
+    Placeholders are rejected in any file. The retention rule applies to
+    templates and markup only: across 202 worker edits in five other projects
+    every code rewrite it would have flagged was a legitimate replacement
+    ("replace the file", scaffold main.dart, stub -> implementation), while
+    markup edits now go through SEARCH/REPLACE, so a whole-file rewrite there
+    is itself the anomaly."""
+    old_lines = [l.strip() for l in old.splitlines() if l.strip()]
+    new_set = {l.strip() for l in new.splitlines() if l.strip()}
+    old_set = set(old_lines)
+    markers = [l.strip() for l in new.splitlines()
+               if l.strip() and l.strip() not in old_set and _ELISION_RE.match(l.strip())]
+    if markers:
+        return (f"the rewrite replaces existing content with a placeholder ({markers[0][:60]!r}). "
+                f"Never elide: every line you did not mean to change must still be there.")
+    if len(old_lines) >= 10 and os.path.splitext(rel_path)[1].lower() in MARKUP_EXTS:
+        kept = sum(1 for l in old_lines if l in new_set) / len(old_lines)
+        if kept < 0.5:
+            return (f"the rewrite keeps only {kept:.0%} of the file's existing lines. The task asked "
+                    f"for a change to this file, not a new one — start from its current content and "
+                    f"change only what the task names.")
+    return None
+
+
 def write_changes(changes: dict[str, str], project_root: str,
                   test_only: bool = False,
                   required_file: str | None = None) -> tuple[list[str], str]:
@@ -458,6 +502,11 @@ def write_changes(changes: dict[str, str], project_root: str,
                 )
                 pattern_errors.append(msg)
                 continue  # don't write this file
+            dropped = _dropped_content(old_content, content, rel_path)
+            if dropped:
+                print(f"  {RED}(blocked dropped content: {rel_path} — {dropped.splitlines()[0][:70]}){RESET}")
+                pattern_errors.append(f"DESTRUCTIVE EDIT REJECTED [{rel_path}]: {dropped}")
+                continue
         os.makedirs(os.path.dirname(full), exist_ok=True)
         with open(full, "w") as f:
             f.write(content)

@@ -699,6 +699,14 @@ def run_task(task: str, project_root: str, log_file: str,
                                               required_file=_go_target)
         last_written = written
 
+        # Functions the task did not ask to change go back as they were
+        # (sov/preserve.py) — models regenerate whole files from memory.
+        if state.PROJECT_LANGUAGE == "python" and not is_test:
+            from sov.preserve import restore_files as _restore_untouched
+            _put_back = _restore_untouched(task, list(written), project_root)
+            if _put_back:
+                print(f"  {DIM}(kept unchanged: {', '.join(_put_back)}){RESET}")
+
         _unplanned = _unplanned_new_files(written, task, project_root)
         if _unplanned:
             pattern_errs = list(pattern_errs) + [

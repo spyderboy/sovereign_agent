@@ -129,3 +129,12 @@ def test_earlier_open_task_only_matters_if_its_function_is_used(tmp_path):
     later = "In `pkg/est.py`: implement `est(x) -> int` — task gate: pytest -q \"tests/test_e.py\" passes"
     (tmp_path / "ROADMAP.md").write_text("- [ ] In `pkg/flow.py`: implement `was_reopened(h)` — x\n- [ ] " + later + "\n")
     assert _missing_python_deps(later, root) == []              # uses flow_metric, not was_reopened
+
+
+def test_names_the_task_binds_are_locals_not_missing_functions(tmp_path):
+    root = _proj(tmp_path)
+    task = ("In `pkg/read.py`: implement `read(c) -> R` — `parse = PARSERS[c.fmt]`; then `covered = parse(text)`; "
+            "rows use `agg(v)` where agg is `mean` for one metric; `for f in files:` call `f(x)`" + GATE)
+    assert _missing_python_deps(task, root) == []
+    still = "In `pkg/read.py`: implement `read(c) -> R` — `parse = P[c]`; then `quality_metric(x)`" + GATE
+    assert _missing_python_deps(still, root) == ["quality_metric()"]

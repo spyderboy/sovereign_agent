@@ -259,7 +259,16 @@ def _missing_python_deps(task: str, project_root: str) -> list[str]:
         missing += [f"{n}()" for n in names if n not in have and n[:1].islower()]
     imported |= {n.strip().split(" as ")[-1] for grp in re.findall(r"(?<![\w.])import\s+([\w, ]+)", body)
                  if not grp.strip().startswith(pkg) for n in grp.split(",") if n.strip()}
-    defined = defined | params | imported
+    # Names the task itself binds are locals, not project functions: literal-code
+    # tasks write `parse = PARSERS[cov.format]` then `parse(f.read_text())`, or
+    # "where agg is `mean`…" then `agg(lv[m])`, and both were deferred forever
+    # as missing dependencies — the sweep hit a false fixpoint (2026-10-03).
+    local = set()
+    for code in re.findall(r"`([^`]+)`", body):
+        local |= set(re.findall(r"(?<![\w.=!<>])([a-z_]\w*)\s*=(?!=)", code))
+        local |= set(re.findall(r"\bfor\s+([a-z_]\w*)\s+in\b", code))
+    local |= set(re.findall(r"\bwhere\s+`?([a-z_]\w*)`?\s+is\b", body))
+    defined = defined | params | imported | local
     for code in (re.findall(r"`([^`]+)`", body) if target.endswith(".py") else []):   # templates: Jinja calls
         # A call is `name(` with no space ("report ({e})" inside a format string is
         # not one); _private helpers belong to the task that writes them.

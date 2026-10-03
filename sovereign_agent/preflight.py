@@ -29,7 +29,7 @@ DRY RUN (--solve PROFILE)
   build on them. Each failure gets a likely cause from its log: over-scoped
   (silent timeouts), missing dependency, wrong import, contract gap (unknown
   attribute), guard conflict, foreign file. Run it when no sweep is using
-  Ollama.
+  Ollama. Gates run isolated from the live project (see sov/refcheck.py).
 
 REFERENCE (--reference DIR, 2026-10-03)
   DIR mirrors the project with a reference solution. On a copy, each open task
@@ -209,8 +209,12 @@ def dry_run(root: str, profile: str, timeout: int, log=print) -> list[dict]:
             with open(wd / ".git" / "info" / "exclude", "a") as f:
                 f.write(f"\n/{link}\n")
     full = (wd / "ROADMAP.md").read_text()
-    env = {**os.environ, "SOVEREIGN_PROFILE": profile, "FIRESTORE_PROJECT_ID": "",
-           "MAIN_BRANCH": "preflight"}
+    # Gates must import the CLONE's code: the shared venv's editable install
+    # resolved modules the clone lacked to the live project (2026-10-03). The
+    # helper lives outside the clone — work.py refuses an untracked file.
+    from sov.refcheck import isolated_env
+    env = {**isolated_env(str(WORK / f"{os.path.basename(root)}-env")), "SOVEREIGN_PROFILE": profile,
+           "FIRESTORE_PROJECT_ID": "", "MAIN_BRANCH": "preflight"}
     results, solved = [], set()
     for i, line in enumerate(open_tasks(full), 1):
         target = target_of(line)

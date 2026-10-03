@@ -34,3 +34,11 @@ def test_functions_in_the_target_file_itself_do_not_count(tmp_path):
     task = ("In `pkg/compare_all.py`: implement `run_report(c) -> int` — keep run_collect as it is. "
             "— done when: its tests pass")
     assert unused_contract(task, ["pkg/compare_all.py"], root) is None
+
+
+def test_a_comparison_is_not_an_instruction_to_call(tmp_path):
+    root = _proj(tmp_path, "def compare_windows(b, p):\n    return ()\n")
+    for phrase in ("like compare_metric but with a threshold", "secrets as in compare_metric",
+                   "the same as compare_metric"):
+        task = f"In `pkg/compare_all.py`: implement `compare_windows(b, p) -> tuple` — {phrase}. — done when: x"
+        assert unused_contract(task, ["pkg/compare_all.py"], root) is None, phrase

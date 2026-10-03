@@ -15,7 +15,11 @@ import ast
 import os
 import re
 
-_NEGATION = re.compile(r"\b(?:never|not|don'?t|do not|without|instead of|avoid|no|nor|rather than|keep)\b[^.;]{0,40}$",
+# A comparison is not an instruction either: "like make_result but with
+# min_n" and "secrets as in collect_jira" point at a model to imitate, and
+# demanding a call there blocked two correct tasks three times each (2026-10-02).
+_NEGATION = re.compile(r"\b(?:never|not|don'?t|do not|without|instead of|avoid|no|nor|rather than|keep|"
+                       r"like|as in|same as|similar to|mirrors?|mirroring|based on)\b[^.;]{0,40}$",
                        re.I)
 
 

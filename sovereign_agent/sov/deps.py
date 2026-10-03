@@ -30,7 +30,7 @@ def _symbol_index(project_root: str, refresh: bool = False):
 
 def _target_ts_file(task: str) -> str | None:
     """Extract the target .ts/.tsx path a task names: 'In src/sim/foo.ts: ...'."""
-    m = re.search(r'\bIn ([\w./-]+\.tsx?):', task)
+    m = re.search(r'\bIn `?([\w./-]+\.tsx?)`?:', task)
     return m.group(1) if m else None
 
 
@@ -60,7 +60,7 @@ def _missing_dart_deps(task: str, project_root: str) -> list[str]:
     ladder and, worse, produces a green-looking merge full of stubs invented to
     satisfy the missing import.
     """
-    tm = re.search(r"\bIn ([\w./-]+\.dart):", task)
+    tm = re.search(r"\bIn `?([\w./-]+\.dart)`?:", task)
     if not tm:
         return []
     target = tm.group(1)

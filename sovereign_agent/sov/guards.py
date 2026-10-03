@@ -107,7 +107,7 @@ def _placeholder_body(written: list[str], task: str,
     check. When it is absent this cannot help, and only a behavioural gate can
     — but it was present in all three files that got through.
     """
-    m = re.search(r"\bIn ([\w./-]+\.\w+):", task)
+    m = re.search(r"\bIn `?([\w./-]+\.\w+)`?:", task)
     if not m:
         return None
     target = m.group(1)
@@ -156,7 +156,7 @@ def _missing_promised_symbol(written: list[str], task: str,
     never obligation. The signature in the task text is the only machine-
     readable statement of what the task was FOR, so check it before merging.
     """
-    m = re.search(r"\bIn ([\w./-]+\.\w+):\s*implement\s+`([^`]+)`", task)
+    m = re.search(r"\bIn `?([\w./-]+\.\w+)`?:\s*implement\s+`([^`]+)`", task)
     if not m:
         return None
     target, sig = m.group(1), m.group(2).strip()

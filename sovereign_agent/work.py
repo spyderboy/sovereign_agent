@@ -591,7 +591,7 @@ def _go_task_deps(indexed_tasks: list[tuple[int, str]]) -> dict[int, list[tuple[
     go_task_deps: dict[int, list[tuple[int, str]]] = {}
     if state.PROJECT_LANGUAGE != "go":
         return go_task_deps
-    _go_tgt_re = re.compile(r'\bIn ([\w./-]+\.go):')
+    _go_tgt_re = re.compile(r'\bIn `?([\w./-]+\.go)`?:')
     _decl_re = re.compile(r'implement types?\s+([A-Z]\w*(?:\s*,\s*[A-Z]\w*)*)')
     _entries = []
     for _ti, _tl in indexed_tasks:
@@ -785,7 +785,7 @@ def _first_pass(args, indexed_tasks, project_root: str, log_file: str,
             else:
                 routing.end_strong_attempt(project_root, task, result is True)
 
-        _tm = re.search(r'\bIn ([\w./-]+\.go):', task)
+        _tm = re.search(r'\bIn `?([\w./-]+\.go)`?:', task)
         if result is True:
             mark_done(task_line)
             print(f"  {GREEN}✓ Marked done in ROADMAP.md{RESET}")

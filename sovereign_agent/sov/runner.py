@@ -245,6 +245,13 @@ def run_task(task: str, project_root: str, log_file: str,
                                          _extract_task_gate(task) or "")
                    if os.path.exists(os.path.join(project_root, g))]
     rel_files = list(dict.fromkeys(_gate_tests + [f for f in rel_files if f not in _gate_tests]))
+    # The task's own target, when it already exists, is ALWAYS context and goes
+    # first: the planner left report.html.j2 out of its own two-line include
+    # task, so the model rewrote a template it had never seen and SEARCH/REPLACE
+    # mode (which needs the target in context) never switched on (2026-10-03).
+    _own = re.search(r"\bIn `?([\w./-]+\.\w+)`?:", task)
+    if _own and os.path.isfile(os.path.join(project_root, _own.group(1))):
+        rel_files = [_own.group(1)] + [f for f in rel_files if f != _own.group(1)]
 
     # Always-include context (config "context_always_include") plus any
     # spec/*.md files the task text references (e.g. "per spec/03-simulation.md §2").
@@ -269,7 +276,7 @@ def run_task(task: str, project_root: str, log_file: str,
     pkg_ctx: list[str] = []
     if state.PROJECT_LANGUAGE == "go":
         _dirs: set[str] = set()
-        _tm = re.search(r'\bIn ([\w./-]+\.go):', task)
+        _tm = re.search(r'\bIn `?([\w./-]+\.go)`?:', task)
         if _tm and os.path.dirname(_tm.group(1)) not in ("", "sim"):
             _dirs.add(os.path.dirname(_tm.group(1)))
         for _pkg in set(re.findall(r'\b([a-z]\w+)\.[A-Z]\w*', task)) - {"sim"}:
@@ -293,7 +300,7 @@ def run_task(task: str, project_root: str, log_file: str,
     #   effects_beam 2 → 4
     # read_files skips paths that do not exist, so including it unconditionally
     # is a no-op on attempt 1 and the whole point from attempt 2 onward.
-    _target_m = re.search(r"\bIn ([\w./-]+\.\w+):", task)
+    _target_m = re.search(r"\bIn `?([\w./-]+\.\w+)`?:", task)
     if _target_m:
         forced.append(_target_m.group(1))
 
@@ -693,7 +700,7 @@ def run_task(task: str, project_root: str, log_file: str,
         # Go tasks name their single target file: "In <path>.go: implement ..."
         _go_target = None
         if state.PROJECT_LANGUAGE == "go":
-            _m = re.search(r'\bIn ([\w./-]+\.go):', task)
+            _m = re.search(r'\bIn `?([\w./-]+\.go)`?:', task)
             _go_target = _m.group(1) if _m else None
         written, pattern_errs = write_changes(changes, project_root, test_only=is_test,
                                               required_file=_go_target)

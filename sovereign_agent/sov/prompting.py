@@ -200,7 +200,7 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
     # get twenty constructs right simultaneously, and one shot at a time is all
     # the loop was asking for. Naming the file as its own prior work and asking
     # for a minimal delta turns twenty independent coin flips into one.
-    _tgt = re.search(r"\bIn ([\w./-]+\.\w+):", task)
+    _tgt = re.search(r"\bIn `?([\w./-]+\.\w+)`?:", task)
     _target = _tgt.group(1) if _tgt else None
     _has_prior = bool(_target and _target in editable and editable[_target].strip())
     _target_lines = editable[_target].count("\n") + 1 if _has_prior else 0

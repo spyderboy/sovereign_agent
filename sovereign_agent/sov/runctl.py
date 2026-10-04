@@ -269,6 +269,24 @@ def park_repo(root: str, main: str) -> list[str]:
             if l and not l[3:].startswith("logs/")]
 
 
+def log_session(root: str, event: str, plan: dict | None) -> None:
+    """logs/run_sessions.jsonl (2026-10-04): when a run started and stopped, and where each
+    pass ran — so a quiet stretch inside a live run reads as a stall, outside one as idle."""
+    from datetime import datetime, timezone
+    rec = {"event": event, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    if plan:
+        rec["passes"] = {name: [plan[name].get("model"), plan[name].get("where")]
+                         for name in ("cheap", "strong") if isinstance(plan.get(name), dict)}
+        if any(w == "runpod" for _, w in rec["passes"].values()):
+            rec["gpu"] = (plan.get("runpod") or {}).get("gpu_type")
+    try:
+        os.makedirs(os.path.join(root, "logs"), exist_ok=True)
+        with open(os.path.join(root, "logs", "run_sessions.jsonl"), "a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+
+
 def stop(plan: dict, stop_pods: bool = True) -> dict:
     root = plan["project"]
     procs = processes(root)
@@ -286,6 +304,7 @@ def stop(plan: dict, stop_pods: bool = True) -> dict:
         pass
     dirty = [] if left else park_repo(root, plan["main_branch"])
     pods = stop_run_pods(plan) if stop_pods else []
+    log_session(root, "stop", None)
     return {"stopped": not left, "dirty": dirty, "pods_stopped": pods}
 
 
@@ -379,7 +398,9 @@ def sweep_env(plan: dict, profiles: dict) -> dict:
     return {"MAIN_BRANCH": plan["main_branch"], "CHEAP": profiles["cheap"],
             "STRONG": profiles["strong"], "CHEAP_WORKERS": str(c["workers"]),
             "STRONG_WORKERS": str(s["workers"]), "CHEAP_MAX": str(int(c["cap_minutes"]) * 60),
-            "STRONG_MAX": str(int(s["cap_minutes"]) * 60), "MAX_CYCLES": str(plan["max_cycles"])}
+            "STRONG_MAX": str(int(s["cap_minutes"]) * 60), "MAX_CYCLES": str(plan["max_cycles"]),
+            # telemetry tags RunPod records with the GPU (only records whose model ran there)
+            **({"XANADU_GPU": plan["runpod"].get("gpu_type", "")} if uses_runpod(plan) else {})}
 
 
 def broken_done_gates(root: str, budget_s: float = 240, per_gate_s: float = 120) -> tuple[list[str], bool]:
@@ -456,6 +477,7 @@ def launch(plan: dict, log=print) -> dict:
         _spawn([PY, "-u", str(HERE / "xrun.py"), "guard", root], cwd=HERE,
                          stdout=open(logs / "podguard.log", "a"), stderr=subprocess.STDOUT,
                          start_new_session=True)
+    log_session(root, "start", plan)
     log(f"launched: {env_str}")
     return {"ok": True, "env": env}
 

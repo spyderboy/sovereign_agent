@@ -127,6 +127,25 @@ def provenance(project_root: str) -> dict:
     }
 
 
+def _endpoint(model: str) -> str:
+    from sov.config import endpoint_for
+    return endpoint_for(model or "")
+
+
+def where_it_ran(model: str | None) -> dict:
+    """When and where (2026-10-04): exact UTC time for unattended stretches and stalls, and the
+    machine class the model ran on — this Mac vs a RunPod GPU — so speed and cost compare."""
+    from datetime import datetime, timezone
+    from urllib.parse import urlparse
+    host = (urlparse(_endpoint(model or "")).hostname or "").lower()
+    where = ("local" if host in ("", "localhost", "127.0.0.1", "::1") else
+             "runpod" if "runpod" in host else "remote")
+    out = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "where": where}
+    if where == "runpod" and os.getenv("XANADU_GPU"):
+        out["gpu"] = os.getenv("XANADU_GPU")
+    return out
+
+
 def _append_velocity(project_root: str, record: dict):
     from sov import state
     cur = state.CURRENT_TASK
@@ -136,6 +155,11 @@ def _append_velocity(project_root: str, record: dict):
         try:
             record = {**record, **provenance(project_root)}
         except Exception:                              # telemetry must never stop a task
+            pass
+    if "at" not in record:
+        try:
+            record = {**record, **where_it_ran(record.get("model"))}
+        except Exception:
             pass
     path = os.path.join(project_root, VELOCITY_LOG)
     os.makedirs(os.path.dirname(path), exist_ok=True)

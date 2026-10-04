@@ -75,3 +75,35 @@ def test_error_patterns_are_distinct_codes_not_failures(tmp_path):
         '{"error_codes": []}\n{"error_codes": ["ImportError"]}\nnot json\n')
     telemetry._append_velocity(str(p), {"task": "x", "outcome": "done"})
     assert _last(p)["learned"]["error_patterns"] == 2
+
+
+def test_record_carries_time_and_where_it_ran(tmp_path, monkeypatch):
+    """2026-10-04: exact time (unattended stretches, stalls) and where the model ran (Mac vs RunPod)."""
+    from datetime import datetime
+    from sov import telemetry
+    p = _project(tmp_path)
+    monkeypatch.setattr(telemetry, "_endpoint", lambda model: "http://127.0.0.1:11434")
+    monkeypatch.delenv("XANADU_GPU", raising=False)
+    telemetry._append_velocity(str(p), {"task": "x", "outcome": "done", "model": "qwen3.8:27b"})
+    r = _last(p)
+    assert datetime.fromisoformat(r["at"]).tzinfo is not None
+    assert (r["where"], r.get("gpu")) == ("local", None)
+    monkeypatch.setattr(telemetry, "_endpoint", lambda model: "https://abc123-11434.proxy.runpod.net")
+    monkeypatch.setenv("XANADU_GPU", "NVIDIA H100 PCIe")
+    telemetry._append_velocity(str(p), {"task": "x", "outcome": "done", "model": "qwen3.8:27b"})
+    assert (_last(p)["where"], _last(p)["gpu"]) == ("runpod", "NVIDIA H100 PCIe")
+    monkeypatch.setattr(telemetry, "_endpoint", lambda model: "http://gpu-box.office:11434")
+    telemetry._append_velocity(str(p), {"task": "x", "outcome": "done", "model": "m"})
+    assert _last(p)["where"] == "remote"
+
+
+def test_run_sessions_log_start_and_stop(tmp_path):
+    from sov import runctl
+    runctl.log_session(str(tmp_path), "start", {"strong": {"model": "qwen3.8:27b", "where": "runpod"},
+                                                "cheap": {"model": "qwen2.5-coder:14b", "where": "local"},
+                                                "runpod": {"gpu_type": "NVIDIA H100 PCIe"}})
+    runctl.log_session(str(tmp_path), "stop", None)
+    lines = [json.loads(l) for l in (tmp_path / "logs" / "run_sessions.jsonl").read_text().splitlines()]
+    assert [l["event"] for l in lines] == ["start", "stop"]
+    assert lines[0]["passes"] == {"cheap": ["qwen2.5-coder:14b", "local"], "strong": ["qwen3.8:27b", "runpod"]}
+    assert lines[0]["gpu"] == "NVIDIA H100 PCIe" and "at" in lines[1]

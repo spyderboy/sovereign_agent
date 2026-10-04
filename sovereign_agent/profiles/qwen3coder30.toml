@@ -1,0 +1,37 @@
+# Mac vs H100 benchmark arm (2026-10-04): the SAME model on both machines, so the only
+# difference is the hardware. qwen3-coder:30b is in Ollama's public library (qwen3.8:27b is
+# a local import a RunPod pod can't pull). Settings are qwen38's, model swapped.
+#
+#   python3 bench.py run --suite xmeasure-v1 --profile qwen3coder30 --label mac-qwen3coder30
+
+[tiers.1]
+model  = "qwen3-coder:30b"
+params = 30
+ctx    = 16384
+
+[tiers.2]
+model  = "qwen3-coder:30b"
+params = 30
+ctx    = 16384
+
+[tiers.3]
+model  = "qwen3-coder:30b"
+params = 30
+ctx    = 16384
+
+[tiers.4]
+model  = "qwen3-coder:30b"
+params = 30
+ctx    = 16384
+
+[budget]
+task_ceiling_s      = 3600
+call_timeout_s      = 900     # one attempt may generate for at most 15 min
+attempts_tier1      = 3
+attempts_mid        = 2
+attempts_last       = 2
+foreign_park        = 2
+quick_param_limit_b = 28
+
+[run]
+main_branch = "main"

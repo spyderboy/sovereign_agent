@@ -129,6 +129,10 @@ run_pass() {   # $1 profile  $2 cap  $3 label  $4 workers
     before=$(done_count)
     say "${BOLD}$label${RESET}  profile=$prof  cap=${cap}s  workers=$workers  done=$before"
     reset_tree
+    # Self-healing (2026-10-04): apply the guards Xanadu mined from earlier failures. The tree
+    # is clean and no worker runs here; automine drops any guard that matches committed code,
+    # commits the config, and logs every decision to <project>/logs/automine.log.
+    ( cd "$SOVEREIGN" && python3 automine.py "$PROJECT" ) >>"$RESULTS/automine.log" 2>&1 || true
     # PASS_HOOK (set by xrun.py / the console): runs before each pass with the
     # pass label and profile — it starts the pass's RunPod pod and stops idle
     # ones. A failing hook skips the pass rather than running it against an

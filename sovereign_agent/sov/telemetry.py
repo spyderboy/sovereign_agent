@@ -74,12 +74,27 @@ def _count_lines(path: str) -> int:
         return 0
 
 
+def _distinct_error_codes(path: str) -> int:
+    """errors.jsonl has a line per failed attempt; a learned pattern is a distinct code."""
+    codes = set()
+    try:
+        with open(path, errors="ignore") as f:
+            for line in f:
+                try:
+                    codes.update(json.loads(line).get("error_codes") or ())
+                except (ValueError, AttributeError, TypeError):
+                    continue
+    except OSError:
+        pass
+    return len(codes)
+
+
 def provenance(project_root: str) -> dict:
     """What ran the task (harness), what Xanadu had learned by itself (learned), and a
     fingerprint of what humans had written (human) — 2026-10-04, so 'Xanadu improves
     with use' can be told apart from model upgrades and human fixes.
 
-    learned: mined guards (origin "mined"), error patterns, drafted rules, routing strikes.
+    learned: mined guards (origin "mined"), distinct error codes seen, drafted rules, routing strikes.
     human:   hand-written guards, and a hash of .roorules + global_rules.md + error hints
              + hand-written guards — it changes only when a person edits them."""
     import hashlib
@@ -105,7 +120,7 @@ def provenance(project_root: str) -> dict:
     return {
         "harness": harness_version(),
         "learned": {"guards_mined": len(mined),
-                    "error_patterns": _count_lines(os.path.join(project_root, "logs", "errors.jsonl")),
+                    "error_patterns": _distinct_error_codes(os.path.join(project_root, "logs", "errors.jsonl")),
                     "rule_drafts": _count_lines(os.path.join(project_root, "logs", "rule_drafts.jsonl")),
                     "strikes": strikes},
         "human": {"guards": len(hand), "rules": h.hexdigest()[:8]},

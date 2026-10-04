@@ -7,7 +7,7 @@ import json
 def _project(tmp_path, guards=(), errors=0, drafts=0, strikes=None, roorules="be careful"):
     (tmp_path / "logs").mkdir(exist_ok=True)
     (tmp_path / ".sovereign_config.json").write_text(json.dumps({"additional_bad_patterns": list(guards)}))
-    (tmp_path / "logs" / "errors.jsonl").write_text("".join('{"e": %d}\n' % i for i in range(errors)))
+    (tmp_path / "logs" / "errors.jsonl").write_text("".join('{"error_codes": ["code%d"]}\n' % i for i in range(errors)))
     if drafts:
         (tmp_path / "logs" / "rule_drafts.jsonl").write_text("".join('{"r": %d}\n' % i for i in range(drafts)))
     if strikes is not None:
@@ -38,7 +38,7 @@ def test_human_fingerprint_changes_only_when_humans_change_rules(tmp_path):
     p = _project(tmp_path)
     telemetry._append_velocity(str(p), {"task": "x", "outcome": "done"})
     first = _last(p)["human"]["rules"]
-    (p / "logs" / "errors.jsonl").write_text('{"e": 1}\n')                 # Xanadu learning: not human
+    (p / "logs" / "errors.jsonl").write_text('{"error_codes": ["x"]}\n')     # Xanadu learning: not human
     telemetry._append_velocity(str(p), {"task": "x", "outcome": "done"})
     assert _last(p)["human"]["rules"] == first
     (p / ".roorules").write_text("be careful. also: never stub")            # a human edit
@@ -63,3 +63,15 @@ def test_mined_guards_are_marked(tmp_path, monkeypatch):
     api_surface.main()
     cfg = json.loads((tmp_path / ".sovereign_config.json").read_text())
     assert cfg["additional_bad_patterns"] == [{"pattern": "p", "hint": "h", "origin": "mined"}]
+
+
+def test_error_patterns_are_distinct_codes_not_failures(tmp_path):
+    """errors.jsonl has one line per failed attempt; counting lines made 'learned' rise with
+    every failure. A pattern is a distinct error code."""
+    from sov import telemetry
+    p = _project(tmp_path)
+    (p / "logs" / "errors.jsonl").write_text(
+        '{"error_codes": ["undefined_name", "ImportError"]}\n{"error_codes": ["undefined_name"]}\n'
+        '{"error_codes": []}\n{"error_codes": ["ImportError"]}\nnot json\n')
+    telemetry._append_velocity(str(p), {"task": "x", "outcome": "done"})
+    assert _last(p)["learned"]["error_patterns"] == 2

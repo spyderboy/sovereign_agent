@@ -443,7 +443,7 @@ def main() -> int:
             cfg_path = os.path.join(project, ".sovereign_config.json")
             cfg = json.load(open(cfg_path))
             have = {p["pattern"] for p in cfg.setdefault("additional_bad_patterns", [])}
-            added = [g for g in guards if g["pattern"] not in have]
+            added = [{**g, "origin": "mined"} for g in guards if g["pattern"] not in have]
             cfg["additional_bad_patterns"].extend(added)
             json.dump(cfg, open(cfg_path, "w"), indent=2)
             print(f"appended {len(added)} new guard(s) to {cfg_path}")

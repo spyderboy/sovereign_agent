@@ -46,11 +46,82 @@ def task_sha(text: str) -> str:
     return hashlib.sha1(text.strip().encode()).hexdigest()[:12]
 
 
+_HARNESS_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_harness_version: str | None = None
+
+
+def harness_version() -> str:
+    """Xanadu's own git commit, '-dirty' with uncommitted tracked changes. Once per process."""
+    global _harness_version
+    if _harness_version is None:
+        import subprocess
+        try:
+            sha = subprocess.run(["git", "-C", _HARNESS_ROOT, "rev-parse", "--short", "HEAD"],
+                                 capture_output=True, text=True, timeout=5).stdout.strip()
+            dirty = subprocess.run(["git", "-C", _HARNESS_ROOT, "status", "--porcelain", "--untracked-files=no"],
+                                   capture_output=True, text=True, timeout=5).stdout.strip()
+            _harness_version = (sha or "unknown") + ("-dirty" if dirty else "")
+        except Exception:
+            _harness_version = "unknown"
+    return _harness_version
+
+
+def _count_lines(path: str) -> int:
+    try:
+        with open(path, errors="ignore") as f:
+            return sum(1 for line in f if line.strip())
+    except OSError:
+        return 0
+
+
+def provenance(project_root: str) -> dict:
+    """What ran the task (harness), what Xanadu had learned by itself (learned), and a
+    fingerprint of what humans had written (human) — 2026-10-04, so 'Xanadu improves
+    with use' can be told apart from model upgrades and human fixes.
+
+    learned: mined guards (origin "mined"), error patterns, drafted rules, routing strikes.
+    human:   hand-written guards, and a hash of .roorules + global_rules.md + error hints
+             + hand-written guards — it changes only when a person edits them."""
+    import hashlib
+    try:
+        cfg = json.load(open(os.path.join(project_root, ".sovereign_config.json")))
+    except (OSError, ValueError):
+        cfg = {}
+    guards = cfg.get("additional_bad_patterns") or []
+    mined = [g for g in guards if isinstance(g, dict) and g.get("origin") == "mined"]
+    hand = [g for g in guards if not (isinstance(g, dict) and g.get("origin") == "mined")]
+    try:
+        strikes = len(json.load(open(os.path.join(project_root, "logs", "strong_failures.json"))))
+    except (OSError, ValueError, TypeError):
+        strikes = 0
+    h = hashlib.sha1()
+    for path in (os.path.join(project_root, ".roorules"), os.path.join(_HARNESS_ROOT, "global_rules.md")):
+        try:
+            h.update(open(path, "rb").read())
+        except OSError:
+            pass
+        h.update(b"\0")
+    h.update(json.dumps([hand, cfg.get("additional_error_hints")], sort_keys=True).encode())
+    return {
+        "harness": harness_version(),
+        "learned": {"guards_mined": len(mined),
+                    "error_patterns": _count_lines(os.path.join(project_root, "logs", "errors.jsonl")),
+                    "rule_drafts": _count_lines(os.path.join(project_root, "logs", "rule_drafts.jsonl")),
+                    "strikes": strikes},
+        "human": {"guards": len(hand), "rules": h.hexdigest()[:8]},
+    }
+
+
 def _append_velocity(project_root: str, record: dict):
     from sov import state
     cur = state.CURRENT_TASK
     if cur and "task_sha" not in record and cur.startswith((record.get("task") or "\0").rstrip()):
         record = {**record, "task_sha": task_sha(cur)}
+    if "harness" not in record:
+        try:
+            record = {**record, **provenance(project_root)}
+        except Exception:                              # telemetry must never stop a task
+            pass
     path = os.path.join(project_root, VELOCITY_LOG)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a") as f:

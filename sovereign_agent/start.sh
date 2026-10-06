@@ -76,7 +76,7 @@ git clean -fd >/dev/null 2>&1
 # how a ROADMAP fix became a dangling commit (2026-08-12). Tagging costs
 # nothing and makes the mistake recoverable with `git cherry-pick`.
 for b in $(git for-each-ref --format='%(refname:short)' 'refs/heads/task-*'); do
-    UNMERGED=$(git rev-list --count "main..$b" 2>/dev/null || echo 0)
+    UNMERGED=$(git rev-list --count "main..$b" 2>/dev/null; true)
     if [ "${UNMERGED:-0}" != "0" ]; then
         TAG="abandoned/$(date +%m%d-%H%M)/$b"
         git tag -f "$TAG" "$b" >/dev/null 2>&1
@@ -101,8 +101,8 @@ if [ -f tool/preflight.py ]; then
     echo -e "${GREEN}  ✓ $(tail -1 /tmp/preflight.out)${RESET}"
 fi
 
-DONE=$(grep -c '^- \[x\]' ROADMAP.md 2>/dev/null || echo 0)
-ALL=$(grep -cE '^- \[[ x]\]' ROADMAP.md 2>/dev/null || echo 0)
+DONE=$(grep -c '^- \[x\]' ROADMAP.md 2>/dev/null; true)
+ALL=$(grep -cE '^- \[[ x]\]' ROADMAP.md 2>/dev/null; true)
 echo -e "  roadmap : $DONE/$ALL done\n"
 
 LOG=/tmp/$(basename "$PROJECT")-run.log

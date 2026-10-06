@@ -67,8 +67,10 @@ say() {
 }
 say "sweep starting — project=$PROJECT cheap=$CHEAP strong=$STRONG results=$RESULTS"
 
-done_count() { grep -c '^- \[x\]' "$PROJECT/ROADMAP.md" 2>/dev/null || echo 0; }
-open_count() { grep -c '^- \[ \]' "$PROJECT/ROADMAP.md" 2>/dev/null || echo 0; }
+# grep -c prints "0" AND exits 1 when nothing matches, so `|| echo 0` printed a second 0 and the
+# arithmetic on the two-line value crashed the sweep on every project's first run (2026-10-06).
+done_count() { local n; n=$(grep -c '^- \[x\]' "$PROJECT/ROADMAP.md" 2>/dev/null); echo "${n:-0}"; }
+open_count() { local n; n=$(grep -c '^- \[ \]' "$PROJECT/ROADMAP.md" 2>/dev/null); echo "${n:-0}"; }
 
 reset_tree() {
     pkill -9 -f supervisor.sh 2>/dev/null

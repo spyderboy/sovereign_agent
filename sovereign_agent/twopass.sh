@@ -38,8 +38,8 @@ mkdir -p "$RESULTS"
 
 progress() {   # done / total
     local d t
-    d=$(grep -c '^- \[x\]' "$PROJECT/ROADMAP.md" 2>/dev/null || echo 0)
-    t=$(grep -cE '^- \[[ x]\]' "$PROJECT/ROADMAP.md" 2>/dev/null || echo 0)
+    d=$(grep -c '^- \[x\]' "$PROJECT/ROADMAP.md" 2>/dev/null; true)
+    t=$(grep -cE '^- \[[ x]\]' "$PROJECT/ROADMAP.md" 2>/dev/null; true)
     echo "$d/$t"
 }
 
@@ -121,7 +121,7 @@ START_ALL=$(progress)
 
 run_pass "$PASS1" "$PASS1_MAX" "pass1"
 
-REMAIN=$(grep -c '^- \[ \]' "$PROJECT/ROADMAP.md" 2>/dev/null || echo 0)
+REMAIN=$(grep -c '^- \[ \]' "$PROJECT/ROADMAP.md" 2>/dev/null; true)
 if [ "$REMAIN" = "0" ]; then
     say "${GREEN}nothing left after pass 1 — skipping pass 2${RESET}"
     SUMMARY+="  pass2  skipped (roadmap complete)\n"

@@ -52,7 +52,12 @@ from dataclasses import dataclass
 # The type part is capped at three space-separated words. An unbounded `\s`
 # class spans whole sentences and matches a backtick early in the line against
 # a parenthesis late in it, inventing obligations named `it` and `end`.
-_SIG = re.compile(r"`(?:[\w<>,\[\]?]+ ){0,2}[\w<>,\[\]?]+\s+(\w+)\s*\(")
+# A keyword where the return type would be is a CALL in an example, not a signature to build:
+# `throw const DomainError(x)` or `await findTask(r, id)` read as three things to build and flagged
+# five well-sized magic_task_hat tasks (2026-10-07).
+_SIG = re.compile(r"`(?!(?:throw|const|await|return|final|var|new|yield|if|else)\b)"
+                  r"(?:(?!(?:throw|const|await|return|new)\b)[\w<>,\[\]?]+ ){0,2}"
+                  r"(?!(?:throw|const|await|return|new)\b)[\w<>,\[\]?]+\s+(\w+)\s*\(")
 _CLASS = re.compile(r"`class\s+(\w+)")
 # A BARE BACKTICKED NAME IS STILL AN OBLIGATION. The effects task listed five —
 # `paintChargeRibbons`, `paintLightningBeam`, `paintBlastRing`, `paintEmbers`,

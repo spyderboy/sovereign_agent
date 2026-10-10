@@ -141,6 +141,32 @@ def _race_implement(
     return {}, {}, None, stats
 
 
+
+# A failed assertion in the task's OWN gate test names only the test file (and
+# flutter_test's frames), never the file the task wrote — yet it is exactly this
+# task's failure: wrong text, wrong value. Counting it as foreign deferred every
+# widget with a logic slip after ONE attempt (magic_task_hat 2026-10-10,
+# stats_bar: Found 0 widgets with text "12").
+_ASSERTION = re.compile(r"TestFailure|^\s*Expected:|AssertionError|^E\s+assert ", re.M)
+
+
+def blame_split(output: str, written: list[str], gate_tests: list[str]) -> tuple[list[str], list[str]]:
+    """(foreign files the errors name, files of this task they name)."""
+    norm = output.replace("\\", "/")
+    foreign = sorted({
+        m for m in re.findall(r"[\w./-]+\.dart", output)
+        if not any(w.replace("\\", "/").endswith(m.lstrip("./"))
+                   or m.endswith(w.replace("\\", "/")) for w in written)
+        and "/flutter/" not in m and "flutter_test/" not in m and not m.startswith("package:")
+    })
+    mine = [w for w in written if w.replace("\\", "/") in norm]
+    if not mine and _ASSERTION.search(output):
+        own = [g for g in gate_tests if g.replace("\\", "/").lstrip("./") in norm]
+        if own:
+            mine = own
+            foreign = [m for m in foreign if not any(m.endswith(g.lstrip("./")) for g in own)]
+    return foreign, mine
+
 def _note_needs_split(project_root: str, task: str) -> None:
     path = os.path.join(project_root, "logs", "needs_split.md")
     line = f"- {task.strip()[:160]}"
@@ -869,14 +895,7 @@ def run_task(task: str, project_root: str, log_file: str,
         # harness then blames the task that happens to be running, escalates ITS
         # model, and burns ITS budget on a file it never wrote and cannot fix.
         try:
-            _foreign = sorted({
-                m for m in re.findall(r"[\w./-]+\.dart", output)
-                if not any(w.replace("\\", "/").endswith(m.lstrip("./"))
-                           or m.endswith(w.replace("\\", "/")) for w in written)
-                and "/flutter/" not in m and not m.startswith("package:")
-            })
-            _mine = [w for w in written
-                     if w.replace("\\", "/") in output.replace("\\", "/")]
+            _foreign, _mine = blame_split(output, written, _gate_tests)
             if _foreign and not _mine:
                 foreign_streak += 1
                 print(f"  {YELLOW}⚠  No error names a file this task wrote. "

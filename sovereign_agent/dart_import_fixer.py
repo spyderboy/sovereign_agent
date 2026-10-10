@@ -43,7 +43,13 @@ _DECL_PATTERNS = [
     re.compile(r"^mixin\s+(\w+)", re.M),
     re.compile(r"^extension\s+(\w+)", re.M),
     re.compile(r"^typedef\s+(\w+)", re.M),
-    re.compile(r"^(?:[\w$<>,\s?\[\]]+?\s+)(\w+)\s*\([^;]*?\)\s*(?:async\s*)?[{=]", re.M),
+    # A top-level function: the return type starts at column 0 and stays on the
+    # line. `\s` in the type would let `^` match an INDENTED line and span
+    # newlines, indexing `return ListView(` inside a build method as a
+    # declaration of ListView — then every file using ListView got that widget's
+    # file imported and failed analyze on the unused import (magic_task_hat
+    # 2026-10-10, wishlist_list.dart, three identical attempts).
+    re.compile(r"^(?=[A-Za-z_$])(?:[\w$<>,?\[\] \t]+?[ \t]+)(\w+)\s*\([^;]*?\)\s*(?:async\s*)?[{=]", re.M),
     re.compile(r"^(?:const|final|var)\s+(?:[\w<>,\s?\[\]]+\s+)?(\w+)\s*=", re.M),
 ]
 

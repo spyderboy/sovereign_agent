@@ -124,11 +124,77 @@ def _normalise(uri: str, rel_path: str, pkg: str | None) -> str:
     return f"package:{pkg}/{joined}"
 
 
+_EXPORT_RE = re.compile(r"^\s*export\s+'([^']+)'[^;]*;", re.M)
+
+
+def _with_exports(uris: set[str], project_root: str | None, pkg: str | None) -> set[str]:
+    """Close a set of package: URIs over the `export` directives of the files they name.
+
+    `gem_painter.dart` exports `gem_transform.dart`; a file importing the former
+    already has GemTransform, and adding the latter made it an unnecessary import
+    (witches_bricks, three files).
+    """
+    if not project_root or not pkg:
+        return uris
+    seen, todo = set(uris), list(uris)
+    prefix = f"package:{pkg}/"
+    while todo:
+        u = todo.pop()
+        if not u.startswith(prefix):
+            continue
+        rel = "lib/" + u[len(prefix):]
+        try:
+            src = open(os.path.join(project_root, rel)).read()
+        except OSError:
+            continue
+        for e in _EXPORT_RE.findall(src):
+            n = _normalise(e, rel, pkg)
+            if n not in seen:
+                seen.add(n)
+                todo.append(n)
+    return seen
+
+
 def _provided_by_current_imports(src: str, rel_path: str, pkg: str | None,
-                                 index: dict[str, str]) -> set[str]:
-    uris = {_normalise(u, rel_path, pkg) for u in _IMPORT_RE.findall(src)}
+                                 index: dict[str, str], project_root: str | None = None) -> set[str]:
+    uris = _with_exports({_normalise(u, rel_path, pkg) for u in _IMPORT_RE.findall(src)}, project_root, pkg)
     return {s for s, u in index.items() if u in uris}
 
+
+
+def _declared_here(body: str, name: str) -> bool:
+    """True when the file declares `name` itself as a field, variable or parameter.
+
+    A widget field `final List<Milestone> milestones;` is not a use of the
+    top-level function `milestones()` in another library — importing it there
+    left an unused import and three identical failed attempts (magic_task_hat
+    2026-10-10, milestones_card.dart).
+    """
+    n = re.escape(name)
+    return bool(re.search(rf"(?:\b(?:final|var|const|late)\s+(?:[\w<>?,\[\] ]+\s+)?|\bthis\.|[\w>?\]]\s+){n}\s*[;,=)}}]",
+                          body))
+
+
+def _referenced(body: str, name: str) -> bool:
+    """True when some occurrence of a lowercase `name` is a real reference.
+
+    Not a reference: a member access (`model.milestones`), a named-argument
+    label (`objectiveNames: const {}`), or a declaration of a method of the same
+    name (`Future<void> deleteTask(String id)`) — each imported a top-level
+    function from another library into a clean file (magic_task_hat 2026-10-10).
+    """
+    for m in re.finditer(rf"\b{re.escape(name)}\b", body):
+        before = body[:m.start()].rstrip()
+        after = body[m.end():].lstrip()
+        if before.endswith((".", "?.")):
+            continue
+        if after.startswith(":") and not after.startswith("::") and before.endswith(("(", ",", "{")):
+            continue
+        if after.startswith(("(", "<")) and re.search(r"(?:[\w?\]]|(?<!=)>)\s*$", body[:m.start()]) and \
+                not re.search(r"\b(return|await|yield|else|in|case|throw|new|const)\s*$", body[:m.start()]):
+            continue
+        return True
+    return False
 
 def fix_dart_imports(project_root: str, files: list[str],
                      index: dict[str, str] | None = None) -> list[str]:
@@ -149,12 +215,14 @@ def fix_dart_imports(project_root: str, files: list[str],
         body = _IMPORT_RE.sub("", body)
 
         local = declared_symbols(src)
-        have = _provided_by_current_imports(src, rel, _pkg_name(project_root), index)
+        have = _provided_by_current_imports(src, rel, _pkg_name(project_root), index, project_root)
         self_uri = index.get(next(iter(local)), None) if local else None
 
         needed: set[str] = set()
         for tok in set(_TOKEN_RE.findall(body)):
             if tok in local or tok in have or tok not in index:
+                continue
+            if tok[0].islower() and (_declared_here(body, tok) or not _referenced(body, tok)):
                 continue
             uri = index[tok]
             if self_uri and uri == self_uri:

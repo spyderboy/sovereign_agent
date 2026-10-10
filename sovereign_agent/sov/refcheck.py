@@ -207,6 +207,72 @@ def mutants(func: ast.AST, limit: int = 14) -> list[tuple[str, ast.AST]]:
     return out
 
 
+
+# ─── Dart mutants (text level: no Dart parser here) ─────────────────────────
+# The AST mutants above are Python-only, so a Dart task reported "0 weak gates"
+# having run none (magic_task_hat 2026-10-10). These are single-point textual
+# mutations on code outside strings, comments and directives, plus the two
+# string kinds a Flutter gate depends on: message keys t('a.b') and Key('x').
+
+def _dart_code_mask(src: str) -> list[bool]:
+    """True where a character is code (not a string, comment, or import/export/part line)."""
+    mask = [True] * len(src)
+    i, n = 0, len(src)
+    while i < n:
+        if src.startswith("//", i):
+            j = src.find("\n", i); j = n if j < 0 else j
+        elif src.startswith("/*", i):
+            j = src.find("*/", i + 2); j = n if j < 0 else j + 2
+        elif src[i] in "'\"":
+            q = src[i] * 3 if src.startswith(src[i] * 3, i) else src[i]
+            j = i + len(q)
+            while j < n and not src.startswith(q, j):
+                j += 2 if src[j] == "\\" else 1
+            j = min(n, j + len(q))
+        elif (i == 0 or src[i - 1] == "\n") and re.match(r"(import|export|part|library)\b", src[i:i + 8]):
+            j = src.find(";", i); j = n if j < 0 else j + 1
+        else:
+            i += 1
+            continue
+        for k in range(i, j):
+            mask[k] = False
+        i = j
+    return mask
+
+
+_DART_OPS = [
+    (re.compile(r" == "), " != "), (re.compile(r" != "), " == "),
+    (re.compile(r" < "), " <= "), (re.compile(r" <= "), " < "), (re.compile(r" > "), " >= "), (re.compile(r" >= "), " > "),
+    (re.compile(r" && "), " || "), (re.compile(r" \|\| "), " && "),
+    (re.compile(r"\.isEmpty\b"), ".isNotEmpty"), (re.compile(r"\.isNotEmpty\b"), ".isEmpty"),
+    (re.compile(r"\btrue\b"), "false"), (re.compile(r"\bfalse\b"), "true"),
+    (re.compile(r"!(?=[\w(])"), ""),
+]
+_DART_STRINGS = [re.compile(r"\bt\('([a-zA-Z]\w*(?:\.\w+)+)'"), re.compile(r"\bKey\('([^'\\]+)'\)")]
+
+
+def dart_mutants(src: str, limit: int = 20) -> list[tuple[str, str]]:
+    """Deterministic single-point textual mutations of a Dart file: (description, mutated source)."""
+    mask = _dart_code_mask(src)
+    line = lambda pos: src.count("\n", 0, pos) + 1
+    sites = []
+    for rx, rep in _DART_OPS:
+        for m in rx.finditer(src):
+            if all(mask[m.start():m.end()]):
+                sites.append((m.start(), f"line {line(m.start())}: {m.group(0).strip() or m.group(0)} → {rep.strip() or 'removed'}",
+                              src[:m.start()] + rep + src[m.end():]))
+    for rx in _DART_STRINGS:
+        for m in rx.finditer(src):
+            if mask[m.start()]:
+                a, b = m.span(1)
+                sites.append((a, f"line {line(a)}: '{m.group(1)}' → '{m.group(1)}X'", src[:b] + "X" + src[b:]))
+    sites.sort(key=lambda s: s[0])
+    if len(sites) > limit:
+        step = len(sites) / limit
+        sites = [sites[int(i * step)] for i in range(limit)]
+    return [(d, s) for _, d, s in sites]
+
+
 def _with_function(src: str, name: str, func: ast.AST) -> str:
     tree = ast.parse(src)
     tree.body = [func if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name else n
@@ -273,6 +339,13 @@ def simulate(root: str, ref_root: str, mutate: bool = True, max_mutants: int = 1
                         if run_gate(gate, work, timeout=mutant_timeout, env=env):
                             res["survivors"].append(f"{name} {desc}")
                     open(path, "w").write(new)
+            if mutate and res["passes_after"] and target.endswith(".dart") and (only is None or only in target):
+                for desc, mut in dart_mutants(new, max_mutants):
+                    open(path, "w").write(mut)
+                    res["mutants"] += 1
+                    if run_gate(gate, work, timeout=max(mutant_timeout, 60), env=env):
+                        res["survivors"].append(desc)
+                open(path, "w").write(new)
             flag = ("" if res["fails_before"] else " GATE PASSES WITHOUT THE CODE") + \
                    ("" if res["passes_after"] else " GATE FAILS ON THE REFERENCE") + \
                    (f" {len(res['survivors'])}/{res['mutants']} mutants survive" if res["survivors"] else "")

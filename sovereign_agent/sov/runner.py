@@ -304,7 +304,10 @@ def run_task(task: str, project_root: str, log_file: str,
     if _target_m:
         forced.append(_target_m.group(1))
 
-    rel_files = list(dict.fromkeys(forced + rel_files))
+    # The gate's own tests stay AHEAD of the always-include files: the trim below drops from the end,
+    # and with a long context_always_include list the test was the file cut, so the monitor saw
+    # workers coding blind against their own gate (magic_task_hat widgets, 2026-10-10).
+    rel_files = list(dict.fromkeys(_gate_tests + forced + rel_files))
 
     # Proactive, size-aware trim (2026-09-09): the reactive PromptTooLargeError
     # path below trims by raw file COUNT (rel_files[:keep]), ignoring actual

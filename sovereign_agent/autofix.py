@@ -273,6 +273,30 @@ def fix_dead_null_aware(file_path: str, line_no: int, col_no: int) -> bool:
     return _write_lines(file_path, lines)
 
 
+_BARE_IMPORT = re.compile(r"""^(\s*)'?([\w./-]+\.dart)'\s*;\s*$""")
+_BARE_IMPORT_RULES = {
+    'missing_function_parameters', 'missing_const_final_var_or_type',
+    'expected_token', 'unterminated_string_literal', 'expected_executable',
+}
+
+
+def fix_bare_import(file_path: str, line_no: int) -> bool:
+    """Restore `import '` on a line that is only a path: `sprint_screen.dart';`.
+
+    A task listing a same-directory import bare (`sprint_screen.dart`, no
+    `../` to mark it as a path) gets it echoed with the keyword dropped, three
+    attempts running, and the analyzer reports five parse errors on that line.
+    """
+    lines = _read_lines(file_path)
+    if not lines or line_no < 1 or line_no > len(lines):
+        return False
+    m = _BARE_IMPORT.match(lines[line_no - 1])
+    if not m:
+        return False
+    lines[line_no - 1] = f"{m.group(1)}import '{m.group(2)}';\n"
+    return _write_lines(file_path, lines)
+
+
 # ── Dispatch table ─────────────────────────────────────────────────────────────
 
 def _dispatch(error: dict, project_root: str) -> bool:
@@ -295,6 +319,9 @@ def _dispatch(error: dict, project_root: str) -> bool:
 
     if rule == 'file_names':
         return fix_file_names(path)
+
+    if rule in _BARE_IMPORT_RULES and fix_bare_import(path, error['line']):
+        return True
 
     if rule == 'dead_null_aware_expression':
         return fix_dead_null_aware(path, error['line'], error['col'])

@@ -78,6 +78,14 @@ def transferable(guard: dict, names: set[str], files: list[str]) -> bool:
     idents = set(re.findall(r"\b[A-Z][A-Za-z0-9]{2,}\b", bare))
     if any(i not in names for i in idents):
         return False
+    # A mined guard keeps the type in its HINT, not its pattern: `\.light\b`
+    # with "TeamPalette has no getter 'light'" seeded into a project with no
+    # TeamPalette and rejected ThemeMode.light there.
+    hint = guard.get("hint", "")
+    subjects = set(re.findall(r"\b([A-Z]\w+) has no\b", hint))
+    subjects |= set(re.findall(r"\bin '([A-Z]\w+)'", hint))
+    if any(t not in names for t in subjects):
+        return False
     try:
         rx = re.compile(pat, re.M)
     except re.error:

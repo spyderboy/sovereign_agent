@@ -95,3 +95,10 @@ def test_transferable_rules(proj):
     assert kickoff.transferable({"pattern": r"\bIssue\([^)]*repo=", "hint": "h"}, names, files)
     assert not kickoff.transferable({"pattern": r"def test", "hint": "h"}, names, files)  # hits tree
     assert not kickoff.transferable({"pattern": "x", "hint": "h", "except_paths": ["a"]}, names, files)
+    # the foreign type sits in the hint of a mined guard, not in its pattern
+    assert not kickoff.transferable(
+        {"pattern": r"\.light\b", "hint": "TeamPalette has no getter 'light'."}, names, files)
+    assert not kickoff.transferable(
+        {"pattern": r"\.EARTH\b", "hint": "There's no constant named 'EARTH' in 'WitchType'."}, names, files)
+    assert kickoff.transferable(
+        {"pattern": r"\.light\b", "hint": "Issue has no getter 'light'."}, names, files)

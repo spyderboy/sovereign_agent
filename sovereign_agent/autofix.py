@@ -227,6 +227,52 @@ def fix_undefined_named_parameter(file_path: str, line_no: int, col_no: int,
     return _write_lines(file_path, lines)
 
 
+_CLOSERS = {')': '(', ']': '[', '}': '{'}
+
+
+def fix_dead_null_aware(file_path: str, line_no: int, col_no: int) -> bool:
+    """Delete `?? <operand>` when the left side can never be null.
+
+    `items: task.checklist ?? []` on a non-nullable field is a warning, and
+    warnings fail the gate. Models write it out of habit whatever the type says,
+    so the same one-token mistake otherwise repeats on every attempt. The
+    analyzer reports the column of the right operand; the operand runs to the
+    first `,` `;` or unmatched closer on that line.
+    """
+    lines = _read_lines(file_path)
+    if not lines or line_no < 1 or line_no > len(lines):
+        return False
+    line = lines[line_no - 1]
+    col = col_no - 1
+    head = line[:col]
+    m = re.search(r'\s*\?\?\s*$', head)
+    if not m:
+        return False
+    depth: list[str] = []
+    end = col
+    while end < len(line):
+        ch = line[end]
+        if ch in '([{':
+            depth.append(ch)
+        elif ch in _CLOSERS:
+            if not depth:
+                break
+            if depth.pop() != _CLOSERS[ch]:
+                return False
+        elif ch in ',;' and not depth:
+            break
+        elif ch == '\n':
+            break
+        end += 1
+    if depth or end == col:
+        return False
+    operand_end = end
+    while operand_end > col and line[operand_end - 1] in ' \t':
+        operand_end -= 1
+    lines[line_no - 1] = line[:m.start()] + line[operand_end:]
+    return _write_lines(file_path, lines)
+
+
 # ── Dispatch table ─────────────────────────────────────────────────────────────
 
 def _dispatch(error: dict, project_root: str) -> bool:
@@ -249,6 +295,9 @@ def _dispatch(error: dict, project_root: str) -> bool:
 
     if rule == 'file_names':
         return fix_file_names(path)
+
+    if rule == 'dead_null_aware_expression':
+        return fix_dead_null_aware(path, error['line'], error['col'])
 
     if rule == 'undefined_named_parameter':
         return fix_undefined_named_parameter(

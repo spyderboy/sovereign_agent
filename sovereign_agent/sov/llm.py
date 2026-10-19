@@ -186,6 +186,16 @@ def _unload_others(model: str, only_large: bool = False) -> list[str]:
     return unloaded
 
 
+class ThinkingTimeout(ReadTimeout):
+    """The wall-clock deadline passed while a reasoning model was still thinking: it streamed reasoning
+    (Ollama's `thinking` field) but not one character of the answer."""
+
+
+# Models that once spent a whole attempt reasoning without answering: they run with thinking off for the
+# rest of this process, so later tasks don't each lose a full timeout to the same thing.
+_NO_THINK_MODELS: set[str] = set()
+
+
 def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
     # Flush VRAM before loading any large model to avoid swap on 32GB Mac.
     # Tier1/2 (7b/16b) stay resident together (~13GB combined) — no flush needed.
@@ -218,7 +228,7 @@ def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
     # stream=True: Ollama writes tokens as they're generated, so the server's
     # 10-minute write-deadline never fires on long tasks.  We reassemble the
     # content from newline-delimited JSON chunks — callers see no difference.
-    def _do_request() -> str:
+    def _do_request(think: bool | None) -> str:
         resp = requests.post(
             f"{endpoint_for(model)}/api/chat",
             json={
@@ -230,15 +240,14 @@ def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
                 "options": {"num_ctx": ctx_limit},
                 "stream": True,
                 "keep_alive": keep_alive,
-                **({"think": _think} if (_think := (state.THINK_OVERRIDE
-                                                     if state.THINK_OVERRIDE is not None
-                                                     else OLLAMA_THINK)) is not None else {}),
+                **({"think": think} if think is not None else {}),
             },
             stream=True,
             timeout=timeout,
         )
         resp.raise_for_status()
         content = []
+        thinking_chars = 0
         done_chunk: dict = {}
         # WALL-CLOCK DEADLINE on the whole stream.
         #
@@ -254,6 +263,10 @@ def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
         for raw_line in resp.iter_lines():
             if time.time() > _deadline:
                 resp.close()
+                if not content and thinking_chars:
+                    raise ThinkingTimeout(
+                        f"generation exceeded {timeout}s of wall clock while the model was still "
+                        f"thinking ({thinking_chars} chars of reasoning, 0 chars of answer)")
                 raise ReadTimeout(
                     f"generation exceeded {timeout}s of wall clock "
                     f"({len(''.join(content))} chars produced) — the model is "
@@ -268,6 +281,7 @@ def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
             delta = chunk.get("message", {}).get("content", "")
             if delta:
                 content.append(delta)
+            thinking_chars += len(chunk.get("message", {}).get("thinking", "") or "")
             if chunk.get("done"):
                 done_chunk = chunk
                 break
@@ -280,12 +294,28 @@ def ollama(model: str, system: str, user: str, timeout: int = 300) -> str:
 
         return "".join(content)
 
+    def _request() -> str:
+        if model in _NO_THINK_MODELS:
+            return _do_request(False)
+        think = state.THINK_OVERRIDE if state.THINK_OVERRIDE is not None else OLLAMA_THINK
+        try:
+            return _do_request(think)
+        except ThinkingTimeout as e:
+            if think is False:
+                raise
+            # Reasoning ate the whole attempt (2026-10-19: qwen3.8:27b reasoned for 15 min, three times,
+            # on screen-edit tasks and never wrote a line). The task text already says exactly what to
+            # write, so answer directly — now, and for the rest of this process.
+            _NO_THINK_MODELS.add(model)
+            print(f"  {DIM}{e} — retrying with thinking off, and keeping {model} on no-think{RESET}")
+            return _do_request(False)
+
     # Only large (tier2+) models serialize across workers — tier1 stays fully
     # parallel. See _large_model_lock() above for why.
     if size_gb >= _LARGE_MODEL_THRESHOLD_GB:
         with _large_model_lock():
-            return _do_request()
-    return _do_request()
+            return _request()
+    return _request()
 
 
 # ─── JSON extraction helper ───────────────────────────────────────────────────

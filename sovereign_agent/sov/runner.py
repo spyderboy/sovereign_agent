@@ -46,6 +46,18 @@ from sov.validation import _park_for_review, snapshot_baseline_errors, validate
 from sov.watchdog import heartbeat
 
 
+
+_EXACT_PAIR = re.compile(r"REPLACE\s+`[^`]+`\s+WITH\s+`", re.S)
+
+
+def _exact_pair_target(task: str, project_root: str) -> str | None:
+    """The existing file a task edits, when the task gives every change as REPLACE `old` WITH `new`."""
+    m = (re.search(r"\bIn `?([\w./-]+\.\w+)`?:", task)
+         or re.search(r"\b[Ii]n `?([\w.-]+(?:/[\w.-]+)+\.\w+)`?", task))
+    if m and _EXACT_PAIR.search(task) and os.path.isfile(os.path.join(project_root, m.group(1))):
+        return m.group(1)
+    return None
+
 def _quick_max_tier_idx(models: list[str], params: dict[str, float], limit_b: float) -> int:
     """Return the exclusive upper bound for --quick mode.
 
@@ -260,8 +272,17 @@ def run_task(task: str, project_root: str, log_file: str,
             })
             return "skipped"
 
-    print(f"  {DIM}Finding relevant files ({PLANNER_MODEL})...{RESET}")
-    rel_files = find_relevant_files(task, project_root)
+    # A task that spells out every change as REPLACE `old` WITH `new` on an existing file needs only that
+    # file: the model copies, it doesn't design. Skipping the planner (a 27B call) and the extra files cut
+    # minutes per task on EstateWise's screen edits, where a full context took the slow Mac 5+ minutes to
+    # read before the first token (2026-10-19).
+    _pairs_only = _exact_pair_target(task, project_root)
+    if _pairs_only:
+        print(f"  {DIM}Exact-pair edit: context is {_pairs_only} only (no planner, no extra files){RESET}")
+        rel_files = []
+    else:
+        print(f"  {DIM}Finding relevant files ({PLANNER_MODEL})...{RESET}")
+        rel_files = find_relevant_files(task, project_root)
     # The test files the gate runs are ALWAYS context: the planner picks by
     # name, and a shared test file (test_jira_v2.py for jira_query_v2.py) was
     # left out, so the worker coded blind against its own gate (2026-10-01).
@@ -361,7 +382,7 @@ def run_task(task: str, project_root: str, log_file: str,
     if len(_kept) < len(rel_files):
         print(f"  {DIM}(pre-trimmed {len(rel_files)} → {len(_kept)} files to fit "
               f"{current_model}'s {_ctx_limit}-token context){RESET}")
-    rel_files = _kept
+    rel_files = [_pairs_only] if _pairs_only else _kept
 
     print(f"  Files: {', '.join(rel_files) or '(none found)'}")
 
@@ -372,7 +393,7 @@ def run_task(task: str, project_root: str, log_file: str,
     # files. The task's own target file (_target_m) stays whole-file, since a
     # task needs full context of what it's creating/editing, not a fragment.
     rag_grouped: dict = {}
-    if state.RAG_ENABLED:
+    if state.RAG_ENABLED and not _pairs_only:
         try:
             import rag_index, rag_retrieve
             rag_index.sync_index(project_root, candidate_files=rel_files)

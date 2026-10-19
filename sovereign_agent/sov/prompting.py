@@ -14,6 +14,7 @@ from sov.config import (
     TIER3_MODEL,
 )
 from sov import state
+from sov.ui import DIM, RESET
 from sov.apistubs import _extract_api_stub
 from sov.deps import _symbol_index, _target_ts_file
 from sov.files import LOCKED_FILES, MARKUP_EXTS, _DIFF_MODE_LINE_THRESHOLD
@@ -112,6 +113,27 @@ def _generic_role_spec(language: str) -> dict:
 
 def _role_spec_for(language: str) -> dict:
     return _ROLE_SPECS.get(language) or _generic_role_spec(language)
+
+
+_REASK = (
+    "\n\nYour previous reply was:\n---\n{reply}\n---\n"
+    "That reply contains no code. You cannot read files, search, or run tools: every file you need is "
+    "already in full above. Reply NOW with ONLY the JSON object that maps each file path to its new "
+    "content (SEARCH/REPLACE blocks where the instructions ask for them). No explanation, no plan."
+)
+
+
+def ask_for_code(model: str, system_prompt: str, user_prompt: str, timeout: int) -> str:
+    """The model's reply, re-asked once when it is prose with no code at all.
+
+    Without reasoning, some models answer an edit task like an agent with tools: "Let me read the test
+    files first…" and stop (qwen3.8:27b on EstateWise's screen edits, 2026-10-19). That isn't a failed
+    attempt at the code, it's no attempt; one firm reminder in the same attempt gets the code."""
+    raw = ollama(model, system_prompt, user_prompt, timeout=timeout)
+    if "{" in raw or not raw.strip():
+        return raw
+    print(f"  {DIM}reply had no code ({raw.strip()[:80]!r}) — asking again for the file{RESET}")
+    return ollama(model, system_prompt, user_prompt + _REASK.format(reply=raw.strip()[:2000]), timeout=timeout)
 
 
 def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
@@ -328,7 +350,7 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
     # (3-4 min to load + 10-12 min to generate a full file).
     size_gb = _model_size_gb(model)
     coding_timeout = CALL_TIMEOUT_S or (1800 if size_gb >= _LARGE_MODEL_THRESHOLD_GB else 600)
-    raw = ollama(model, system_prompt, user_prompt, timeout=coding_timeout)
+    raw = ask_for_code(model, system_prompt, user_prompt, coding_timeout)
     call_info = {"system": system_prompt, "user": user_prompt, "raw": raw}
 
     json_text = _extract_json_candidate(raw)

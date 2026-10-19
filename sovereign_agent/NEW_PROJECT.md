@@ -20,6 +20,21 @@ obligation per task, each ending `task gate: <cmd> passes`), and
 `.sovereign_config.json` (`language`, `validate_commands`, `locked_files`,
 `locked_prefixes`, `context_always_include`).
 
+### Tasks that edit an existing file (2026-10-19)
+
+New files are what local models do well. Edits to an existing file are where they fail: asked to "change
+this screen in six places", the 27B rewrote whole EstateWise screens from memory and invented fields and
+imports, run after run. Three rules:
+
+1. **Keep edits small by design.** Put the real work in a new file (a pure function, a widget, a data
+   helper) with its own test; the edit to the existing file then only swaps a few lines to call it.
+2. **Write every change as an exact pair:** `REPLACE \`current lines\` WITH \`new lines\``, copied from
+   the file (`\n` marks a line break inside a pair; indentation exact), one pair per change, in order.
+   Generate the pairs from a verified reference rather than by hand, and check that applying them in order
+   reproduces it. `check_task_size.py` and preflight flag an edit task written in prose.
+3. **The harness enforces it:** a task on a file that exists on the main branch is always answered with
+   SEARCH/REPLACE blocks, and a whole-file rewrite of that file is refused and sent back.
+
 ## 3. Check the kit
 
 ```bash
@@ -27,11 +42,16 @@ python3 check_task_size.py ~/Code/<project>      # one obligation per task
 python3 api_surface.py ~/Code/<project> --check  # no locked type named without its shape
 python3 preflight.py ~/Code/<project>             # broken done tasks, coverage, order, size
 python3 preflight.py ~/Code/<project> --solve qwen38   # dry-run every open task (Ollama free)
+python3 preflight.py ~/Code/<project> --solve <profile> --edits-only   # dry-run just the edit tasks, on the run's model — before EVERY launch
 python3 <project>/tools/preflight.py             # if the project has one
 ```
 
 Every gate must be satisfiable and every analyze-style gate must pass on the
 clean tree before the first run.
+
+The `--edits-only` dry run takes minutes and answers the question an overnight run otherwise answers at
+3 a.m.: can this model actually make these edits? If a task fails it, rewrite the task (smaller, exact
+pairs), don't reach for a bigger model.
 
 ## 4. Kickoff — before the first sweep
 

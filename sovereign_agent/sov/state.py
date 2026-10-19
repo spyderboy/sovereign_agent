@@ -17,6 +17,9 @@ FINAL_TIER_ENABLED = bool(_CLAUDE_ENABLED_DEFAULT or _ESCALATION_MODEL)
 # Per-attempt thinking override set by the runner (OLLAMA_THINK_RETRIES);
 # None means use OLLAMA_THINK.
 THINK_OVERRIDE: bool | None = None
+# Files the current attempt may only change with SEARCH/REPLACE blocks: an existing file a task edits
+# (set per attempt by implement_task, enforced by write_changes). See prompting._file_on_main.
+REQUIRE_PATCH: set[str] = set()
 
 
 # ─── Parallel-worker isolation (2026-09-28) ───────────────────────────────────

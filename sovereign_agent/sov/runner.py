@@ -407,6 +407,7 @@ def run_task(task: str, project_root: str, log_file: str,
             claude_changes, claude_ok = _escalate_to_claude_chronic(
                 task, file_contents_c, prior_skips, project_root, is_test)
             if claude_changes:
+                state.REQUIRE_PATCH = set()  # escalation writes whole files on purpose
                 written_c, pat_errs_c = write_changes(
                     claude_changes, project_root, test_only=is_test)
                 if not pat_errs_c:
@@ -1129,6 +1130,7 @@ def run_task(task: str, project_root: str, log_file: str,
                     claude_changes, _ = _escalate_to_claude(
                         task, file_contents_claude, errors, project_root, is_test)
                     if claude_changes:
+                        state.REQUIRE_PATCH = set()  # escalation writes whole files on purpose
                         written_c, pat_errs_c = write_changes(
                             claude_changes, project_root, test_only=is_test)
                         if not pat_errs_c:

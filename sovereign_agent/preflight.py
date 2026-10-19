@@ -56,7 +56,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from bench import git, live_runs, only_open, task_text  # noqa: E402
-from check_task_size import oversized  # noqa: E402
+from check_task_size import oversized, prose_edits  # noqa: E402
 from sov.deps import _missing_python_deps  # noqa: E402
 from sov.runctl import broken_done_gates  # noqa: E402
 
@@ -71,7 +71,8 @@ def open_tasks(roadmap: str) -> list[str]:
 
 
 def target_of(line: str) -> str | None:
-    m = re.search(r"\bIn `?([\w./-]+\.\w+)`?:", line)
+    m = (re.search(r"\bIn `?([\w./-]+\.\w+)`?:", line)
+         or re.search(r"\b[Ii]n `?([\w.-]+(?:/[\w.-]+)+\.\w+)`?", line))
     return m.group(1) if m else None
 
 
@@ -164,6 +165,7 @@ def static_checks(root: str) -> dict:
         "done_gates_broken": broken,
         "done_gates_complete": complete,
         "oversized": [f.message for f in oversized(roadmap)],
+        "prose_edits": [f"{f.target}: {f.reasons[0]}" for f in prose_edits(roadmap, root)],
         "coverage": {target_of(l): g for l in tasks if (g := coverage_gaps(l, root, ctx))},
         "order": order_problems(tasks, root),
     }
@@ -192,7 +194,7 @@ def classify(log: str) -> tuple[str, str]:
     return "model", ""
 
 
-def dry_run(root: str, profile: str, timeout: int, log=print) -> list[dict]:
+def dry_run(root: str, profile: str, timeout: int, log=print, edits_only: bool = False) -> list[dict]:
     wd = WORK / os.path.basename(root)
     shutil.rmtree(wd, ignore_errors=True)
     wd.parent.mkdir(parents=True, exist_ok=True)
@@ -216,7 +218,13 @@ def dry_run(root: str, profile: str, timeout: int, log=print) -> list[dict]:
     env = {**isolated_env(str(WORK / f"{os.path.basename(root)}-env")), "SOVEREIGN_PROFILE": profile,
            "FIRESTORE_PROJECT_ID": "", "MAIN_BRANCH": "preflight"}
     results, solved = [], set()
-    for i, line in enumerate(open_tasks(full), 1):
+    tasks = open_tasks(full)
+    if edits_only:
+        # Only the tasks that change an existing file: the kind a model most often gets wrong by rewriting
+        # from memory (EstateWise, 2026-10-19). Minutes to run, and it answers "can this model do the
+        # edits?" before an overnight run finds out.
+        tasks = [l for l in tasks if (t := target_of(l)) and (Path(root) / t).is_file()]
+    for i, line in enumerate(tasks, 1):
         target = target_of(line)
         log(f"[{i}] {target} …")
         (wd / "ROADMAP.md").write_text(only_open((wd / "ROADMAP.md").read_text(), line))
@@ -263,6 +271,7 @@ def report(root: str, st: dict, runs: list[dict] | None, ref: list[dict] | None 
         lines.append("")
     section("Finished tasks failing their gate on main", st["done_gates_broken"])
     section("Oversized tasks", st["oversized"])
+    section("Edit tasks in prose", st["prose_edits"])
     section("Context coverage", [f"{t}: {g}" for t, gs in st["coverage"].items() for g in gs])
     section("Ordering", st["order"])
     if runs is not None:
@@ -292,6 +301,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("project")
     ap.add_argument("--solve", metavar="PROFILE", help="dry-run every open task on this profile")
+    ap.add_argument("--edits-only", action="store_true",
+                    help="with --solve: dry-run only the tasks that edit an existing file (run before every launch)")
     ap.add_argument("--timeout", type=int, default=3600, help="seconds per task in the dry run")
     ap.add_argument("--force", action="store_true", help="dry-run even while a run uses Ollama")
     ap.add_argument("--reference", metavar="DIR", help="check build order and gate strength against a reference solution")
@@ -305,7 +316,7 @@ def main() -> int:
         if live and not a.force:
             print("refusing the dry run: a run is using Ollama (stop it, or pass --force)")
             return 1
-        runs = dry_run(root, a.solve, a.timeout)
+        runs = dry_run(root, a.solve, a.timeout, edits_only=a.edits_only)
     ref = None
     if a.reference:
         from sov.refcheck import simulate
@@ -316,7 +327,7 @@ def main() -> int:
     out.write_text(text + "\n")
     print(text)
     print(f"\n→ {out}")
-    problems = st["done_gates_broken"] or st["oversized"] or st["coverage"] or st["order"] \
+    problems = st["done_gates_broken"] or st["oversized"] or st["prose_edits"] or st["coverage"] or st["order"] \
         or (runs and not all(r["passed"] for r in runs)) \
         or (ref and any(r["fails_before"] is False or r["passes_after"] is False for r in ref))
     return 1 if problems else 0

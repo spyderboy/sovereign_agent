@@ -407,6 +407,19 @@ def write_changes(changes: dict[str, str], project_root: str,
         # (bad-pattern, grounding, destructive-edit) — every one of those
         # operates on real file content and would misfire against raw
         # <<<<<<< SEARCH markers otherwise.
+        # An existing file the task edits may only change through SEARCH/REPLACE (state.REQUIRE_PATCH,
+        # set by implement_task): a whole-file rewrite is how a model rebuilds a screen from memory and
+        # invents its fields (EstateWise, 2026-10-19). Refuse it and say what to send instead.
+        if rel_path in state.REQUIRE_PATCH and not (isinstance(content, str) and _is_search_replace_format(content)):
+            msg = (
+                f"FULL REWRITE REFUSED [{rel_path}]: this file already exists and the task edits it. "
+                f"Return ONLY SEARCH/REPLACE blocks for it — each SEARCH copied exactly from the current "
+                f"file, each REPLACE the new lines — never the whole file. Lines the task doesn't name "
+                f"must stay exactly as they are."
+            )
+            print(f"  {RED}(blocked full rewrite of existing file: {rel_path}){RESET}")
+            pattern_errors.append(msg)
+            continue
         if isinstance(content, str) and _is_search_replace_format(content):
             _full_for_patch = os.path.join(project_root, rel_path)
             if not os.path.exists(_full_for_patch):

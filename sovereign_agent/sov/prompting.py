@@ -14,6 +14,7 @@ from sov.config import (
     TIER3_MODEL,
 )
 from sov import state
+from sov.config import MAIN_BRANCH
 from sov.ui import DIM, RESET
 from sov.apistubs import _extract_api_stub
 from sov.deps import _symbol_index, _target_ts_file
@@ -123,6 +124,17 @@ _REASK = (
 )
 
 
+def _file_on_main(project_root: str, rel_path: str) -> bool:
+    """True when rel_path exists on the main branch: the task edits an existing file rather than
+    creating one (a create task's own earlier attempt doesn't count — it isn't on main)."""
+    import subprocess
+    try:
+        return subprocess.run(["git", "-C", project_root, "cat-file", "-e", f"{MAIN_BRANCH}:{rel_path}"],
+                              capture_output=True, timeout=10).returncode == 0
+    except Exception:
+        return False
+
+
 def ask_for_code(model: str, system_prompt: str, user_prompt: str, timeout: int) -> str:
     """The model's reply, re-asked once when it is prose with no code at all.
 
@@ -222,7 +234,10 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
     # get twenty constructs right simultaneously, and one shot at a time is all
     # the loop was asking for. Naming the file as its own prior work and asking
     # for a minimal delta turns twenty independent coin flips into one.
-    _tgt = re.search(r"\bIn `?([\w./-]+\.\w+)`?:", task)
+    # "In lib/x.dart: ..." — or "Do something in lib/x.dart — ..." (EstateWise's style), which the first
+    # form missed, so its edit tasks never got SEARCH/REPLACE at all (2026-10-19).
+    _tgt = (re.search(r"\bIn `?([\w./-]+\.\w+)`?:", task)
+            or re.search(r"\b[Ii]n `?([\w.-]+(?:/[\w.-]+)+\.\w+)`?", task))
     _target = _tgt.group(1) if _tgt else None
     _has_prior = bool(_target and _target in editable and editable[_target].strip())
     _target_lines = editable[_target].count("\n") + 1 if _has_prior else 0
@@ -230,7 +245,13 @@ def implement_task(task: str, file_contents: dict[str, str], errors: str = "",
     # in a 40-line template came back as a stub from the 14B and timed out
     # twice on the 27B as a full rewrite (xmeasure report.html.j2, 2026-10-03).
     _markup = bool(_target) and os.path.splitext(_target)[1].lower() in MARKUP_EXTS
-    _use_diff_mode = _has_prior and (_target_lines > _DIFF_MODE_LINE_THRESHOLD or _markup)
+    # An EXISTING file (on the main branch, not just this task's own previous attempt) is always edited
+    # with SEARCH/REPLACE, at any size (2026-10-19): asked to "edit this screen in six places", the 27B
+    # rewrote whole EstateWise screens from memory and invented fields and imports every time. Blocks
+    # make it copy the lines it changes; write_changes refuses a whole-file rewrite of such a file.
+    _edits_existing = bool(_target) and _file_on_main(project_root, _target)
+    _use_diff_mode = _has_prior and (_target_lines > _DIFF_MODE_LINE_THRESHOLD or _markup or _edits_existing)
+    state.REQUIRE_PATCH = {_target} if (_use_diff_mode and _edits_existing) else set()
     if errors and _has_prior:
         _return_instr = (
             f"Return SEARCH/REPLACE block(s) for `{_target}` per the format below — "

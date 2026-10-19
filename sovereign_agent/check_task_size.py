@@ -161,6 +161,32 @@ def oversized(roadmap_text: str, include_done: bool = False) -> list[Finding]:
     return out
 
 
+_EDIT_PAIR = re.compile(r"REPLACE\s+`[^`]+`\s+WITH\s+`", re.S)
+# The task's file: "In lib/x.dart:" or "... in lib/x.dart —" (both styles are in use).
+_ANY_TARGET = re.compile(r"\b[Ii]n `?([\w.-]+(?:/[\w.-]+)+\.\w+)`?")
+
+
+def prose_edits(roadmap_text: str, project_root: str) -> list[Finding]:
+    """Open tasks that change an EXISTING file but describe the change in prose.
+
+    "Edit this screen in six places" made the 27B rewrite whole EstateWise screens from memory, inventing
+    fields and imports, attempt after attempt (2026-10-19). An edit task must spell out each change as
+    REPLACE `exact current lines` WITH `new lines` — the harness then makes the model return those as
+    SEARCH/REPLACE blocks, so it copies instead of recalling. New files are unaffected."""
+    out: list[Finding] = []
+    for line in roadmap_text.split("\n"):
+        if not line.startswith("- [ ]"):
+            continue
+        tm = _TARGET.search(line) or _ANY_TARGET.search(line)
+        if not tm or not os.path.isfile(os.path.join(project_root, tm.group(1))):
+            continue
+        if not _EDIT_PAIR.search(line):
+            out.append(Finding(tm.group(1), [
+                "edits an existing file in prose — write every change as REPLACE `exact current "
+                "lines` WITH `new lines` (copied from the file), one pair per change"]))
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("project", nargs="?", default=".")
@@ -173,7 +199,8 @@ def main() -> int:
         print(f"no ROADMAP.md at {path}")
         return 2
 
-    found = oversized(open(path).read(), include_done=args.all)
+    text = open(path).read()
+    found = oversized(text, include_done=args.all) + prose_edits(text, os.path.dirname(path))
     if not args.quiet:
         if not found:
             print("task size: OK — every task carries one obligation")

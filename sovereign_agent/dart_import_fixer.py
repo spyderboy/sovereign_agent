@@ -196,6 +196,36 @@ def _referenced(body: str, name: str) -> bool:
         return True
     return False
 
+_FLUTTER_NAMES: set[str] | None = None
+
+
+def _flutter_names() -> set[str]:
+    """Every public top-level name the Flutter framework declares (Key, State, Image, …), read from the
+    installed SDK's own source once. A project class with the same name — EstateWise's model `Key` — got
+    imported into every widget file that wrote `Key('email')`, and Flutter's Key then clashed with it
+    ('The name Key is defined in the libraries …', 2026-10-19). Empty when no SDK is found."""
+    global _FLUTTER_NAMES
+    if _FLUTTER_NAMES is not None:
+        return _FLUTTER_NAMES
+    names: set[str] = set()
+    try:
+        import shutil
+        flutter = shutil.which("flutter")
+        if flutter:
+            src = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(flutter))),
+                               "packages", "flutter", "lib", "src")
+            for root, _dirs, fs in os.walk(src):
+                for f in fs:
+                    if f.endswith(".dart"):
+                        text = open(os.path.join(root, f), errors="ignore").read()
+                        for pat in _DECL_PATTERNS[:5]:          # classes, enums, mixins, extensions, typedefs
+                            names.update(n for n in pat.findall(text) if not n.startswith("_"))
+    except Exception:
+        names = set()
+    _FLUTTER_NAMES = names
+    return names
+
+
 def fix_dart_imports(project_root: str, files: list[str],
                      index: dict[str, str] | None = None) -> list[str]:
     """Add missing project imports to each generated file. Returns descriptions."""
@@ -218,9 +248,12 @@ def fix_dart_imports(project_root: str, files: list[str],
         have = _provided_by_current_imports(src, rel, _pkg_name(project_root), index, project_root)
         self_uri = index.get(next(iter(local)), None) if local else None
 
+        # A file that imports Flutter already has Flutter's names: never import a same-named project
+        # declaration on top of them.
+        framework = _flutter_names() if re.search(r"^\s*import\s+'package:flutter/", src, re.M) else set()
         needed: set[str] = set()
         for tok in set(_TOKEN_RE.findall(body)):
-            if tok in local or tok in have or tok not in index:
+            if tok in local or tok in have or tok not in index or tok in framework:
                 continue
             if tok[0].islower() and (_declared_here(body, tok) or not _referenced(body, tok)):
                 continue

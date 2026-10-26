@@ -44,6 +44,7 @@ import subprocess
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from sov.offline import no_pub  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 SUITES = HERE / "bench" / "suites"
@@ -253,7 +254,7 @@ def cmd_make(a) -> int:
         kept = []
         for c in cases:
             git(vdir, "checkout", "-q", "-f", c["merge"])
-            r = subprocess.run(["bash", "-lc", c["gate"]], cwd=vdir, capture_output=True,
+            r = subprocess.run(["bash", "-lc", no_pub(c["gate"])], cwd=vdir, capture_output=True,
                                text=True, timeout=600)
             (kept if r.returncode == 0 else skipped).append(
                 c if r.returncode == 0 else (c["merge"][:8], "gate fails at merge"))
@@ -326,7 +327,7 @@ def run_case(case: dict, suite: dict, env: dict, timeout: int, outdir: Path,
     marked = "- [x] " + task_text(case["task_line"]) in (wd / "ROADMAP.md").read_text()
     main = suite.get("main_branch", "main")
     git(wd, "checkout", "-q", "-f", main, check=False)
-    g = subprocess.run(["bash", "-lc", case["gate"]], cwd=wd, capture_output=True,
+    g = subprocess.run(["bash", "-lc", no_pub(case["gate"])], cwd=wd, capture_output=True,
                        text=True, timeout=600)
     vel = {}
     vp = wd / "logs" / "velocity.jsonl"
@@ -407,7 +408,7 @@ def run_case_aider(case: dict, suite: dict, env: dict, timeout: int, outdir: Pat
     changed = [l[3:].strip() for l in git(wd, "status", "--porcelain", check=False).splitlines()]
     prefixes, locked = protected_paths(wd)
     cheated = [c for c in changed if c in locked or any(c.startswith(p) for p in prefixes)]
-    g = subprocess.run(["bash", "-lc", case["gate"]], cwd=wd, capture_output=True,
+    g = subprocess.run(["bash", "-lc", no_pub(case["gate"])], cwd=wd, capture_output=True,
                        text=True, timeout=600)
     shutil.rmtree(wd, ignore_errors=True)
     return {

@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 from sov import state
+from sov.offline import no_pub
 from sov.telemetry import REVIEW_LOG
 
 
@@ -36,7 +37,7 @@ def snapshot_baseline_errors(project_root: str) -> frozenset[str]:
         return frozenset()
     try:
         result = subprocess.run(
-            ["flutter", "analyze", "--no-fatal-infos", "--no-fatal-warnings"],
+            ["flutter", "analyze", "--no-pub", "--no-fatal-infos", "--no-fatal-warnings"],
             capture_output=True, text=True, timeout=120,
             cwd=project_root,
         )
@@ -84,7 +85,7 @@ def validate(
         for shell_cmd in state.PROJECT_VALIDATE_COMMANDS:
             try:
                 result = subprocess.run(
-                    ["bash", "-lc", shell_cmd],
+                    ["bash", "-lc", no_pub(shell_cmd)],
                     capture_output=True, text=True, timeout=300,
                 )
             except subprocess.TimeoutExpired:
@@ -99,7 +100,7 @@ def validate(
         if task_gate:
             try:
                 result = subprocess.run(
-                    ["bash", "-lc", task_gate],
+                    ["bash", "-lc", no_pub(task_gate)],
                     capture_output=True, text=True, timeout=300,
                 )
             except subprocess.TimeoutExpired:
@@ -110,7 +111,7 @@ def validate(
         # ── Same-file regression gates (see roadmap.regression_gates) ────────
         for gate in regression_gates:
             try:
-                result = subprocess.run(["bash", "-lc", gate], capture_output=True, text=True,
+                result = subprocess.run(["bash", "-lc", no_pub(gate)], capture_output=True, text=True,
                                         timeout=300)
             except subprocess.TimeoutExpired:
                 return False, f"$ {gate}\n(regression gate timed out after 300 s)"
@@ -122,7 +123,7 @@ def validate(
         return True, "all project validate_commands + task gate passed"
 
     for cmd, label in [
-        (["flutter", "analyze", "--no-fatal-infos", "--no-fatal-warnings"], "flutter analyze"),
+        (["flutter", "analyze", "--no-pub", "--no-fatal-infos", "--no-fatal-warnings"], "flutter analyze"),
         (["python", "-m", "pytest", "--tb=short", "-q"], "pytest"),
         (["npm",    "test",    "--", "--watchAll=false"], "npm test"),
     ]:

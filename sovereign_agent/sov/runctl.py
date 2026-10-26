@@ -409,6 +409,7 @@ def broken_done_gates(root: str, budget_s: float = 240, per_gate_s: float = 120)
     that imports it — and the worker blamed for it cannot fix it (2026-09-30:
     build_jql and compare_metric, both merged green, broken on main)."""
     import re as _re
+    from sov.offline import no_pub
     try:
         text = open(os.path.join(root, "ROADMAP.md"), errors="ignore").read()
     except OSError:
@@ -423,7 +424,7 @@ def broken_done_gates(root: str, budget_s: float = 240, per_gate_s: float = 120)
         if time.time() - t0 > budget_s:
             return broken, False
         try:
-            r = subprocess.run(["bash", "-c", m.group(1)], cwd=root, capture_output=True,
+            r = subprocess.run(["bash", "-c", no_pub(m.group(1))], cwd=root, capture_output=True,
                                timeout=per_gate_s)
             ok = r.returncode == 0
         except subprocess.TimeoutExpired:

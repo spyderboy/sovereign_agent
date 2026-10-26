@@ -40,6 +40,7 @@ import signal
 import subprocess
 import tempfile
 import time
+from sov.offline import no_pub
 
 
 def _own_names(task: str) -> list[str]:
@@ -80,7 +81,7 @@ def run_gate(gate: str, cwd: str, timeout: int = 180, out: list | None = None, e
     """True when the gate passes. On timeout the whole process group is killed —
     killing only `bash` left a looping pytest running at full CPU. Pass `out`
     (a list) to receive the tail of the gate's output."""
-    p = subprocess.Popen(["bash", "-c", gate], cwd=cwd, stdout=subprocess.PIPE, env=env,
+    p = subprocess.Popen(["bash", "-c", no_pub(gate)], cwd=cwd, stdout=subprocess.PIPE, env=env,
                          stderr=subprocess.STDOUT, start_new_session=True, text=True)
     try:
         text, _ = p.communicate(timeout=timeout)

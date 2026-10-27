@@ -187,11 +187,50 @@ def prose_edits(roadmap_text: str, project_root: str) -> list[Finding]:
     return out
 
 
+# A TASK CAN BE ONE OBLIGATION AND STILL TOO BIG TO WRITE IN ONE GO. EstateWise step 2 (2026-10-26):
+# every count above passed NoteFormScreen, one class, yet its reference file is 181 lines and its task text
+# 4,866 characters. The 27B timed out without a word twice and every later task depended on it; PeopleScreen
+# (105 lines) did the same. Across the step-2 screens, every task whose reference file reached 100 lines, or
+# whose text passed ~2,500 characters, failed at least once; everything under ~90 lines merged first time.
+# This is a WARNING: some long tasks do pass (RelationshipFormScreen, 120 lines). Split the file into a
+# widget per section, or plan to write it by hand.
+MAX_REFERENCE_LINES = 100
+MAX_TASK_CHARS = 2500
+
+
+def too_long(roadmap_text: str, project_root: str, reference_dir: str | None = None) -> list[Finding]:
+    """Open tasks likely too big to write in one model call: a long reference file, or a long task text.
+
+    Exact-pair edits are left out: the harness applies those itself (sov/pairs.py), however long."""
+    out: list[Finding] = []
+    for line in roadmap_text.split("\n"):
+        if not line.startswith("- [ ]") or _EDIT_PAIR.search(line):
+            continue
+        tm = _TARGET.search(line) or _ANY_TARGET.search(line)
+        target = tm.group(1).strip("`") if tm else line[6:60]
+        reasons = []
+        if reference_dir and tm:
+            ref = os.path.join(reference_dir, target)
+            if os.path.isfile(ref):
+                n = sum(1 for _ in open(ref, encoding="utf-8", errors="ignore"))
+                if n >= MAX_REFERENCE_LINES:
+                    reasons.append(f"the reference file is {n} lines (warn at {MAX_REFERENCE_LINES}) — split it "
+                                   f"into smaller widgets or helpers, or plan to write it by hand")
+        body = _GATE.sub("", line[6:])
+        if len(body) >= MAX_TASK_CHARS:
+            reasons.append(f"the task text is {len(body):,} characters (warn at {MAX_TASK_CHARS:,}) — a model "
+                           f"that must hold all of it at once tends to time out without output")
+        if reasons:
+            out.append(Finding(target, reasons))
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("project", nargs="?", default=".")
     ap.add_argument("--all", action="store_true", help="check completed tasks too")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--reference", metavar="DIR", help="a reference solution: warn on tasks whose file there is long")
     args = ap.parse_args()
 
     path = os.path.join(os.path.expanduser(args.project), "ROADMAP.md")
@@ -201,6 +240,15 @@ def main() -> int:
 
     text = open(path).read()
     found = oversized(text, include_done=args.all) + prose_edits(text, os.path.dirname(path))
+    long_tasks = too_long(text, os.path.dirname(path),
+                          os.path.expanduser(args.reference) if args.reference else None)
+    if not args.quiet and long_tasks:
+        print(f"{len(long_tasks)} LONG TASK(S) (warning — may time out without output):\n")
+        for f in long_tasks:
+            print(f"  {f.target}")
+            for r in f.reasons:
+                print(f"      {r}")
+        print()
     if not args.quiet:
         if not found:
             print("task size: OK — every task carries one obligation")

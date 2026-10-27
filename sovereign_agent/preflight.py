@@ -56,7 +56,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from bench import git, live_runs, only_open, task_text  # noqa: E402
-from check_task_size import oversized, prose_edits  # noqa: E402
+from check_task_size import oversized, prose_edits, too_long  # noqa: E402
 from sov.deps import _missing_python_deps  # noqa: E402
 from sov.runctl import broken_done_gates  # noqa: E402
 
@@ -152,7 +152,7 @@ def order_problems(tasks: list[str], root: str) -> list[str]:
     return out
 
 
-def static_checks(root: str) -> dict:
+def static_checks(root: str, reference: str | None = None) -> dict:
     roadmap = open(os.path.join(root, "ROADMAP.md"), errors="ignore").read()
     tasks = open_tasks(roadmap)
     ctx = context_text(root)
@@ -166,6 +166,8 @@ def static_checks(root: str) -> dict:
         "done_gates_complete": complete,
         "oversized": [f.message for f in oversized(roadmap)],
         "prose_edits": [f"{f.target}: {f.reasons[0]}" for f in prose_edits(roadmap, root)],
+        # a warning, not a problem: it never blocks a run (check_task_size.too_long)
+        "long_tasks": [f"{f.target}: " + "; ".join(f.reasons) for f in too_long(roadmap, root, reference)],
         "coverage": {target_of(l): g for l in tasks if (g := coverage_gaps(l, root, ctx))},
         "order": order_problems(tasks, root),
     }
@@ -272,6 +274,7 @@ def report(root: str, st: dict, runs: list[dict] | None, ref: list[dict] | None 
     section("Finished tasks failing their gate on main", st["done_gates_broken"])
     section("Oversized tasks", st["oversized"])
     section("Edit tasks in prose", st["prose_edits"])
+    section("Long tasks (warning — may time out without output)", st.get("long_tasks", []))
     section("Context coverage", [f"{t}: {g}" for t, gs in st["coverage"].items() for g in gs])
     section("Ordering", st["order"])
     if runs is not None:
@@ -309,7 +312,7 @@ def main() -> int:
     ap.add_argument("--no-mutants", action="store_true", help="with --reference: skip the weak-gate mutants")
     a = ap.parse_args()
     root = os.path.realpath(os.path.expanduser(a.project))
-    st = static_checks(root)
+    st = static_checks(root, os.path.realpath(os.path.expanduser(a.reference)) if a.reference else None)
     runs = None
     if a.solve:
         live = live_runs()

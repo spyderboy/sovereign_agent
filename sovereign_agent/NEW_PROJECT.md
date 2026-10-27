@@ -34,6 +34,11 @@ imports, run after run. Three rules:
    reproduces it. `check_task_size.py` and preflight flag an edit task written in prose.
 3. **The harness enforces it:** a task on a file that exists on the main branch is always answered with
    SEARCH/REPLACE blocks, and a whole-file rewrite of that file is refused and sent back.
+4. **The harness applies exact pairs itself (2026-10-27):** when every change is a `REPLACE `old` WITH `new``
+   pair and each old text occurs exactly once, `sov/pairs.py` makes the edit with no model call, then runs
+   the normal validation. A pair that doesn't match, or a failing gate, restores the file and hands the task
+   to the model as before. The model was rewriting whole files instead of copying pairs (EstateWise step 2:
+   nine hours, five tasks, zero merges). Generate pairs from the verified reference so they match.
 
 ## 3. Check the kit
 

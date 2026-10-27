@@ -38,6 +38,7 @@ from sov.files import LOCKED_FILES, backup_files, find_relevant_files, read_file
 from sov.guards import _missing_promised_symbol, _placeholder_body, _unplanned_new_files, apply_error_hints
 from sov.lazytools import _get_advisor, _get_autofix, _get_dart_import_fixer
 from sov.llm import PromptTooLargeError
+from sov.pairs import apply_exact_pairs, pair_target
 from sov.prompting import implement_task
 from sov.roadmap import _extract_task_gate, _is_test_task, regression_gates
 from sov.telemetry import REVIEW_LOG, _append_race, _append_trace, _append_velocity, _extract_error_codes, _ledger, _log_attempt_trace, _log_task_summary
@@ -47,16 +48,11 @@ from sov.watchdog import heartbeat
 
 
 
-_EXACT_PAIR = re.compile(r"REPLACE\s+`[^`]+`\s+WITH\s+`", re.S)
-
-
 def _exact_pair_target(task: str, project_root: str) -> str | None:
-    """The existing file a task edits, when the task gives every change as REPLACE `old` WITH `new`."""
-    m = (re.search(r"\bIn `?([\w./-]+\.\w+)`?:", task)
-         or re.search(r"\b[Ii]n `?([\w.-]+(?:/[\w.-]+)+\.\w+)`?", task))
-    if m and _EXACT_PAIR.search(task) and os.path.isfile(os.path.join(project_root, m.group(1))):
-        return m.group(1)
-    return None
+    """The existing file a task edits, when the task gives every change as REPLACE `old` WITH `new`.
+    Recognises "In `path`:", "Edit path" and "in path" (EstateWise's edit tasks start "Edit lib/…"
+    and were missed by the first two-pattern version, 2026-10-27)."""
+    return pair_target(task, project_root)
 
 def _quick_max_tier_idx(models: list[str], params: dict[str, float], limit_b: float) -> int:
     """Return the exclusive upper bound for --quick mode.
@@ -271,6 +267,39 @@ def run_task(task: str, project_root: str, log_file: str,
                 "error_types": ["missing_dependency"],
             })
             return "skipped"
+
+    # An exact-pair edit is applied by the harness itself, no model: the pairs ARE the answer, and the 27B
+    # rewrote whole files instead of copying them for nine hours (2026-10-26/27, see sov/pairs.py). Only when
+    # every pair matches exactly once and validation passes; otherwise the file is restored and the task
+    # continues to the model below exactly as before.
+    _det = apply_exact_pairs(task, project_root)
+    if _det:
+        _det_path, _det_body = _det
+        _det_baseline = snapshot_baseline_errors(project_root)
+        _det_backup = backup_files([_det_path], project_root)
+        with open(os.path.join(project_root, _det_path), "w", encoding="utf-8") as _f:
+            _f.write(_det_body)
+        print(f"  {DIM}Exact-pair edit: applying the task's REPLACE/WITH pairs to {_det_path} directly...{RESET}",
+              end="", flush=True)
+        _det_ok, _det_out = validate(_det_baseline, files_written=[_det_path],
+                                     task_gate=_extract_task_gate(task),
+                                     regression_gates=regression_gates(task, files=[_det_path]))
+        with open(log_file, "a") as log:
+            log.write(f"\n### Attempt 0 (exact pairs applied by the harness, no model)\n"
+                      f"Files changed: {_det_path}\nValidation: {'PASSED' if _det_ok else 'FAILED'}\n{_det_out}\n")
+        if _det_ok:
+            print(f" {GREEN}✓ passed{RESET}")
+            _append_velocity(project_root, {
+                "date": date.today().isoformat(), "task": task[:120],
+                "outcome": "done", "attempts": 0,
+                "duration_s": round(time.time() - task_start, 1),
+                "error_types": [], "model": "exact-pairs",
+            })
+            _log_task_summary(project_root, task_idx, task, "done", 0, "exact-pairs", task_start)
+            return True
+        restore_files(_det_backup, project_root)
+        print(f" {YELLOW}✗ pairs applied but validation failed — handing the task to the model{RESET}")
+        _ledger(project_root, task_idx, "exact-pairs", "validate_failed", _det_out)
 
     # A task that spells out every change as REPLACE `old` WITH `new` on an existing file needs only that
     # file: the model copies, it doesn't design. Skipping the planner (a 27B call) and the extra files cut
